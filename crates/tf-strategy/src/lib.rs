@@ -5,6 +5,7 @@
 //!
 //! - [`intent`]: what a strategy asks for, and the rules a request must satisfy.
 //! - [`lifecycle`]: the gateway's decisions and the state of an order.
+//! - [`report`]: what a backtest earned, risked and paid, overall and per scenario.
 //! - [`sim`]: a simulated broker (fills against recorded quotes, latency, slippage, borrow cost).
 //! - [`strategy`]: the [`Strategy`] trait, its [`Ctx`] and the [`Host`] that drives it.
 
@@ -12,6 +13,7 @@
 
 pub mod intent;
 pub mod lifecycle;
+pub mod report;
 pub mod sim;
 pub mod strategy;
 
@@ -21,9 +23,12 @@ pub use intent::{
 pub use lifecycle::{
     Decision, LifecycleError, Order, OrderId, OrderState, OrderUpdate, RejectReason,
 };
-pub use sim::{Fill, SimBroker, SimConfig, run_backtest};
+pub use report::{Report, ReportBuilder, Stats};
+pub use sim::{Fill, SimBroker, SimConfig, run_backtest, run_backtest_observed};
 pub use strategy::{Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};
 
+#[cfg(test)]
+mod report_tests;
 #[cfg(test)]
 mod sim_tests;
 #[cfg(test)]

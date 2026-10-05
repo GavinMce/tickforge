@@ -349,9 +349,24 @@ pub fn run_backtest<S: Strategy>(
     broker: &mut SimBroker,
     events: impl IntoIterator<Item = Event>,
 ) -> Vec<Intent> {
+    run_backtest_observed(host, broker, events, |_, _| {})
+}
+
+/// [`run_backtest`], calling `observe(event, new_fills)` for each event with the
+/// fills the broker made while processing it (before the event itself took
+/// effect), so a report can follow the run without a second pass.
+pub fn run_backtest_observed<S: Strategy>(
+    host: &mut Host<S>,
+    broker: &mut SimBroker,
+    events: impl IntoIterator<Item = Event>,
+    mut observe: impl FnMut(&Event, &[Fill]),
+) -> Vec<Intent> {
     let mut all = Vec::new();
+    let mut seen = 0;
     for ev in events {
         broker.on_event(&ev);
+        observe(&ev, &broker.fills()[seen..]);
+        seen = broker.fills().len();
         for u in broker.drain_updates() {
             host.on_order_update(&u);
         }

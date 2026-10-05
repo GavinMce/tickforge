@@ -15,7 +15,6 @@ mod scenarios;
 
 pub use hist::Histogram;
 pub use report::{
-    Delta, P99_FLAG_PERMILLE, Row, THROUGHPUT_FLAG_PERMILLE, compare, from_jsonl, markdown,
-    to_jsonl,
+    Delta, P99_MIN_DELTA_NS, Row, Thresholds, compare, from_jsonl, markdown, to_jsonl,
 };
 pub use scenarios::{Env, Workload, run_all};

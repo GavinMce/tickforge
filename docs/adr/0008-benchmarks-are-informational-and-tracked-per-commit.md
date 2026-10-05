@@ -29,8 +29,23 @@ nothing.
 - A **separate, non-required workflow** runs the benchmark on every PR and every
   push to `main`, uploads the results as an artifact (90 days), and puts the
   table, with deltas against the last successful `main` run, in the job
-  summary. Changes beyond 10% on throughput or 25% on p99 are flagged with `!!`
-  as a prompt to look, not a verdict.
+  summary. A change beyond the thresholds is flagged with `!!` as a prompt to
+  look, not a verdict. The thresholds are an argument: the defaults (10% on
+  throughput, 25% on p99) suit a quiet machine, where repeated runs agree to
+  about 5%; the CI workflow passes 60% and 150%.
+- A p99 rise is flagged only if it is also at least 25 ns: a latency going from
+  1 ns to 2 ns is +100% of timer noise.
+
+## What shared runners actually do
+
+Measured on the first runs of the workflow: the same code gave Tier 0 throughput
+of 24, 25, 27, 31, 47 and 50 million events/s on six runs, and the empty loop
+71 to 159 million. The pool evidently has fast and slow machines, so run-to-run
+variation is about 2x, not the ~5% seen locally. Thresholds of 10% and 25% flagged
+every scenario of a docs-only PR; 60% and 150% sit just beyond the spread seen in
+those six runs. Normalising by the empty-loop floor did not help (Tier 0 is
+memory-bound, the empty loop is not), so CI can only catch changes of roughly
+2.5x or more. Revisit with more data.
 
 ## Consequences
 

@@ -144,6 +144,9 @@ pub struct Delta {
     pub scenario: String,
     pub throughput_permille: i64,
     pub p99_permille: i64,
+    /// The p99 change in nanoseconds (net of the timer). A percentage of a
+    /// near-zero latency means nothing, so a flag also needs this to be real.
+    pub p99_delta_ns: i64,
 }
 
 fn change(old: u64, new: u64) -> i64 {
@@ -162,10 +165,12 @@ pub fn compare(base: &[Row], new: &[Row]) -> Vec<Delta> {
                 .iter()
                 .rev()
                 .find(|b| b.scenario == n.scenario && b.comparable(n))?;
+            let (old_p99, new_p99) = (b.net(b.p99_ns), n.net(n.p99_ns));
             Some(Delta {
                 scenario: n.scenario.clone(),
                 throughput_permille: change(b.events_per_s, n.events_per_s),
-                p99_permille: change(b.net(b.p99_ns), n.net(n.p99_ns)),
+                p99_permille: change(old_p99, new_p99),
+                p99_delta_ns: new_p99 as i64 - old_p99 as i64,
             })
         })
         .collect()
@@ -177,14 +182,42 @@ fn pct(permille: i64) -> String {
     format!("{sign}{}.{}%", a / 10, a % 10)
 }
 
-/// A throughput drop of more than this many permille is flagged.
-pub const THROUGHPUT_FLAG_PERMILLE: i64 = -100;
-/// A p99 rise of more than this many permille is flagged.
-pub const P99_FLAG_PERMILLE: i64 = 250;
+/// A p99 rise is only flagged if it is also at least this many nanoseconds.
+pub const P99_MIN_DELTA_NS: i64 = 25;
+
+/// How big a change has to be before the table flags it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Thresholds {
+    /// Flag a throughput drop of more than this many permille.
+    pub drop_permille: i64,
+    /// Flag a p99 rise of more than this many permille (and [`P99_MIN_DELTA_NS`]).
+    pub rise_permille: i64,
+}
+
+impl Thresholds {
+    /// For a quiet machine, where run-to-run noise is around 5%.
+    pub const LOCAL: Thresholds = Thresholds {
+        drop_permille: 100,
+        rise_permille: 250,
+    };
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Thresholds::LOCAL
+    }
+}
+
+impl Delta {
+    pub fn regressed(&self, t: &Thresholds) -> bool {
+        self.throughput_permille < -t.drop_permille
+            || (self.p99_permille > t.rise_permille && self.p99_delta_ns >= P99_MIN_DELTA_NS)
+    }
+}
 
 /// A markdown table of `new`, with deltas against `base` when there is a
 /// comparable one. Latencies are net of the timer's median cost.
-pub fn markdown(new: &[Row], base: Option<&[Row]>) -> String {
+pub fn markdown(new: &[Row], base: Option<&[Row]>, t: &Thresholds) -> String {
     let mut out = String::new();
     if let Some(r) = new.first() {
         let _ = writeln!(
@@ -208,8 +241,7 @@ pub fn markdown(new: &[Row], base: Option<&[Row]>) -> String {
     for r in new {
         let vs = match deltas.iter().find(|d| d.scenario == r.scenario) {
             Some(d) => {
-                let bad = d.throughput_permille < THROUGHPUT_FLAG_PERMILLE
-                    || d.p99_permille > P99_FLAG_PERMILLE;
+                let bad = d.regressed(t);
                 flagged |= bad;
                 format!(
                     "{} events/s, {} p99{}",
@@ -236,10 +268,11 @@ pub fn markdown(new: &[Row], base: Option<&[Row]>) -> String {
     if flagged {
         let _ = writeln!(
             out,
-            "\n`!!` marks a throughput drop over {}% or a p99 rise over {}% against the baseline. \
-Shared CI runners are noisy: treat it as a reason to look, not a verdict.",
-            -THROUGHPUT_FLAG_PERMILLE / 10,
-            P99_FLAG_PERMILLE / 10
+            "\n`!!` marks a throughput drop over {}% or a p99 rise over {}% (and at least {} ns) \
+against the baseline. It is a prompt to look, not a verdict.",
+            t.drop_permille / 10,
+            t.rise_permille / 10,
+            P99_MIN_DELTA_NS
         );
     }
     out
@@ -307,7 +340,8 @@ mod tests {
             vec![Delta {
                 scenario: "s".into(),
                 throughput_permille: -100,
-                p99_permille: 500
+                p99_permille: 500,
+                p99_delta_ns: 100
             }]
         );
 
@@ -332,21 +366,50 @@ mod tests {
             )
         );
         let base = vec![row("s", 2000, 220)];
-        let bad = markdown(&[row("s", 1000, 220)], Some(&base));
+        let bad = markdown(&[row("s", 1000, 220)], Some(&base), &Thresholds::LOCAL);
         assert!(
-            bad.contains("-50.0% events/s") && bad.contains("!!") && bad.contains("noisy"),
+            bad.contains("-50.0% events/s") && bad.contains("!!") && bad.contains("prompt to look"),
             "{bad}"
         );
-        let fine = markdown(&[row("s", 2000, 220)], Some(&base));
+        let fine = markdown(&[row("s", 2000, 220)], Some(&base), &Thresholds::LOCAL);
         assert!(
             fine.contains("+0.0% events/s") && !fine.contains("!!"),
             "{fine}"
         );
-        let none = markdown(&[row("s", 2000, 220)], None);
+        let none = markdown(&[row("s", 2000, 220)], None, &Thresholds::LOCAL);
         assert!(
             !none.contains("vs baseline |  |") && none.contains("| s | 2000 | 20 | 200 |"),
             "{none}"
         );
-        assert!(markdown(&[row("s", 1, 1)], Some(&[])).contains("no comparable baseline"));
+        assert!(
+            markdown(&[row("s", 1, 1)], Some(&[]), &Thresholds::LOCAL)
+                .contains("no comparable baseline")
+        );
+    }
+
+    #[test]
+    fn thresholds_decide_what_is_flagged_and_tiny_latencies_never_are() {
+        let wide = Thresholds {
+            drop_permille: 600,
+            rise_permille: 1500,
+        };
+        // events/s -30%: flagged on a quiet machine, not under CI-wide thresholds.
+        let base = vec![row("s", 1000, 220)];
+        let new = vec![row("s", 700, 220)];
+        let d = &compare(&base, &new)[0];
+        assert!(d.regressed(&Thresholds::LOCAL) && !d.regressed(&wide));
+        assert!(markdown(&new, Some(&base), &Thresholds::LOCAL).contains("!!"));
+        assert!(!markdown(&new, Some(&base), &wide).contains("!!"));
+
+        // p99 1 ns -> 2 ns is +100% of nothing: timer noise, never a regression.
+        let t = &compare(&[row("s", 1000, 21)], &[row("s", 1000, 22)])[0];
+        assert_eq!((t.p99_permille, t.p99_delta_ns), (1000, 1));
+        assert!(!t.regressed(&Thresholds::LOCAL));
+        // A big change in a real latency is (net 100 ns -> 300 ns).
+        let big = &compare(&[row("s", 1000, 120)], &[row("s", 1000, 320)])[0];
+        assert!(big.regressed(&Thresholds::LOCAL));
+        // A small absolute rise is not, even at a large percentage (net 40 -> 60 ns).
+        let small = &compare(&[row("s", 1000, 60)], &[row("s", 1000, 80)])[0];
+        assert!(small.p99_permille >= 500 && !small.regressed(&Thresholds::LOCAL));
     }
 }

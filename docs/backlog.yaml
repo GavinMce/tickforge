@@ -559,7 +559,8 @@ epics:
       - id: E08-S09
         jira: TIC-110
         title: Example indicator strategy (EMA cross and VWAP reclaim long)
-        status: todo
+        status: done
+        evidence: crates/tf-strategy/src/trend.rs (TrendLong, TrendParams) on MtfBars and the indicator library; `tf backtest --strategy trend`, tf_backtest::trend_backtest; gateway/broker/report agree; 15 trend tests incl. a hand-built cooldown case; 20 mutations caught (six gaps found and closed); found and fixed a bar-identity bug in on_bar when gaps are filled; ADR 0019. Does not distinguish healthy from dangerous pullbacks (shown in a test and in the demo)
         deps: [E07-S09, E07-S10, E08-S08]
         ac:
           - A strategy built on the indicator and bar APIs runs through tf backtest with every threshold in a typed parameter set

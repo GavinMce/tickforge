@@ -186,22 +186,6 @@ impl Series {
     }
 }
 
-/// Which timeframes closed a bar during one call.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ClosedSet(u8);
-
-impl ClosedSet {
-    fn set(&mut self, tf: Timeframe) {
-        self.0 |= 1 << tf.index();
-    }
-    pub fn contains(self, tf: Timeframe) -> bool {
-        self.0 & (1 << tf.index()) != 0
-    }
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
 /// One symbol's bars on every timeframe.
 #[derive(Clone, Copy)]
 pub struct SymbolBars {
@@ -223,10 +207,18 @@ impl SymbolBars {
         }
     }
 
-    pub fn on_trade(&mut self, cfg: &MtfConfig, ts: Nanos, px: Px, size: u32) -> ClosedSet {
+    /// A trade. Every bar this closes (a flat filler included), in order, is appended to
+    /// `out` with its timeframe.
+    pub fn on_trade(
+        &mut self,
+        cfg: &MtfConfig,
+        ts: Nanos,
+        px: Px,
+        size: u32,
+        out: &mut Vec<(Timeframe, TfBar)>,
+    ) {
         let sec = (ts / NANOS_PER_SEC).max(self.now_sec);
         self.now_sec = sec;
-        let mut closed = ClosedSet::default();
         for tf in Timeframe::ALL {
             let start = tf.start_of(sec, cfg);
             let s = &mut self.series[tf.index()];
@@ -234,14 +226,13 @@ impl SymbolBars {
                 Some(ref mut f) if f.start_sec == start => f.add(px, size),
                 Some(f) => {
                     s.push(f);
-                    closed.set(tf);
+                    out.push((tf, f));
                     s.forming = None;
-                    Self::open_new(s, tf, cfg, start, px, size, &mut closed);
+                    Self::open_new(s, tf, cfg, start, px, size, out);
                 }
-                None => Self::open_new(s, tf, cfg, start, px, size, &mut closed),
+                None => Self::open_new(s, tf, cfg, start, px, size, out),
             }
         }
-        closed
     }
 
     fn open_new(
@@ -251,7 +242,7 @@ impl SymbolBars {
         start: u64,
         px: Px,
         size: u32,
-        closed: &mut ClosedSet,
+        out: &mut Vec<(Timeframe, TfBar)>,
     ) {
         if cfg.fill_gaps {
             if let Some(last) = s.latest().copied() {
@@ -263,8 +254,9 @@ impl SymbolBars {
                     at = start - len * BAR_DEPTH as u64;
                 }
                 while at < start && filled < BAR_DEPTH {
-                    s.push(TfBar::flat(at, last.close));
-                    closed.set(tf);
+                    let flat = TfBar::flat(at, last.close);
+                    s.push(flat);
+                    out.push((tf, flat));
                     at += len;
                     filled += 1;
                 }
@@ -274,21 +266,19 @@ impl SymbolBars {
     }
 
     /// Time has reached `ts`: close any forming bar whose interval has ended.
-    pub fn advance_to(&mut self, ts: Nanos) -> ClosedSet {
+    pub fn advance_to(&mut self, ts: Nanos, out: &mut Vec<(Timeframe, TfBar)>) {
         let sec = (ts / NANOS_PER_SEC).max(self.now_sec);
         self.now_sec = sec;
-        let mut closed = ClosedSet::default();
         for tf in Timeframe::ALL {
             let s = &mut self.series[tf.index()];
             if let Some(f) = s.forming {
                 if sec >= f.start_sec + tf.secs() {
                     s.push(f);
                     s.forming = None;
-                    closed.set(tf);
+                    out.push((tf, f));
                 }
             }
         }
-        closed
     }
 
     /// The `i`th most recent closed bar (0 = latest).
@@ -313,11 +303,13 @@ impl SymbolBars {
     }
 }
 
-/// A bar that has just closed.
+/// A bar that has just closed. It carries the bar itself: when a gap is filled, several
+/// bars close at once and the latest one in the series is not the one being reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BarClose {
     pub instrument: InstrumentId,
     pub timeframe: Timeframe,
+    pub bar: TfBar,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,6 +326,8 @@ pub struct MtfBars {
     /// Tracked ids in ascending order, so closes are reported deterministically.
     tracked: Vec<InstrumentId>,
     max: usize,
+    /// Reused between calls so closing bars does not allocate.
+    scratch: Vec<(Timeframe, TfBar)>,
 }
 
 impl MtfBars {
@@ -343,6 +337,7 @@ impl MtfBars {
             slots: (0..id_space).map(|_| None).collect(),
             tracked: Vec::new(),
             max: max_tracked,
+            scratch: Vec::new(),
         }
     }
 
@@ -392,8 +387,13 @@ impl MtfBars {
         self.advance_to(ts, out);
         let id = t.hdr.instrument;
         if let Some(Some(s)) = self.slots.get_mut(id as usize) {
-            let closed = s.on_trade(&self.cfg, ts, t.px, t.size);
-            report(id, closed, out);
+            self.scratch.clear();
+            s.on_trade(&self.cfg, ts, t.px, t.size, &mut self.scratch);
+            out.extend(self.scratch.iter().map(|&(timeframe, bar)| BarClose {
+                instrument: id,
+                timeframe,
+                bar,
+            }));
         }
     }
 
@@ -401,23 +401,14 @@ impl MtfBars {
     pub fn advance_to(&mut self, ts: Nanos, out: &mut Vec<BarClose>) {
         for &id in &self.tracked {
             if let Some(Some(s)) = self.slots.get_mut(id as usize) {
-                let closed = s.advance_to(ts);
-                report(id, closed, out);
+                self.scratch.clear();
+                s.advance_to(ts, &mut self.scratch);
+                out.extend(self.scratch.iter().map(|&(timeframe, bar)| BarClose {
+                    instrument: id,
+                    timeframe,
+                    bar,
+                }));
             }
-        }
-    }
-}
-
-fn report(id: InstrumentId, closed: ClosedSet, out: &mut Vec<BarClose>) {
-    if closed.is_empty() {
-        return;
-    }
-    for tf in Timeframe::ALL {
-        if closed.contains(tf) {
-            out.push(BarClose {
-                instrument: id,
-                timeframe: tf,
-            });
         }
     }
 }
@@ -435,6 +426,37 @@ mod tests {
     use tf_synth::{Scenario, SplitMix64, SymbolSpec, SynthConfig, SynthStream};
 
     const S: Nanos = NANOS_PER_SEC;
+
+    /// Test helpers that return what closed instead of filling a buffer.
+    trait Quick {
+        fn trade(
+            &mut self,
+            cfg: &MtfConfig,
+            ts: Nanos,
+            px: Px,
+            size: u32,
+        ) -> Vec<(Timeframe, TfBar)>;
+        fn advance(&mut self, ts: Nanos) -> Vec<(Timeframe, TfBar)>;
+    }
+
+    impl Quick for SymbolBars {
+        fn trade(
+            &mut self,
+            cfg: &MtfConfig,
+            ts: Nanos,
+            px: Px,
+            size: u32,
+        ) -> Vec<(Timeframe, TfBar)> {
+            let mut out = Vec::new();
+            self.on_trade(cfg, ts, px, size, &mut out);
+            out
+        }
+        fn advance(&mut self, ts: Nanos) -> Vec<(Timeframe, TfBar)> {
+            let mut out = Vec::new();
+            self.advance_to(ts, &mut out);
+            out
+        }
+    }
     /// 2026-01-05 00:00:00 UTC, a Monday; a multiple of a day.
     const DAY0: u64 = 1_767_571_200;
 
@@ -477,11 +499,18 @@ mod tests {
         ];
         let mut closes = Vec::new();
         for (dt, c, size) in trades {
-            let closed = b.on_trade(&cfg, at(t0 + dt), px(c), size);
+            let closed = b.trade(&cfg, at(t0 + dt), px(c), size);
+            for (tf, bar) in &closed {
+                assert_eq!(
+                    b.closed(*tf, 0),
+                    Some(bar),
+                    "a reported close is the bar now in the series"
+                );
+            }
             closes.push((
                 dt,
-                closed.contains(Timeframe::M1),
-                closed.contains(Timeframe::M5),
+                closed.iter().any(|c| c.0 == Timeframe::M1),
+                closed.iter().any(|c| c.0 == Timeframe::M5),
             ));
         }
         // The minute closes when the first trade of the next one arrives (dt 60 and dt 160).
@@ -543,8 +572,8 @@ mod tests {
     fn vwap_rounds_down() {
         let mut b = SymbolBars::new();
         let cfg = MtfConfig::default();
-        b.on_trade(&cfg, at(DAY0), px(1000), 1);
-        b.on_trade(&cfg, at(DAY0 + 1), px(1001), 2);
+        b.trade(&cfg, at(DAY0), px(1000), 1);
+        b.trade(&cfg, at(DAY0 + 1), px(1001), 2);
         // (10.00 x 1 + 10.01 x 2) / 3 = 10.006666666...
         assert_eq!(
             b.forming(Timeframe::M1).unwrap().vwap(),
@@ -559,7 +588,7 @@ mod tests {
             fill_gaps: false,
         };
         let mut b = SymbolBars::new();
-        b.on_trade(&cfg, at(DAY0 + 15 * 3600 + 7 * 60 + 13), px(1000), 1);
+        b.trade(&cfg, at(DAY0 + 15 * 3600 + 7 * 60 + 13), px(1000), 1);
         assert_eq!(
             b.forming(Timeframe::M1).unwrap().start_sec,
             DAY0 + 15 * 3600 + 7 * 60
@@ -582,13 +611,13 @@ mod tests {
         );
         // Before the open, the trade belongs to the previous day's bar.
         let mut c = SymbolBars::new();
-        c.on_trade(&cfg, at(DAY0 + 9 * 3600), px(1000), 1);
+        c.trade(&cfg, at(DAY0 + 9 * 3600), px(1000), 1);
         assert_eq!(
             c.forming(Timeframe::Day).unwrap().start_sec,
             DAY0 - 86_400 + 14 * 3600 + 30 * 60
         );
         // At the open exactly, a new one.
-        c.on_trade(&cfg, at(DAY0 + 14 * 3600 + 30 * 60), px(1000), 1);
+        c.trade(&cfg, at(DAY0 + 14 * 3600 + 30 * 60), px(1000), 1);
         assert_eq!(c.closed_total(Timeframe::Day), 1);
     }
 
@@ -597,16 +626,16 @@ mod tests {
         let cfg = MtfConfig::default();
         let mut b = SymbolBars::new();
         let t0 = DAY0 + 600;
-        b.on_trade(&cfg, at(t0 + 5), px(1000), 10);
-        assert!(b.advance_to(at(t0 + 59)).is_empty());
-        let c = b.advance_to(at(t0 + 60));
-        assert!(c.contains(Timeframe::M1) && !c.contains(Timeframe::M5));
-        assert!(b.advance_to(at(t0 + 61)).is_empty(), "already closed");
+        b.trade(&cfg, at(t0 + 5), px(1000), 10);
+        assert!(b.advance(at(t0 + 59)).is_empty());
+        let c = b.advance(at(t0 + 60));
+        assert!(c.iter().any(|x| x.0 == Timeframe::M1) && !c.iter().any(|x| x.0 == Timeframe::M5));
+        assert!(b.advance(at(t0 + 61)).is_empty(), "already closed");
         assert_eq!(b.closed_total(Timeframe::M1), 1);
         assert!(b.forming(Timeframe::M1).is_none());
         // 600 s later the 5-minute and 15-minute... the 5 minute bar [t0-0.., +300) closed at 300.
-        let c = b.advance_to(at(t0 + 600));
-        assert!(c.contains(Timeframe::M5));
+        let c = b.advance(at(t0 + 600));
+        assert!(c.iter().any(|x| x.0 == Timeframe::M5));
     }
 
     #[test]
@@ -618,8 +647,8 @@ mod tests {
                 fill_gaps: fill,
             };
             let mut b = SymbolBars::new();
-            b.on_trade(&cfg, at(t0 + 10), px(1000), 10);
-            b.on_trade(&cfg, at(t0 + 4 * 60 + 20), px(1050), 20); // minutes 1, 2, 3 had no trades
+            b.trade(&cfg, at(t0 + 10), px(1000), 10);
+            b.trade(&cfg, at(t0 + 4 * 60 + 20), px(1050), 20); // minutes 1, 2, 3 had no trades
             b
         };
         let skip = run(false);
@@ -650,8 +679,8 @@ mod tests {
             fill_gaps: true,
         };
         let mut b = SymbolBars::new();
-        b.on_trade(&cfg, at(t0), px(1000), 1);
-        b.on_trade(&cfg, at(t0 + 100 * 3600), px(1000), 1);
+        b.trade(&cfg, at(t0), px(1000), 1);
+        b.trade(&cfg, at(t0 + 100 * 3600), px(1000), 1);
         assert_eq!(b.closed_len(Timeframe::M1), BAR_DEPTH);
         assert_eq!(
             b.closed(Timeframe::M1, 0).unwrap().start_sec,
@@ -660,12 +689,47 @@ mod tests {
     }
 
     #[test]
+    fn closes_carry_their_own_bar_even_when_a_gap_is_filled() {
+        let mut m = MtfBars::new(
+            MtfConfig {
+                day_open_offset_secs: 0,
+                fill_gaps: true,
+            },
+            1,
+            1,
+        );
+        m.track(0).unwrap();
+        let mut out = Vec::new();
+        let t0 = DAY0 + 600;
+        m.on_event(&trade_ev(0, at(t0 + 10), 1000, 5), &mut out);
+        m.on_event(&trade_ev(0, at(t0 + 4 * 60 + 5), 1050, 7), &mut out);
+        let m1: Vec<&BarClose> = out
+            .iter()
+            .filter(|c| c.timeframe == Timeframe::M1)
+            .collect();
+        // The real bar first, then three flat fillers; each close reports its own bar.
+        assert_eq!(m1.len(), 4);
+        assert_eq!((m1[0].bar.volume, m1[0].bar.start_sec), (5, t0));
+        for (k, c) in m1[1..].iter().enumerate() {
+            assert_eq!(
+                (c.bar.start_sec, c.bar.volume, c.bar.close),
+                (t0 + 60 * (k as u64 + 1), 0, px(1000))
+            );
+        }
+        // The newest closed bar in the series is the last filler, not the real bar.
+        assert_eq!(
+            m.symbol(0).unwrap().closed(Timeframe::M1, 0),
+            Some(&m1[3].bar)
+        );
+    }
+
+    #[test]
     fn a_late_trade_counts_in_the_current_interval() {
         let cfg = MtfConfig::default();
         let mut b = SymbolBars::new();
         let t0 = DAY0 + 600;
-        b.on_trade(&cfg, at(t0 + 70), px(1000), 10);
-        let closed = b.on_trade(&cfg, at(t0 + 5), px(1100), 10); // stale
+        b.trade(&cfg, at(t0 + 70), px(1000), 10);
+        let closed = b.trade(&cfg, at(t0 + 5), px(1100), 10); // stale
         assert!(closed.is_empty());
         let f = b.forming(Timeframe::M1).unwrap();
         assert_eq!(
@@ -833,9 +897,9 @@ mod tests {
                         1 + (rng.next_u64() % 300) as u32,
                     );
                     trades.push((sec, cents, size));
-                    b.on_trade(&cfg, at(sec), px(cents), size);
+                    b.trade(&cfg, at(sec), px(cents), size);
                 }
-                b.advance_to(at(sec + 3 * 86_400));
+                b.advance(at(sec + 3 * 86_400));
                 for tf in Timeframe::ALL {
                     let want = reference(&trades, tf, off, fill);
                     let keep = want.len().min(BAR_DEPTH);
@@ -866,7 +930,7 @@ mod tests {
         let mut sec = DAY0;
         for _ in 0..3000 {
             sec += rng.next_u64() % 8;
-            b.on_trade(
+            b.trade(
                 &cfg,
                 at(sec),
                 px(100 + (rng.next_u64() % 500) as i64),

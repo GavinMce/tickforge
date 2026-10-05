@@ -28,8 +28,8 @@ use tf_core::{Event, NANOS_PER_SEC, Nanos};
 use tf_risk::{Audit, GapRule, Gateway, Limits, reason_name};
 use tf_strategy::report::{Report, ReportBuilder, ReportError};
 use tf_strategy::{
-    Decision, Host, IntentId, MomentumLong, MomentumParams, OrderId, OrderState, OrderUpdate,
-    SimBroker, SimConfig, Strategy, StrategyId,
+    Decision, Host, IntentId, MomentumLong, MomentumParams, MtfBars, MtfConfig, OrderId,
+    OrderState, OrderUpdate, SimBroker, SimConfig, Strategy, StrategyId, TrendLong, TrendParams,
 };
 use tf_synth::{PullbackKind, Scenario, SymbolSpec, SynthConfig, SynthStream};
 
@@ -40,6 +40,7 @@ pub struct BacktestConfig {
     pub sim: SimConfig,
     pub limits: Limits,
     pub params: MomentumParams,
+    pub trend: TrendParams,
 }
 
 /// Limits for demonstration runs: $5,000 an order, 5,000 shares a name, $20,000
@@ -67,6 +68,7 @@ impl Default for BacktestConfig {
             },
             limits: default_limits(),
             params: MomentumParams::default(),
+            trend: TrendParams::default(),
         }
     }
 }
@@ -282,6 +284,32 @@ pub fn momentum_backtest(
     .map_err(|e| format!("{e:?}"))
 }
 
+/// The example indicator strategy ([`TrendLong`]) over `events`, with one-minute bars
+/// built for the symbols it follows, gated by the configured limits. Its indicators need
+/// several minutes to warm up, so sessions for it should be long and start quiet (see
+/// [`demo_session_with_lead`]).
+pub fn trend_backtest(
+    events: impl IntoIterator<Item = Event>,
+    labels: Vec<String>,
+    cfg: &BacktestConfig,
+) -> Result<BacktestResult, String> {
+    let n = labels.len();
+    let strat = TrendLong::new(StrategyId(2), cfg.trend, n).map_err(|e| e.0.to_owned())?;
+    let bars = MtfBars::new(MtfConfig::default(), n, cfg.trend.max_tracked as usize);
+    let mut host = Host::new(strat, n).with_bars(bars);
+    let mut broker = SimBroker::new(cfg.sim, n);
+    let mut gateway = Gateway::new(cfg.limits, n);
+    run_gated(
+        &mut host,
+        &mut broker,
+        &mut gateway,
+        labels,
+        events,
+        |_, _| {},
+    )
+    .map_err(|e| format!("{e:?}"))
+}
+
 /// A synthetic session: `healthy` and `dangerous` runners (staggered lead-ins so
 /// they do not move in lockstep) and `quiet` symbols. Returns the events and the
 /// label of each instrument (`healthy`, `dangerous`, `quiet`).
@@ -292,7 +320,20 @@ pub fn demo_session(
     dangerous: u32,
     quiet: u32,
 ) -> (Vec<Event>, Vec<String>) {
-    let lead = |i: usize| (20 + 7 * i as u64) * NANOS_PER_SEC;
+    demo_session_with_lead(seed, secs, healthy, dangerous, quiet, 20)
+}
+
+/// [`demo_session`] with the first runner's quiet lead-in set to `base_lead_secs`
+/// (each later one starts 7 s after the one before).
+pub fn demo_session_with_lead(
+    seed: u64,
+    secs: u64,
+    healthy: u32,
+    dangerous: u32,
+    quiet: u32,
+    base_lead_secs: u64,
+) -> (Vec<Event>, Vec<String>) {
+    let lead = |i: usize| (base_lead_secs + 7 * i as u64) * NANOS_PER_SEC;
     let mut specs: Vec<(&str, u32, Option<PullbackKind>)> = Vec::new();
     specs.extend((0..healthy).map(|k| ("healthy", k, Some(PullbackKind::Healthy))));
     specs.extend((0..dangerous).map(|k| ("dangerous", k, Some(PullbackKind::Dangerous))));

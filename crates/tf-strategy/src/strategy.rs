@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tf_core::{Event, InstrumentId, Nanos};
 use tf_engine::{
-    BarClose, MtfBars, RollingBars, SymbolBars, SymbolState, Tier0, Timeframe, TrackError,
+    BarClose, MtfBars, RollingBars, SymbolBars, SymbolState, TfBar, Tier0, Timeframe, TrackError,
 };
 
 use crate::intent::{
@@ -206,8 +206,16 @@ pub trait Strategy: Send {
 
     /// A multi-timeframe bar has just closed for a tracked instrument. Called before
     /// [`Strategy::on_event`] for the trade (or the passing of time) that closed it,
-    /// in time order; the closed bar is `ctx.bars(id)?.closed(timeframe, 0)`.
-    fn on_bar(&mut self, _ctx: &mut Ctx<'_>, _instrument: InstrumentId, _timeframe: Timeframe) {}
+    /// in time order, with the bar that closed. (When a gap is filled several bars close at
+    /// once, so `ctx.bars(id)?.closed(timeframe, 0)` may be a later one than the bar given.)
+    fn on_bar(
+        &mut self,
+        _ctx: &mut Ctx<'_>,
+        _instrument: InstrumentId,
+        _timeframe: Timeframe,
+        _bar: &TfBar,
+    ) {
+    }
 
     /// What became of one of its intents.
     fn on_order_update(&mut self, _ctx: &mut Ctx<'_>, _update: &OrderUpdate) {}
@@ -321,7 +329,9 @@ impl<S: Strategy> Host<S> {
         }
         let closes = std::mem::take(&mut self.closes);
         for c in &closes {
-            self.call(now, |s, ctx| s.on_bar(ctx, c.instrument, c.timeframe));
+            self.call(now, |s, ctx| {
+                s.on_bar(ctx, c.instrument, c.timeframe, &c.bar)
+            });
         }
         self.closes = closes;
         self.closes.clear();

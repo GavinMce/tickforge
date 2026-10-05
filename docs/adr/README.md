@@ -35,3 +35,4 @@ How:
 | [0016](0016-the-backtest-loop-puts-the-gateway-between-strategy-and-broker.md) | The backtest loop puts the gateway between the strategy and the broker | Accepted |
 | [0017](0017-multi-timeframe-bars-are-built-live-for-a-bounded-set.md) | Multi-timeframe bars are built live for a bounded set of symbols | Accepted |
 | [0018](0018-indicators-are-small-copy-integer-types-checked-against-exact-references.md) | Indicators are small, Copy, integer types checked against exact references | Accepted |
+| [0019](0019-the-example-indicator-strategy-and-what-it-shows.md) | The example indicator strategy, and what it shows | Accepted |

@@ -19,9 +19,7 @@ pub use ewma::{Ewma, EwmaVar};
 pub use indicators::{
     Atr, Ema, Extremes, OpeningRange, RateOfChange, RollingVwap, Rsi, Seed, Sma, Vwap,
 };
-pub use mtf::{
-    BAR_DEPTH, BarClose, ClosedSet, MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe, TrackError,
-};
+pub use mtf::{BAR_DEPTH, BarClose, MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe, TrackError};
 pub use tier0::{Level, SymbolState, Tier0};
 pub use tier1::{
     BAR_SECS, PromoteError, PullbackFeatures, QUOTE_RING, Quote1, TICK_RING, Tick, Tier1,

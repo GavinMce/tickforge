@@ -220,7 +220,8 @@ epics:
       - id: E03-S05
         jira: TIC-36
         title: Throughput and tail-latency benchmark harness
-        status: todo
+        status: done
+        evidence: crates/tf-bench/ and `tf bench` (four scenarios, two-pass timing, JSON-lines results with --compare); .github/workflows/bench.yml uploads results per commit and diffs against main; docs/adr/0008
         ac:
           - Benchmarks events/s and per-event p50/p99/p99.9 through the run loop with a realistic sink
           - Results tracked per commit so regressions are visible

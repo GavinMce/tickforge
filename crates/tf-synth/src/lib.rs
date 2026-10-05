@@ -13,7 +13,7 @@ mod scenario;
 mod stream;
 mod symbol_gen;
 
-pub use config::{DEFAULT_SESSION_START, SymbolSpec, SynthConfig};
+pub use config::{Article, DEFAULT_SESSION_START, NewsSpec, Sentiment, SymbolSpec, SynthConfig};
 pub use provider::{Account, Faults, SynthOptions, SynthProvider};
 pub use rng::SplitMix64;
 pub use scenario::{Phase, PullbackKind, Scenario};

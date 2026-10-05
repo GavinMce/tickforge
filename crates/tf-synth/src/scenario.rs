@@ -46,6 +46,9 @@ pub enum PullbackKind {
 pub struct Scenario {
     pub name: &'static str,
     pub phases: Vec<Phase>,
+    /// When the move starts, as an offset from the session start: the
+    /// reference point news is scheduled against.
+    pub catalyst: Nanos,
     /// Emit `ShortSaleRestriction` the first time the price trades 10% or more
     /// below its starting price (the prior close), as the SSR rule does.
     pub ssr: bool,
@@ -108,6 +111,7 @@ impl Scenario {
     pub fn quiet() -> Self {
         Scenario {
             name: "quiet",
+            catalyst: 0,
             phases: vec![quiet_phase("quiet", FOREVER)],
             ssr: false,
         }
@@ -184,6 +188,7 @@ impl Scenario {
                 PullbackKind::Healthy => "runner_healthy_pullback",
                 PullbackKind::Dangerous => "runner_dangerous_pullback",
             },
+            catalyst: lead_in,
             phases,
             ssr: false,
         }
@@ -196,6 +201,7 @@ impl Scenario {
         let s = NANOS_PER_SEC;
         Scenario {
             name: "halt_up",
+            catalyst: lead_in,
             phases: vec![
                 quiet_phase("lead_in", lead_in),
                 active("spike", 15 * s, 10_000, 750, 2, 4000),
@@ -221,6 +227,7 @@ impl Scenario {
         };
         Scenario {
             name: "luld",
+            catalyst: lead_in,
             phases: vec![
                 banded(quiet_phase("lead_in", lead_in)),
                 banded(active("push", 40 * s, 12_000, 800, 3, 4000)),
@@ -239,6 +246,7 @@ impl Scenario {
         let s = NANOS_PER_SEC;
         Scenario {
             name: "ssr",
+            catalyst: lead_in,
             phases: vec![
                 quiet_phase("lead_in", lead_in),
                 Phase {
@@ -258,6 +266,7 @@ impl Scenario {
         let s = NANOS_PER_SEC;
         Scenario {
             name: "squeeze",
+            catalyst: lead_in,
             phases: vec![
                 quiet_phase("lead_in", lead_in),
                 active("ramp", 25 * s, 12_000, 800, 3, 4000),
@@ -283,6 +292,7 @@ impl Scenario {
         let s = NANOS_PER_SEC;
         Scenario {
             name: "gap_and_go",
+            catalyst: 0,
             phases: vec![
                 Phase {
                     gap_permille,
@@ -310,6 +320,7 @@ impl Scenario {
         phases.push(quiet_phase("after", FOREVER));
         Scenario {
             name: "multi_spike",
+            catalyst: lead_in,
             phases,
             ssr: false,
         }

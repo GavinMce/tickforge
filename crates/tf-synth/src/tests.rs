@@ -1,9 +1,9 @@
-use tf_core::{Event, Fnv1a64, NANOS_PER_SEC, Nanos, Status, StatusKind, Trade};
+use tf_core::{Event, Fnv1a64, NANOS_PER_SEC, Nanos, News, Status, StatusKind, Trade};
 use tf_provider::{Channels, Poll, Provider, ProviderError, Subscription};
 
 use crate::{
-    Account, DEFAULT_SESSION_START, Faults, PullbackKind, Scenario, SymbolSpec, SynthConfig,
-    SynthOptions, SynthProvider, SynthStream,
+    Account, DEFAULT_SESSION_START, Faults, NewsSpec, PullbackKind, Scenario, Sentiment,
+    SymbolSpec, SynthConfig, SynthOptions, SynthProvider, SynthStream,
 };
 
 fn hash_events(evs: impl IntoIterator<Item = Event>) -> (u64, u64) {
@@ -41,6 +41,7 @@ fn single(scenario: Scenario, base_px_cents: i64, secs: u64) -> SynthConfig {
             base_interval_ns: NANOS_PER_SEC,
             quote_every: 2,
             scenario,
+            news: Vec::new(),
         }],
     }
 }
@@ -742,4 +743,193 @@ fn golden_stream_hash_multi_spike() {
         &single(Scenario::multi_spike(3, 20 * NANOS_PER_SEC), 500, 520),
         (2094, 0x74bf_a259_3313_bce9),
     );
+}
+
+// ---- synthetic news ----
+
+const SEC: i64 = NANOS_PER_SEC as i64;
+
+/// A healthy runner (catalyst at +20 s) with scripted news about it.
+fn with_news(seed: u64, news: &[(i64, Sentiment)], secs: u64) -> SynthConfig {
+    let mut cfg = single(
+        Scenario::runner(PullbackKind::Healthy, 20 * NANOS_PER_SEC),
+        500,
+        secs,
+    );
+    cfg.seed = seed;
+    cfg.symbols[0].news = news
+        .iter()
+        .map(|&(offset_ns, sentiment)| NewsSpec {
+            offset_ns,
+            sentiment,
+        })
+        .collect();
+    cfg
+}
+
+fn news_of(evs: &[Event]) -> Vec<News> {
+    evs.iter()
+        .filter_map(|e| match e {
+            Event::News(n) => Some(*n),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn news_can_lead_the_move() {
+    let cfg = with_news(1, &[(-10 * SEC, Sentiment::Positive)], 120);
+    let t0 = cfg.session_start;
+    let evs = collect(&cfg);
+
+    let news = news_of(&evs);
+    assert_eq!(news.len(), 1);
+    let n = news[0];
+    assert_eq!(
+        n.hdr.ts_event,
+        t0 + 10 * NANOS_PER_SEC,
+        "published 10 s before the catalyst"
+    );
+    let delay = n.hdr.ts_recv - n.hdr.ts_event;
+    assert!(
+        (50_000_000..1_500_000_000).contains(&delay),
+        "arrival delay {delay} ns"
+    );
+
+    // The article is in hand before the volume arrives.
+    let first_hot = trades(&evs)
+        .into_iter()
+        .find(|t| t.hdr.ts_event >= t0 + 20 * NANOS_PER_SEC)
+        .unwrap();
+    assert!(n.hdr.ts_recv < first_hot.hdr.ts_recv);
+}
+
+#[test]
+fn news_can_lag_the_move() {
+    let cfg = with_news(1, &[(15 * SEC, Sentiment::Negative)], 120);
+    let t0 = cfg.session_start;
+    let evs = collect(&cfg);
+
+    let n = news_of(&evs)[0];
+    assert_eq!(
+        n.hdr.ts_event,
+        t0 + 35 * NANOS_PER_SEC,
+        "published 15 s after the catalyst"
+    );
+    // By then the volume spike is already under way.
+    let quiet = shares_per_s(&evs, t0, 0, 20);
+    let hot = shares_per_s(&evs, t0, 20, 35);
+    assert!(hot > 10.0 * quiet, "quiet {quiet:.0}/s vs hot {hot:.0}/s");
+}
+
+#[test]
+fn news_before_the_session_is_clamped_and_news_after_it_is_dropped() {
+    let cfg = with_news(
+        1,
+        &[
+            (-600 * SEC, Sentiment::Neutral),
+            (600 * SEC, Sentiment::Neutral),
+        ],
+        60,
+    );
+    let news = news_of(&collect(&cfg));
+    assert_eq!(
+        news.len(),
+        1,
+        "the article past the end of the session is dropped"
+    );
+    assert_eq!(news[0].hdr.ts_event, cfg.session_start);
+}
+
+#[test]
+fn news_is_deterministic_under_the_seed() {
+    let plan = [
+        (-10 * SEC, Sentiment::Positive),
+        (15 * SEC, Sentiment::Negative),
+    ];
+    let a = with_news(7, &plan, 120);
+    let b = with_news(7, &plan, 120);
+    let c = with_news(8, &plan, 120);
+    assert_eq!(collect(&a), collect(&b));
+    assert_eq!(a.articles(), b.articles());
+
+    // A different seed changes the ids, arrival delays and the price path.
+    let (ia, ic): (Vec<u64>, Vec<u64>) = (
+        a.articles().iter().map(|x| x.article_id).collect(),
+        c.articles().iter().map(|x| x.article_id).collect(),
+    );
+    assert_ne!(ia, ic);
+    assert_ne!(hash_events(collect(&a)).1, hash_events(collect(&c)).1);
+}
+
+#[test]
+fn articles_match_their_news_events() {
+    let cfg = with_news(
+        3,
+        &[
+            (-10 * SEC, Sentiment::Positive),
+            (15 * SEC, Sentiment::Negative),
+        ],
+        120,
+    );
+    let events = news_of(&collect(&cfg));
+    let articles = cfg.articles();
+    assert_eq!(events.len(), 2);
+    assert_eq!(articles.len(), 2);
+    for (n, a) in events.iter().zip(&articles) {
+        assert_eq!(n.article_id, a.article_id);
+        assert_eq!(n.hdr.instrument, a.instrument);
+        assert_eq!(n.hdr.ts_event, a.published);
+        assert!(a.headline.starts_with("RUN "), "headline {:?}", a.headline);
+    }
+    assert_eq!(articles[0].sentiment, Sentiment::Positive);
+    assert_eq!(articles[1].sentiment, Sentiment::Negative);
+    assert_ne!(articles[0].article_id, articles[1].article_id);
+}
+
+#[test]
+fn news_merges_into_an_arrival_ordered_stream_with_dense_seq() {
+    let cfg = with_news(
+        5,
+        &[
+            (-10 * SEC, Sentiment::Positive),
+            (15 * SEC, Sentiment::Negative),
+        ],
+        120,
+    );
+    let evs = collect(&cfg);
+    assert_eq!(news_of(&evs).len(), 2);
+    for (i, w) in evs.windows(2).enumerate() {
+        assert!(
+            w[0].ts_recv() <= w[1].ts_recv(),
+            "ts_recv went backwards at {i}"
+        );
+    }
+    for (i, ev) in evs.iter().enumerate() {
+        assert_eq!(ev.seq(), i as u64);
+    }
+}
+
+#[test]
+fn symbols_without_news_are_unaffected() {
+    let cfg = with_news(1, &[], 120);
+    let plain = single(
+        Scenario::runner(PullbackKind::Healthy, 20 * NANOS_PER_SEC),
+        500,
+        120,
+    );
+    assert_eq!(collect(&cfg), collect(&plain));
+}
+
+#[test]
+fn golden_stream_hash_news() {
+    let cfg = with_news(
+        1,
+        &[
+            (-10 * SEC, Sentiment::Positive),
+            (15 * SEC, Sentiment::Negative),
+        ],
+        300,
+    );
+    assert_golden(&cfg, (1914, 0xd436_c125_5014_92ce));
 }

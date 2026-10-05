@@ -910,3 +910,13 @@ epics:
         ac:
           - The explorer loads a stored run by manifest hash and shows which rule set and version produced each trade
           - Two runs or rule sets can be compared: trades that appear, vanish or change
+      - id: E16-S03
+        jira: TIC-115
+        title: "Stored-run browser (`tf runs`: list, filter, and open by row)"
+        status: done
+        evidence: crates/tf-cli/src/runs.rs; `tf runs --store DIR` lists runs numbered with strategy, seed, session size, scenario mix, rules (built-in or fingerprint), git revision, trades and net P&L; filters, stable sort, `--check` replays each to say ok / drifted / needs --rules / cannot rebuild / n/a, `--open ROW [ROW]` opens or compares by row number; typed Refusal in explore.rs; 25 mutations caught (2 survivors found and closed); unparseable files are counted and skipped. Reads files only, no new storage
+        deps: [E16-S02]
+        ac:
+          - Runs in a store are listed with what a person picks by, and can be filtered and sorted
+          - Whether the current code still reproduces each run can be checked from the list
+          - A run, or a pair of runs, opens from the list without copying hashes

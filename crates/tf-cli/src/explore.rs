@@ -20,7 +20,42 @@ use super::{
 
 pub(crate) const DOLLAR: u64 = 1_000_000_000;
 
-struct Replay {
+/// Why a stored run was not opened. The kind says what a person can do about it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// This kind of run cannot be opened at all.
+    Unsupported(String),
+    /// It used entry rules whose file was not given.
+    NeedsRules(String),
+    /// The replay does not match the stored result: the code's behaviour has changed.
+    Drift(String),
+    /// The run cannot be rebuilt exactly from its manifest.
+    Rebuild(String),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Refusal::Unsupported(m)
+        | Refusal::NeedsRules(m)
+        | Refusal::Drift(m)
+        | Refusal::Rebuild(m)) = self;
+        f.write_str(m)
+    }
+}
+
+impl From<String> for Refusal {
+    fn from(m: String) -> Refusal {
+        Refusal::Rebuild(m)
+    }
+}
+
+impl From<&str> for Refusal {
+    fn from(m: &str) -> Refusal {
+        Refusal::Rebuild(m.to_owned())
+    }
+}
+
+pub(crate) struct Replay {
     json: String,
     trades: Vec<tf_backtest::export::RoundTrip>,
     declines: Vec<tf_strategy::Decline>,
@@ -88,18 +123,23 @@ fn whole(raw: u64, unit: u64, what: &str) -> Result<u64, String> {
 pub(crate) fn args_from_manifest(
     m: &Manifest,
     rules_files: &[String],
-) -> Result<BacktestArgs, String> {
+) -> Result<BacktestArgs, Refusal> {
     if m.kind() != "backtest" {
-        return Err(format!("this is a `{}` run, not a backtest", m.kind()));
+        return Err(Refusal::Unsupported(format!(
+            "this is a `{}` run, not a backtest",
+            m.kind()
+        )));
     }
     let strategy = m.config().get("strategy").map_or("", String::as_str);
     if strategy != "momentum" {
-        return Err(format!(
+        return Err(Refusal::Unsupported(format!(
             "only momentum runs can be opened (this one is `{strategy}`)"
-        ));
+        )));
     }
     if m.config().get("ab").map(String::as_str) != Some("0") {
-        return Err("A/B runs (with --propose) cannot be opened in the explorer".to_owned());
+        return Err(Refusal::Unsupported(
+            "A/B runs (with --propose) cannot be opened in the explorer".to_owned(),
+        ));
     }
     let mut a = parse_backtest(&[])?;
     a.seed = m.seed();
@@ -137,7 +177,9 @@ pub(crate) fn args_from_manifest(
             }
         }
         a.rules = Some(hit.ok_or_else(|| {
-            format!("this run used the entry rules {id}; give the file with --rules")
+            Refusal::NeedsRules(format!(
+                "this run used the entry rules {id}; give the file with --rules"
+            ))
         })?);
     }
     Ok(a)
@@ -161,7 +203,7 @@ fn diff_maps(
         .map(|k| format!("{what} `{k}` is in the rebuilt run but not the stored one"))
 }
 
-fn replay(stored: &RunResult, rules_files: &[String]) -> Result<Replay, String> {
+pub(crate) fn replay(stored: &RunResult, rules_files: &[String]) -> Result<Replay, Refusal> {
     let m = stored.manifest();
     let a = args_from_manifest(m, rules_files)?;
     let cfg = backtest_config(&a)?;
@@ -177,14 +219,14 @@ fn replay(stored: &RunResult, rules_files: &[String]) -> Result<Replay, String> 
     // The rebuilt setup must be the stored one, key by key, or the replay is of something else.
     let rebuilt = backtest_manifest(&a, &cfg, t0)?;
     if rebuilt.data() != m.data() {
-        return Err(
-            "the rebuilt session covers a different data range than the stored one".to_owned(),
-        );
+        return Err("the rebuilt session covers a different data range than the stored one".into());
     }
     if let Some(d) = diff_maps("config", m.config(), rebuilt.config())
         .or_else(|| diff_maps("parameter", m.params(), rebuilt.params()))
     {
-        return Err(format!("cannot rebuild this run exactly: {d}"));
+        return Err(Refusal::Rebuild(format!(
+            "cannot rebuild this run exactly: {d}"
+        )));
     }
     let mut hash = HashSink::new();
     for ev in &events {
@@ -194,28 +236,28 @@ fn replay(stored: &RunResult, rules_files: &[String]) -> Result<Replay, String> 
         tf_backtest::momentum_backtest_traced(events.iter().copied(), labels.clone(), &cfg)?;
     let event_hash = hash.finish();
     if stored.events != events.len() as u64 || stored.event_hash != event_hash {
-        return Err(format!(
+        return Err(Refusal::Drift(format!(
             "the replayed tape differs from the stored run ({} events, hash {:016x}; stored {} events, hash {:016x})",
             events.len(),
             event_hash,
             stored.events,
             stored.event_hash
-        ));
+        )));
     }
     let metrics: BTreeMap<String, i64> = momentum_metrics(&traced.result).into_iter().collect();
     for (k, v) in stored.metrics() {
         if metrics.get(k) != Some(v) {
-            return Err(format!(
+            return Err(Refusal::Drift(format!(
                 "the replay does not reproduce the stored result: `{k}` was {v}, now {:?} (the code has changed behaviour since this run was stored at {})",
                 metrics.get(k),
                 m.git_sha()
-            ));
+            )));
         }
     }
     if let Some(k) = metrics.keys().find(|k| !stored.metrics().contains_key(*k)) {
-        return Err(format!(
+        return Err(Refusal::Drift(format!(
             "the replay has a metric `{k}` the stored run does not"
-        ));
+        )));
     }
     let rules = cfg
         .rules
@@ -272,14 +314,22 @@ pub(crate) fn explore(args: &[String]) -> Result<(), String> {
         );
     }
     let out = out.unwrap_or_else(|| "explorer.html".to_owned());
+    let mut stored = Vec::new();
+    for h in &hashes {
+        stored.push(load_run(Path::new(&store), h)?);
+    }
+    open_runs(&stored, &rules, &out)
+}
+
+/// Replay one stored run, or two of one session, and write the explorer page for them.
+pub(crate) fn open_runs(stored: &[RunResult], rules: &[String], out: &str) -> Result<(), String> {
     let mut runs = Vec::new();
-    for (k, h) in hashes.iter().enumerate() {
-        let stored = load_run(Path::new(&store), h)?;
-        let r = replay(&stored, &rules).map_err(|e| format!("run {}: {e}", h))?;
+    for (k, s) in stored.iter().enumerate() {
+        let r = replay(s, rules).map_err(|e| format!("run {}: {e}", &s.key().hex()[..12]))?;
         println!(
             "run {}  {}  rules {}  reproduced: {}",
             if k == 0 { "A" } else { "B" },
-            &stored.key().hex()[..12],
+            &s.key().hex()[..12],
             &r.rules_id[..8],
             r.what
         );
@@ -303,13 +353,13 @@ pub(crate) fn explore(args: &[String]) -> Result<(), String> {
     };
     let jsons: Vec<String> = runs.into_iter().map(|r| r.json).collect();
     let html = page(&bundle(&jsons, cmp.as_deref()));
-    std::fs::write(&out, &html).map_err(|e| format!("{out}: {e}"))?;
+    std::fs::write(out, &html).map_err(|e| format!("{out}: {e}"))?;
     println!("wrote    {out} ({} bytes)", html.len());
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn strs(a: &[&str]) -> Vec<String> {
@@ -317,7 +367,7 @@ mod tests {
     }
 
     /// What `tf backtest --store` would keep for these flags.
-    fn stored(flags: &[&str]) -> RunResult {
+    pub(crate) fn stored(flags: &[&str]) -> RunResult {
         let a = parse_backtest(&strs(flags)).unwrap();
         let cfg = backtest_config(&a).unwrap();
         let (events, labels) = tf_backtest::demo_session_with_lead(
@@ -412,7 +462,9 @@ mod tests {
     #[test]
     fn only_single_momentum_runs_open_and_the_reason_is_given() {
         let trend = stored(&["--strategy", "trend", "--secs", "1800"]);
-        let e = args_from_manifest(trend.manifest(), &[]).unwrap_err();
+        let e = args_from_manifest(trend.manifest(), &[])
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("only momentum runs"), "{e}");
         // A/B runs record `ab 1`.
         let ab = {
@@ -429,12 +481,18 @@ mod tests {
             .with_config("ab", "1")
             .unwrap()
         };
-        assert!(args_from_manifest(&ab, &[]).unwrap_err().contains("A/B"));
+        assert!(
+            args_from_manifest(&ab, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("A/B")
+        );
         let synth =
             Manifest::new("x", "synth", 1, stored(&FLAGS).manifest().data().clone()).unwrap();
         assert!(
             args_from_manifest(&synth, &[])
                 .unwrap_err()
+                .to_string()
                 .contains("not a backtest")
         );
     }
@@ -454,9 +512,13 @@ mod tests {
         let mut flags = FLAGS.to_vec();
         flags.extend(["--rules", pa]);
         let r = stored(&flags);
-        let none = args_from_manifest(r.manifest(), &[]).unwrap_err();
+        let none = args_from_manifest(r.manifest(), &[])
+            .unwrap_err()
+            .to_string();
         assert!(none.contains("give the file with --rules"), "{none}");
-        let wrong = args_from_manifest(r.manifest(), &[pb.to_owned()]).unwrap_err();
+        let wrong = args_from_manifest(r.manifest(), &[pb.to_owned()])
+            .unwrap_err()
+            .to_string();
         assert!(
             wrong.contains("give the file with --rules"),
             "a different file does not satisfy it: {wrong}"
@@ -492,7 +554,7 @@ mod tests {
             for (k, val) in old.params() {
                 m = m.with_param(k, val).unwrap();
             }
-            let e = args_from_manifest(&m, &[]).unwrap_err();
+            let e = args_from_manifest(&m, &[]).unwrap_err().to_string();
             assert!(e.contains(why) && e.contains("not a whole number"), "{e}");
         }
     }
@@ -516,7 +578,10 @@ mod tests {
             }
             t
         };
-        let e = replay(&tampered, &[]).err().expect("must refuse");
+        let e = replay(&tampered, &[])
+            .err()
+            .expect("must refuse")
+            .to_string();
         assert!(
             e.contains("`pnl_net`") && e.contains("does not reproduce"),
             "{e}"
@@ -527,6 +592,7 @@ mod tests {
             replay(&wrong_tape, &[])
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("replayed tape differs")
         );
         // A metric the stored run never had.
@@ -534,7 +600,13 @@ mod tests {
         for (k, v) in r.metrics().iter().filter(|(k, _)| k.as_str() != "shares") {
             fewer = fewer.with_metric(k, *v).unwrap();
         }
-        assert!(replay(&fewer, &[]).err().unwrap().contains("`shares`"));
+        assert!(
+            replay(&fewer, &[])
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("`shares`")
+        );
         // A manifest whose setup the rebuild cannot match (an extra, unknown config key).
         let extra = RunResult::new(
             r.manifest().clone().with_config("mystery", "1").unwrap(),
@@ -545,6 +617,7 @@ mod tests {
             replay(&extra, &[])
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("cannot rebuild this run exactly")
         );
     }
@@ -559,10 +632,16 @@ mod tests {
         assert_eq!(load_run(&dir, &hex).unwrap(), r);
         assert_eq!(load_run(&dir, &hex[..8]).unwrap(), r);
         assert_eq!(load_run(&dir, &hex[..8].to_uppercase()).unwrap(), r);
-        assert!(load_run(&dir, &hex[..7]).unwrap_err().contains("8 or more"));
+        assert!(
+            load_run(&dir, &hex[..7])
+                .unwrap_err()
+                .to_string()
+                .contains("8 or more")
+        );
         assert!(
             load_run(&dir, "zzzzzzzzzz")
                 .unwrap_err()
+                .to_string()
                 .contains("not a manifest hash")
         );
         let missing = format!("{}{}", &hex[..2], "0".repeat(10));
@@ -574,6 +653,7 @@ mod tests {
         assert!(
             load_run(&dir, &missing)
                 .unwrap_err()
+                .to_string()
                 .contains("no stored run")
         );
         // A second run whose hash shares the first eight digits would be ambiguous: make the
@@ -581,7 +661,12 @@ mod tests {
         let p = store.path_for(r.manifest());
         let sibling = p.with_file_name(format!("{}{}.tfrs", &hex[..8], "0".repeat(56)));
         std::fs::copy(&p, &sibling).unwrap();
-        assert!(load_run(&dir, &hex[..8]).unwrap_err().contains("matches 2"));
+        assert!(
+            load_run(&dir, &hex[..8])
+                .unwrap_err()
+                .to_string()
+                .contains("matches 2")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -14,12 +14,19 @@
 //! `ParamChange` event, recorded in [`AbResult::tape`] so the tuned side can be
 //! replayed exactly.
 //!
+//! An optional [`RevertPolicy`] watches the two equities. When the tuned side has fallen
+//! the configured amount behind its own best showing against the shadow, the loop asks
+//! the store for the events that return every changed parameter to baseline
+//! ([`ParamStore::revert_events`]), applies and records them like any other change, and
+//! tuning is locked out for the store's lockout. Positions already open keep the
+//! parameters they were entered with (ADR 0020); the revert governs new entries.
+//!
 //! Comparison figures are tuned minus shadow, in the same units as the reports.
 
 use std::collections::BTreeMap;
 
 use tf_core::{Event, Nanos};
-use tf_params::{Applied, ParamStore, Proposal, Reject};
+use tf_params::{Applied, ParamStore, Proposal, Reject, RevertPolicy, Trip};
 use tf_risk::Gateway;
 use tf_strategy::report::ReportError;
 use tf_strategy::{Host, MomentumLong, SimBroker, Strategy, StrategyId, tunable_specs};
@@ -40,6 +47,20 @@ pub struct Refused {
     pub at: Nanos,
     pub proposal: Proposal,
     pub why: Reject,
+}
+
+/// The reason code on revert events written by the auto-revert policy.
+pub const REASON_AUTO_REVERT: u16 = 9001;
+
+/// An auto-revert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Revert {
+    /// The event that tripped it.
+    pub at: Nanos,
+    pub trip: Trip,
+    /// How many parameters (global values and overrides) were returned to baseline.
+    /// Always at least one: a trip with nothing tuned is not recorded.
+    pub parameters: usize,
 }
 
 /// Both sides' equity (realised plus marked profit and loss) after an event.
@@ -73,6 +94,8 @@ pub struct AbResult {
     /// Changes applied to the tuned side, in order.
     pub changes: Vec<Applied>,
     pub refused: Vec<Refused>,
+    /// Times the auto-revert policy tripped.
+    pub reverts: Vec<Revert>,
     /// The tuned side's input as a tape would hold it: every market event, with the
     /// parameter-change events at the places they took effect. Replaying it on a fresh
     /// tuned side reproduces `tuned` exactly.
@@ -146,6 +169,11 @@ impl AbResult {
         }
         m.push(("params.applied".into(), self.changes.len() as i64));
         m.push(("params.refused".into(), self.refused.len() as i64));
+        m.push(("params.reverts".into(), self.reverts.len() as i64));
+        m.push((
+            "params.reverted".into(),
+            self.reverts.iter().map(|r| r.parameters).sum::<usize>() as i64,
+        ));
         m.push(("params.errors".into(), self.param_errors as i64));
         m
     }
@@ -167,6 +195,7 @@ pub fn run_ab<S: Strategy>(
     labels: Vec<String>,
     events: impl IntoIterator<Item = Event>,
     proposals: &[Scheduled],
+    mut policy: Option<RevertPolicy>,
     mut observe: impl FnMut(&Snapshot),
 ) -> Result<AbResult, ReportError> {
     let mut a = Loop::new(tuned.host, tuned.broker, tuned.gateway, labels.clone())?;
@@ -174,7 +203,7 @@ pub fn run_ab<S: Strategy>(
     let mut due: Vec<Scheduled> = proposals.to_vec();
     due.sort_by_key(|p| p.at);
     let mut due = due.into_iter().peekable();
-    let (mut tape, mut refused) = (Vec::new(), Vec::new());
+    let (mut tape, mut refused, mut reverts) = (Vec::new(), Vec::new(), Vec::new());
     for ev in events {
         let ts = ev.ts_recv();
         while let Some(p) = due.next_if(|p| p.at <= ts) {
@@ -200,11 +229,36 @@ pub fn run_ab<S: Strategy>(
         a.step(&ev);
         b.step(&ev);
         tape.push(ev);
-        observe(&Snapshot {
+        let snap = Snapshot {
             ts,
             tuned: a.equity(),
             shadow: b.equity(),
-        });
+        };
+        observe(&snap);
+        if let Some(trip) = policy
+            .as_mut()
+            .and_then(|p| p.observe(snap.tuned, snap.shadow))
+        {
+            let evidence = u64::try_from(trip.drawdown).unwrap_or(u64::MAX);
+            let events = a.host.params().map_or_else(Vec::new, |s| {
+                s.revert_events(ts, REASON_AUTO_REVERT, evidence)
+            });
+            // A trip with nothing tuned is not a revert: the shadow is simply ahead, and
+            // there is nothing to take away. (The policy has re-armed itself either way.)
+            if events.is_empty() {
+                continue;
+            }
+            for change in &events {
+                let e = Event::ParamChange(*change);
+                a.step(&e);
+                tape.push(e);
+            }
+            reverts.push(Revert {
+                at: ts,
+                trip,
+                parameters: events.len(),
+            });
+        }
     }
     let changes = a
         .host
@@ -218,22 +272,49 @@ pub fn run_ab<S: Strategy>(
         shadow,
         changes,
         refused,
+        reverts,
         tape,
         param_errors,
     })
 }
 
-/// Strategy 1 (long side) tuned through a store of its [`tunable_specs`] against the
-/// same strategy with `cfg.params` fixed, each with its own simulator and gateway built
-/// from `cfg`, over `events`.
+/// What the safety policy does in [`momentum_ab_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RevertConfig {
+    /// Trip when the tuned side is this far (raw price units) behind its best showing
+    /// against the shadow.
+    pub max_drawdown: u128,
+    /// After a revert, refuse all tuning for this long.
+    pub lockout: Nanos,
+}
+
+/// [`momentum_ab_with`] without a safety policy.
 pub fn momentum_ab(
     events: impl IntoIterator<Item = Event>,
     labels: Vec<String>,
     cfg: &BacktestConfig,
     proposals: &[Scheduled],
 ) -> Result<AbResult, String> {
+    momentum_ab_with(events, labels, cfg, proposals, None)
+}
+
+/// Strategy 1 (long side) tuned through a store of its [`tunable_specs`] against the
+/// same strategy with `cfg.params` fixed, each with its own simulator and gateway built
+/// from `cfg`, over `events`, with an optional auto-revert policy on the tuned side.
+pub fn momentum_ab_with(
+    events: impl IntoIterator<Item = Event>,
+    labels: Vec<String>,
+    cfg: &BacktestConfig,
+    proposals: &[Scheduled],
+    revert: Option<RevertConfig>,
+) -> Result<AbResult, String> {
     let n = labels.len();
-    let store = ParamStore::new(tunable_specs(&cfg.params)).map_err(|e| format!("{e:?}"))?;
+    let mut store = ParamStore::new(tunable_specs(&cfg.params)).map_err(|e| format!("{e:?}"))?;
+    let mut policy = None;
+    if let Some(r) = revert {
+        store = store.with_lockout(r.lockout);
+        policy = Some(RevertPolicy::new(r.max_drawdown).map_err(|e| format!("{e:?}"))?);
+    }
     let strategy = || MomentumLong::new(StrategyId(1), cfg.params, n).map_err(|e| e.0.to_owned());
     let mut tuned_host = Host::new(strategy()?, n).with_params(store);
     let mut shadow_host = Host::new(strategy()?, n);
@@ -253,6 +334,7 @@ pub fn momentum_ab(
         labels,
         events,
         proposals,
+        policy,
         |_| {},
     )
     .map_err(|e| format!("{e:?}"))

@@ -728,7 +728,8 @@ epics:
       - id: E12-S03
         jira: TIC-88
         title: Auto-revert policy
-        status: todo
+        status: done
+        evidence: tf-params RevertPolicy (drawdown of tuned-minus-shadow equity), ParamStore::revert_events / PROPOSER_POLICY / lockout; wired into tf_backtest::ab::run_ab and `tf backtest --revert-drawdown`; reverts replay exactly from the tape; 8 new store/policy tests and 5 A/B tests; 22 mutations caught (one filter gap found and closed); ADR 0022
         deps: [E12-S02]
         ac:
           - Reverts to baseline parameters on a configured drawdown versus the shadow

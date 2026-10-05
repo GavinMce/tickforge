@@ -1,4 +1,5 @@
 mod explore;
+mod runs;
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -87,6 +88,22 @@ USAGE:
 
     HASH              a manifest hash, or a prefix of 8 or more digits
     --out FILE        where to write the page (default explorer.html)
+
+    tf runs --store DIR [--kind K] [--strategy S] [--seed N] [--rules-id PREFIX] [--git PREFIX]
+            [--sort hash|net|trades|seed] [--desc] [--check] [--rules FILE]...
+            [--open ROW [ROW]] [--out FILE.html]
+
+    List the runs kept by `tf backtest --store DIR`, numbered, with what a person picks by:
+    short hash, strategy, seed, session size, the mix of scenarios, the entry rules (built-in
+    or a fingerprint), the git revision they were stored at, trades and net P&L.
+
+    --kind, --strategy, --seed, --rules-id, --git   keep only matching runs
+    --sort KEY        order by hash (default), net, trades or seed; --desc reverses
+    --check           add a column saying whether the current code still reproduces each
+                      stored run (ok, drifted, needs --rules, cannot rebuild, n/a); this
+                      replays every run, so it takes as long as running them
+    --open ROW [ROW]  open that row of the list in the explorer, or compare two rows
+                      (same rules as `tf explore`: pass --rules FILE for custom rules)
 
     tf bench [--symbols N] [--secs N] [--seed N] [--runs N] [--out FILE]
              [--compare FILE] [--commit SHA] [--flag-drop PCT] [--flag-rise PCT]
@@ -889,6 +906,7 @@ fn main() -> ExitCode {
         Some("bench") => bench(&args[1..]),
         Some("backtest") => backtest(&args[1..]),
         Some("explore") => explore::explore(&args[1..]),
+        Some("runs") => runs::runs(&args[1..]),
         Some("help" | "--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())

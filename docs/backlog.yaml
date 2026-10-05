@@ -91,7 +91,8 @@ epics:
       - id: E01-S08
         jira: TIC-23
         title: ADR process and contributor docs
-        status: todo
+        status: done
+        evidence: docs/adr/ (template, index, ADRs 0001-0004); README workflow section
         ac:
           - docs/adr/ with a template and the first ADRs (language, no Redis on hot path, determinism rules)
           - README workflow section matches how Jira keys are used in branches and commits

@@ -3,9 +3,12 @@
 //! Per symbol: `Idle -> Watching -> Entering -> Holding -> Exiting -> Cooldown ->
 //! Idle` (DESIGN.md). The short side (dangerous pullbacks) is a separate story.
 //!
-//! - **Scan** (`Idle`): Tier 0's rolling window shows a price spike with volume,
-//!   inside the price and spread filters. The symbol is promoted to the strategy's
-//!   own [`Tier1`], so history starts as the spike does.
+//! - **Scan** (`Idle`): the host's [`Promoter`](tf_engine::Promoter) has promoted the symbol
+//!   to Tier 1 (its volume is far above its own baseline), and Tier 0's rolling window
+//!   shows the strategy's own price spike with volume, inside the price and spread filters.
+//!   Tier 1 membership, history and demotion belong to the promoter (shared by every
+//!   strategy, bounded, identical in replay); the strategy pins the symbols it is engaged
+//!   with so they are not demoted under it. Build the host with [`MomentumLong::host`].
 //! - **Watch**: once a second, read the pullback features. Skip the symbol for now
 //!   if the impulse is too small. Once the pullback is old enough, enter if it is
 //!   *healthy* (shallow, drying volume, not too far below the high, enough higher
@@ -29,13 +32,13 @@
 //! at most once per second per symbol.
 
 use tf_core::{Event, InstrumentId, NANOS_PER_SEC, Nanos, Px};
-use tf_engine::{PromoteError, PullbackFeatures, Quote1, Tier1};
+use tf_engine::{Promoter, PromoterConfig, PullbackFeatures, Quote1, ScannerConfig};
 use tf_params::{ParamId, ParamSpec, Scope};
 
 use crate::intent::{IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif};
 use crate::lifecycle::OrderUpdate;
 use crate::rules::{Evaluation, RuleSet};
-use crate::strategy::{Ctx, Request, Strategy, TimerId};
+use crate::strategy::{Ctx, Host, Request, Strategy, TimerId};
 
 /// Reasons recorded on intents, for the audit trail.
 pub mod reason {
@@ -399,14 +402,21 @@ pub struct MomentumStats {
     pub rejected_dangerous: u64,
     pub rejected_too_old: u64,
     pub entries_failed: u64,
+    /// Promoted symbols that showed the spike but were not taken up because the strategy was
+    /// already engaged with `max_watched` symbols (counted once per symbol per promotion).
     pub promotions_refused: u64,
+    /// Trade events seen while the host had no promoter: the strategy cannot work without one.
+    pub no_promoter: u64,
 }
 
 pub struct MomentumLong {
     id: StrategyId,
     p: MomentumParams,
-    tier1: Tier1,
     phase: Vec<Phase>,
+    /// Symbols in Watching, Entering, Holding or Exiting (all pinned in Tier 1).
+    engaged: u32,
+    /// Per instrument: a refused promotion has been counted for the current promotion.
+    refused: Vec<bool>,
     positions: u32,
     stats: MomentumStats,
     /// The store's ids for [`TUNABLES`], found the first time a store is seen.
@@ -435,8 +445,9 @@ impl MomentumLong {
             rules,
             id,
             p: params,
-            tier1: Tier1::new(id_space, params.max_watched as usize),
             phase: vec![Phase::Idle; id_space],
+            engaged: 0,
+            refused: vec![false; id_space],
             positions: 0,
             stats: MomentumStats::default(),
             bound: None,
@@ -445,6 +456,18 @@ impl MomentumLong {
             traces: Vec::new(),
             declines: Vec::new(),
         })
+    }
+
+    /// A host for this strategy with the default promoter (scanner and Tier 1) attached: the
+    /// strategy only watches symbols the promoter has promoted.
+    pub fn host(self, universe: usize) -> Host<MomentumLong> {
+        let promoter = Promoter::new(
+            PromoterConfig::default(),
+            ScannerConfig::default(),
+            universe,
+        )
+        .expect("the default promoter configuration is valid");
+        Host::new(self, universe).with_promoter(promoter)
     }
 
     /// Decide with `rules` instead of [`RuleSet::momentum`].
@@ -510,7 +533,7 @@ impl MomentumLong {
     }
 
     pub fn watched(&self) -> usize {
-        self.tier1.live()
+        self.engaged as usize
     }
 
     pub fn positions(&self) -> u32 {
@@ -543,13 +566,22 @@ impl MomentumLong {
     }
 
     fn stop_watching(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId) {
-        self.tier1.demote(i);
+        ctx.unpin_tier1(i);
+        self.engaged -= 1;
         self.phase[i as usize] = Phase::Cooldown;
         let t = self.cooldown_timer(i);
         ctx.set_timer_in(t, Nanos::from(self.p.cooldown_secs) * NANOS_PER_SEC);
     }
 
     fn scan(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, now_sec: u64) {
+        if !ctx.has_promoter() {
+            self.stats.no_promoter += 1;
+            return;
+        }
+        if !ctx.is_promoted(i) {
+            self.refused[i as usize] = false;
+            return;
+        }
         let p = self.effective(ctx, i);
         let Some(w) = ctx.windows(i) else { return };
         let Some(change) = w.price_change_permille(p.spike_secs as usize) else {
@@ -571,14 +603,17 @@ impl MomentumLong {
         {
             return;
         }
-        match self.tier1.promote(i) {
-            Ok(()) => {
-                self.stats.promoted += 1;
-                self.phase[i as usize] = Phase::Watching { last_eval: now_sec };
+        if self.engaged >= self.p.max_watched {
+            if !self.refused[i as usize] {
+                self.refused[i as usize] = true;
+                self.stats.promotions_refused += 1;
             }
-            Err(PromoteError::Full) => self.stats.promotions_refused += 1,
-            Err(_) => {}
+            return;
         }
+        ctx.pin_tier1(i);
+        self.engaged += 1;
+        self.stats.promoted += 1;
+        self.phase[i as usize] = Phase::Watching { last_eval: now_sec };
     }
 
     fn watch(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, now_sec: u64) {
@@ -590,10 +625,15 @@ impl MomentumLong {
             return; // once a second
         }
         self.phase[i as usize] = Phase::Watching { last_eval: now_sec };
-        let Some(sym) = self.tier1.symbol(i) else {
-            return;
+        let (f, quote) = {
+            let Some(sym) = ctx.tier1(i) else {
+                // Demoted under us (it cooled); nothing to judge any more.
+                self.stop_watching(ctx, i);
+                return;
+            };
+            let Some(f) = sym.features() else { return };
+            (f, sym.quote_ago(0))
         };
-        let Some(f) = sym.features() else { return };
         let low = f.impulse_low.raw();
         let impulse = i128::from(f.impulse_high.raw() - low) * 1000 / i128::from(low.max(1));
         let impulse = impulse.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
@@ -615,7 +655,7 @@ impl MomentumLong {
         if !self.rules.enter.holds(&f, impulse, &p) || self.positions >= p.max_positions {
             return;
         }
-        let Some(Quote1 { ask, .. }) = sym.quote_ago(0) else {
+        let Some(Quote1 { ask, .. }) = quote else {
             return;
         };
         if ask.raw() <= 0 {
@@ -720,7 +760,6 @@ impl Strategy for MomentumLong {
     }
 
     fn on_event(&mut self, ctx: &mut Ctx<'_>, ev: &Event) {
-        self.tier1.on_event(ev);
         let Event::Trade(t) = ev else { return };
         let i = t.hdr.instrument;
         if i as usize >= self.phase.len() {

@@ -1,6 +1,6 @@
 use tf_core::Event;
 use tf_risk::{Gateway, Limits};
-use tf_strategy::{Host, MomentumLong, MomentumParams, SimBroker, StrategyId, TrendParams};
+use tf_strategy::{MomentumLong, MomentumParams, SimBroker, StrategyId, TrendParams};
 
 use super::*;
 
@@ -32,7 +32,7 @@ fn with_limits(l: Limits) -> BacktestConfig {
 
 #[test]
 fn a_healthy_runner_goes_through_the_gateway_and_both_books_agree() {
-    let (events, labels) = demo_session(1, 260, 1, 0, 0);
+    let (events, labels) = demo_session(1, 330, 1, 0, 0);
     let r = go(events, labels, &BacktestConfig::default());
     assert_eq!(
         (r.intents, r.accepted, r.fills),
@@ -78,20 +78,20 @@ fn a_mixed_session_trades_only_the_healthy_names() {
 #[test]
 fn the_same_session_gives_the_same_outcome() {
     let a = go(
-        demo_session(4, 260, 1, 1, 0).0,
-        demo_session(4, 260, 1, 1, 0).1,
+        demo_session(4, 330, 1, 1, 0).0,
+        demo_session(4, 330, 1, 1, 0).1,
         &BacktestConfig::default(),
     );
     let b = go(
-        demo_session(4, 260, 1, 1, 0).0,
-        demo_session(4, 260, 1, 1, 0).1,
+        demo_session(4, 330, 1, 1, 0).0,
+        demo_session(4, 330, 1, 1, 0).1,
         &BacktestConfig::default(),
     );
     assert_eq!(a, b);
     assert_ne!(a.outcome_hash, 0);
     let c = go(
-        demo_session(5, 260, 1, 1, 0).0,
-        demo_session(5, 260, 1, 1, 0).1,
+        demo_session(5, 330, 1, 1, 0).0,
+        demo_session(5, 330, 1, 1, 0).1,
         &BacktestConfig::default(),
     );
     assert_ne!(
@@ -104,12 +104,11 @@ fn the_same_session_gives_the_same_outcome() {
 
 #[test]
 fn a_kill_switch_stops_the_entry_and_the_strategy_hears_about_it() {
-    let (events, labels) = demo_session(1, 260, 1, 0, 0);
+    let (events, labels) = demo_session(1, 330, 1, 0, 0);
     let n = labels.len();
-    let mut host = Host::new(
-        MomentumLong::new(StrategyId(1), MomentumParams::default(), n).unwrap(),
-        n,
-    );
+    let mut host = MomentumLong::new(StrategyId(1), MomentumParams::default(), n)
+        .unwrap()
+        .host(n);
     let mut broker = SimBroker::new(BacktestConfig::default().sim, n);
     let mut gateway = Gateway::new(default_limits(), n);
     gateway.engage_kill_switch();
@@ -135,12 +134,11 @@ fn a_kill_switch_stops_the_entry_and_the_strategy_hears_about_it() {
 
 #[test]
 fn a_kill_switch_engaged_mid_trade_still_lets_the_exit_through() {
-    let (events, labels) = demo_session(1, 260, 1, 0, 0);
+    let (events, labels) = demo_session(1, 330, 1, 0, 0);
     let n = labels.len();
-    let mut host = Host::new(
-        MomentumLong::new(StrategyId(1), MomentumParams::default(), n).unwrap(),
-        n,
-    );
+    let mut host = MomentumLong::new(StrategyId(1), MomentumParams::default(), n)
+        .unwrap()
+        .host(n);
     let mut broker = SimBroker::new(BacktestConfig::default().sim, n);
     let mut gateway = Gateway::new(default_limits(), n);
     // The moment the gateway's book shows a position, pull the switch.
@@ -169,7 +167,7 @@ fn a_kill_switch_engaged_mid_trade_still_lets_the_exit_through() {
 
 #[test]
 fn an_order_cap_below_the_entry_size_rejects_it() {
-    let (events, labels) = demo_session(1, 260, 1, 0, 0);
+    let (events, labels) = demo_session(1, 330, 1, 0, 0);
     let r = go(events, labels, &with_limits(limits(100, 1_000, 20, 10)));
     assert_eq!(r.accepted, 0);
     assert!(r.rejections["max_notional"] >= 1, "{:?}", r.rejections);
@@ -178,7 +176,7 @@ fn an_order_cap_below_the_entry_size_rejects_it() {
 
 #[test]
 fn the_rate_limit_applies_to_exits_and_the_book_stays_consistent_when_one_is_refused() {
-    let (events, labels) = demo_session(1, 260, 1, 0, 0);
+    let (events, labels) = demo_session(1, 330, 1, 0, 0);
     // One order in ten thousand seconds: the entry gets through, the exits cannot.
     let r = go(
         events,
@@ -215,9 +213,11 @@ fn an_entry_that_expires_unfilled_frees_the_gateway_and_the_strategy() {
         },
         ..BacktestConfig::default()
     };
-    let (events, labels) = demo_session(1, 260, 1, 0, 0);
+    let (events, labels) = demo_session(1, 330, 1, 0, 0);
     let n = labels.len();
-    let mut host = Host::new(MomentumLong::new(StrategyId(1), cfg.params, n).unwrap(), n);
+    let mut host = MomentumLong::new(StrategyId(1), cfg.params, n)
+        .unwrap()
+        .host(n);
     let mut broker = SimBroker::new(cfg.sim, n);
     let mut gateway = Gateway::new(cfg.limits, n);
     let r = run_gated(
@@ -375,7 +375,7 @@ fn traced_run_matches_plain_run_and_explains_the_entry() {
         (plain.intents, plain.accepted, plain.fills),
         "tracing must not change the run"
     );
-    assert_eq!(t.entries.len(), 1, "one healthy entry in this scenario");
+    assert_eq!(t.entries.len(), 2, "both healthy runners enter");
     assert!(
         !t.declines.is_empty(),
         "the dangerous runners are watched then declined"
@@ -585,16 +585,18 @@ fn a_rule_edit_shows_which_trades_vanished_and_what_the_other_rules_did_instead(
         export::round_trips(&ta.result),
         export::round_trips(&tb.result),
     );
-    assert_eq!((ra.len(), rb.len()), (1, 0));
+    assert_eq!(
+        (ra.len(), rb.len()),
+        (2, 0),
+        "both healthy runners trade under the built-in rules"
+    );
     let t0 = events[0].ts_recv();
     let pairs = compare(&ra, &ta.declines, &rb, &tb.declines, t0);
-    assert_eq!(pairs.len(), 1);
-    assert_eq!(pairs[0].kind, Kind::OnlyA);
-    assert!(
-        pairs[0].note.contains("never entered or gave up"),
-        "{}",
-        pairs[0].note
-    );
+    assert_eq!(pairs.len(), 2);
+    for p in &pairs {
+        assert_eq!(p.kind, Kind::OnlyA);
+        assert!(p.note.contains("never entered or gave up"), "{}", p.note);
+    }
     // Swap: the trade appears in B. The other run (A, as A) has no decline on it either.
     let flipped = compare(&rb, &tb.declines, &ra, &ta.declines, t0);
     assert_eq!(flipped[0].kind, Kind::OnlyB);

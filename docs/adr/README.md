@@ -44,3 +44,4 @@ How:
 | [0025](0025-the-strategy-records-why-it-acted-and-the-viewer-only-reads.md) | The strategy records why it acted, and the viewer only reads | Accepted |
 | [0026](0026-entry-rules-are-data-and-the-decision-records-each-condition.md) | Entry rules are data, and the decision records each condition | Accepted |
 | [0027](0027-the-explorer-replays-stored-runs-and-checks-them-first.md) | The explorer replays stored runs and checks them first | Accepted |
+| [0028](0028-strategies-take-tier-one-from-the-shared-promoter.md) | Strategies take Tier 1 from the shared promoter | Accepted |

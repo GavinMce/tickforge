@@ -322,8 +322,8 @@ pub fn momentum_ab_with(
             None => s,
         })
     };
-    let mut tuned_host = Host::new(strategy()?, n).with_params(store);
-    let mut shadow_host = Host::new(strategy()?, n);
+    let mut tuned_host = strategy()?.host(n).with_params(store);
+    let mut shadow_host = strategy()?.host(n);
     let (mut tb, mut sb) = (SimBroker::new(cfg.sim, n), SimBroker::new(cfg.sim, n));
     let (mut tg, mut sg) = (Gateway::new(cfg.limits, n), Gateway::new(cfg.limits, n));
     run_ab(

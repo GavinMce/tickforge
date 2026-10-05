@@ -2,7 +2,7 @@ use tf_core::{Event, NANOS_PER_SEC, Nanos};
 use tf_manifest::{DataRange, Manifest, RunResult};
 use tf_params::{ParamStore, Proposal, Reject, Target};
 use tf_risk::Gateway;
-use tf_strategy::{Host, MomentumLong, MomentumParams, SimBroker, StrategyId, tunable_specs};
+use tf_strategy::{MomentumLong, MomentumParams, SimBroker, StrategyId, tunable_specs};
 
 use crate::ab::{Scheduled, Side, Snapshot, momentum_ab, run_ab};
 use crate::{BacktestConfig, default_limits, demo_session, momentum_backtest, run_gated};
@@ -157,8 +157,10 @@ fn the_tape_holds_the_feed_with_the_changes_where_they_took_effect_and_replays_t
     // Replay: a fresh tuned host with an empty store, fed the tape, ends exactly where the live run did.
     let n = labels.len();
     let store = ParamStore::new(tunable_specs(&cfg.params)).unwrap();
-    let mut host =
-        Host::new(MomentumLong::new(StrategyId(1), cfg.params, n).unwrap(), n).with_params(store);
+    let mut host = MomentumLong::new(StrategyId(1), cfg.params, n)
+        .unwrap()
+        .host(n)
+        .with_params(store);
     let mut broker = SimBroker::new(cfg.sim, n);
     let mut gateway = Gateway::new(cfg.limits, n);
     let replay = run_gated(
@@ -235,9 +237,13 @@ fn both_equity_curves_are_observable_as_they_diverge_and_end_at_the_reports() {
     let cfg = BacktestConfig::default();
     let n = labels.len();
     let store = ParamStore::new(tunable_specs(&cfg.params)).unwrap();
-    let mut th =
-        Host::new(MomentumLong::new(StrategyId(1), cfg.params, n).unwrap(), n).with_params(store);
-    let mut sh = Host::new(MomentumLong::new(StrategyId(1), cfg.params, n).unwrap(), n);
+    let mut th = MomentumLong::new(StrategyId(1), cfg.params, n)
+        .unwrap()
+        .host(n)
+        .with_params(store);
+    let mut sh = MomentumLong::new(StrategyId(1), cfg.params, n)
+        .unwrap()
+        .host(n);
     let (mut tb, mut sb) = (SimBroker::new(cfg.sim, n), SimBroker::new(cfg.sim, n));
     let (mut tg, mut sg) = (Gateway::new(cfg.limits, n), Gateway::new(cfg.limits, n));
     let mut snaps: Vec<Snapshot> = Vec::new();
@@ -325,7 +331,11 @@ fn a_tuned_side_without_a_store_refuses_every_proposal() {
     let (events, labels, t0) = session();
     let cfg = BacktestConfig::default();
     let n = labels.len();
-    let mk = || Host::new(MomentumLong::new(StrategyId(1), cfg.params, n).unwrap(), n);
+    let mk = || {
+        MomentumLong::new(StrategyId(1), cfg.params, n)
+            .unwrap()
+            .host(n)
+    };
     let (mut a, mut b) = (mk(), mk());
     let (mut ab1, mut ab2) = (SimBroker::new(cfg.sim, n), SimBroker::new(cfg.sim, n));
     let (mut g1, mut g2) = (
@@ -383,8 +393,8 @@ fn two_waves() -> (Vec<Event>, Vec<String>, Nanos) {
     let cfg = tf_synth::SynthConfig {
         seed: 1,
         session_start: tf_synth::DEFAULT_SESSION_START,
-        duration: 700 * SEC,
-        symbols: vec![spec("EARLY", 500, 20), spec("LATE", 600, 300)],
+        duration: 750 * SEC,
+        symbols: vec![spec("EARLY", 500, 70), spec("LATE", 600, 350)],
     };
     let events: Vec<Event> = tf_synth::SynthStream::new(&cfg).collect();
     let t0 = events[0].ts_recv();
@@ -539,8 +549,10 @@ fn a_session_with_a_revert_replays_exactly() {
     let store = ParamStore::new(tunable_specs(&cfg.params))
         .unwrap()
         .with_lockout(120 * SEC);
-    let mut host =
-        Host::new(MomentumLong::new(StrategyId(1), cfg.params, n).unwrap(), n).with_params(store);
+    let mut host = MomentumLong::new(StrategyId(1), cfg.params, n)
+        .unwrap()
+        .host(n)
+        .with_params(store);
     let mut broker = SimBroker::new(cfg.sim, n);
     let mut gateway = Gateway::new(cfg.limits, n);
     let replay = run_gated(

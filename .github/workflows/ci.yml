@@ -76,9 +76,11 @@ jobs:
 
       # `cargo test <filter>` passes with "0 passed" when nothing matches, so a
       # renamed test would leave this gate green and empty. Fail loudly instead.
+      # No `grep -q`: it exits on the first match, cargo then writes to a closed
+      # pipe and prints a confusing SIGPIPE error (and fails under pipefail).
       - name: Golden test still exists
         run: |
-          cargo test -p tf-synth -- --list | grep -qx 'tests::golden_stream_hash: test'
+          cargo test -p tf-synth -- --list | grep -x 'tests::golden_stream_hash: test' > /dev/null
 
       - name: Golden hash (debug)
         run: cargo test -p tf-synth golden_stream_hash

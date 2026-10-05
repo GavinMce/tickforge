@@ -22,5 +22,6 @@ tf-replay.workspace = true
 tf-bench.workspace = true
 tf-manifest.workspace = true
 tf-backtest.workspace = true
+tf-params.workspace = true
 tf-risk.workspace = true
 tf-strategy.workspace = true

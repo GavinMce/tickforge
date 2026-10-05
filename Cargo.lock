@@ -76,6 +76,8 @@ name = "tf-backtest"
 version = "0.1.0"
 dependencies = [
  "tf-core",
+ "tf-manifest",
+ "tf-params",
  "tf-risk",
  "tf-strategy",
  "tf-synth",
@@ -101,6 +103,7 @@ dependencies = [
  "tf-bench",
  "tf-core",
  "tf-manifest",
+ "tf-params",
  "tf-provider",
  "tf-replay",
  "tf-risk",

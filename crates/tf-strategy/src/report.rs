@@ -204,6 +204,12 @@ impl ReportBuilder {
         self.sample();
     }
 
+    /// Profit and loss so far, realised plus marked, before borrow fees (which are only
+    /// known at the end). The same curve the drawdown is read from.
+    pub fn equity(&self) -> i128 {
+        self.realized + self.unrealized
+    }
+
     fn sample(&mut self) {
         let equity = self.realized + self.unrealized;
         self.peak = self.peak.max(equity);

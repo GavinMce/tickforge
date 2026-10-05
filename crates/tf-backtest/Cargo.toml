@@ -14,4 +14,8 @@ workspace = true
 tf-core.workspace = true
 tf-strategy.workspace = true
 tf-risk.workspace = true
+tf-params.workspace = true
 tf-synth.workspace = true
+
+[dev-dependencies]
+tf-manifest.workspace = true

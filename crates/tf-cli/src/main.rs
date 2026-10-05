@@ -29,6 +29,7 @@ USAGE:
                 [--latency-ms N] [--borrow-bps N] [--order-notional USD]
                 [--daily-loss USD] [--max-orders N] [--higher-lows N] [--store DIR]
                 [--strategy momentum|trend] [--lead SECS] [--fast N] [--slow N]
+                [--propose NAME=VALUE@SECS]...
 
     Run Strategy 1 (long side) over a synthetic session of healthy and dangerous
     runners and quiet names, through the risk gateway and the simulated broker,
@@ -53,6 +54,12 @@ USAGE:
     --lead SECS       quiet lead-in before the first runner (default 20; 420 for trend)
     --fast N          trend: fast EMA period in bars (default 3)
     --slow N          trend: slow EMA period in bars (default 6)
+    --propose P       momentum: an agent's parameter proposal, NAME=VALUE@SECS after the
+                      session starts (repeatable). Switches to an A/B run: the strategy
+                      tuned through its bounded parameter store against a shadow copy
+                      with fixed parameters on the same feed, each with its own simulated
+                      broker and gateway. Prints both reports, the difference, the
+                      changes applied and the proposals refused (with why).
     --store DIR       keep the result keyed by a manifest hash of the whole setup
                       (seed, git sha, session, limits, parameters); reruns are skipped
 
@@ -277,6 +284,7 @@ struct BacktestArgs {
     daily_loss: u64,
     max_orders: u32,
     higher_lows: u32,
+    propose: Vec<(String, i64, u64)>,
     strategy: String,
     lead: Option<u64>,
     fast: u32,
@@ -297,6 +305,7 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
         daily_loss: 1_000,
         max_orders: 20,
         higher_lows: 1,
+        propose: Vec::new(),
         strategy: "momentum".to_owned(),
         lead: None,
         fast: 3,
@@ -324,6 +333,10 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
             "--max-orders" => a.max_orders = val("--max-orders")? as u32,
             "--higher-lows" => a.higher_lows = val("--higher-lows")? as u32,
             "--lead" => a.lead = Some(val("--lead")?),
+            "--propose" => {
+                let v = it.next().ok_or("--propose needs NAME=VALUE@SECS")?;
+                a.propose.push(parse_proposal(v)?);
+            }
             "--fast" => a.fast = val("--fast")? as u32,
             "--slow" => a.slow = val("--slow")? as u32,
             "--strategy" => a.strategy = it.next().cloned().ok_or("--strategy needs a value")?,
@@ -338,11 +351,34 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
         ));
     }
     let trend = a.strategy == "trend";
+    if trend && !a.propose.is_empty() {
+        return Err(
+            "--propose applies to the momentum strategy; trend has no tunable parameters yet"
+                .to_owned(),
+        );
+    }
     if a.secs == 0 {
         a.secs = if trend { 1800 } else { 400 };
     }
     a.lead.get_or_insert(if trend { 420 } else { 20 });
     Ok(a)
+}
+
+/// `NAME=VALUE@SECS`.
+fn parse_proposal(v: &str) -> Result<(String, i64, u64), String> {
+    let bad = || format!("--propose {v:?}: expected NAME=VALUE@SECS");
+    let (name_value, secs) = v.rsplit_once('@').ok_or_else(bad)?;
+    let (name, value) = name_value.split_once('=').ok_or_else(bad)?;
+    let value = value
+        .parse::<i64>()
+        .map_err(|e| format!("--propose {v:?}: value: {e}"))?;
+    let secs = secs
+        .parse::<u64>()
+        .map_err(|e| format!("--propose {v:?}: seconds: {e}"))?;
+    if name.is_empty() {
+        return Err(bad());
+    }
+    Ok((name.to_owned(), value, secs))
 }
 
 fn backtest_config(a: &BacktestArgs) -> Result<tf_backtest::BacktestConfig, String> {
@@ -391,6 +427,7 @@ fn backtest_manifest(
         ("strategy", a.strategy.clone()),
         ("secs", a.secs.to_string()),
         ("lead_secs", a.lead.unwrap_or(20).to_string()),
+        ("ab", u8::from(!a.propose.is_empty()).to_string()),
         ("healthy", a.healthy.to_string()),
         ("dangerous", a.dangerous.to_string()),
         ("quiet", a.quiet.to_string()),
@@ -413,7 +450,156 @@ fn backtest_manifest(
     for (k, v) in params {
         m = m.with_param(k, &v).map_err(|e| e.to_string())?;
     }
+    for (i, (name, value, secs)) in a.propose.iter().enumerate() {
+        m = m
+            .with_config(&format!("propose_{i}"), &format!("{name}={value}@{secs}"))
+            .map_err(|e| e.to_string())?;
+    }
     Ok(m)
+}
+
+fn backtest_single(
+    a: &BacktestArgs,
+    cfg: &tf_backtest::BacktestConfig,
+    events: &[Event],
+    labels: Vec<String>,
+) -> Result<Vec<(String, i64)>, String> {
+    let r = if a.strategy == "trend" {
+        tf_backtest::trend_backtest(events.iter().copied(), labels, cfg)?
+    } else {
+        tf_backtest::momentum_backtest(events.iter().copied(), labels, cfg)?
+    };
+    println!(
+        "{} | seed {} | {} healthy, {} dangerous, {} quiet | {} s simulated | latency {} ms",
+        a.strategy, a.seed, a.healthy, a.dangerous, a.quiet, a.secs, a.latency_ms
+    );
+    print!("{}", r.report.render());
+    println!(
+        "gateway  intents {}  accepted {}  fills {}",
+        r.intents, r.accepted, r.fills
+    );
+    if r.rejections.is_empty() {
+        println!("refused  nothing");
+    }
+    for (why, n) in &r.rejections {
+        println!("refused  {why:<22} {n}");
+    }
+    println!(
+        "books    gateway and broker positions {}  | bookkeeping errors {}",
+        if r.books_agree() { "agree" } else { "DISAGREE" },
+        r.bookkeeping_errors
+    );
+    println!("outcome  {:>#18x}", r.outcome_hash);
+    let mut metrics = r.report.metrics();
+    metrics.push(("gateway.intents".into(), r.intents as i64));
+    metrics.push(("gateway.accepted".into(), r.accepted as i64));
+    metrics.push((
+        "gateway.bookkeeping_errors".into(),
+        r.bookkeeping_errors as i64,
+    ));
+    metrics.push(("books_agree".into(), i64::from(r.books_agree())));
+    metrics.push(("outcome_hash".into(), r.outcome_hash as i64));
+    for (why, n) in &r.rejections {
+        metrics.push((format!("refused.{why}"), *n as i64));
+    }
+    Ok(metrics)
+}
+
+fn backtest_ab(
+    a: &BacktestArgs,
+    cfg: &tf_backtest::BacktestConfig,
+    events: &[Event],
+    labels: Vec<String>,
+    start: u64,
+) -> Result<Vec<(String, i64)>, String> {
+    use tf_backtest::ab::{Scheduled, momentum_ab};
+    let params = tf_params::ParamStore::new(tf_strategy::tunable_specs(&cfg.params))
+        .map_err(|e| format!("{e:?}"))?;
+    let mut scheduled = Vec::new();
+    for (name, value, secs) in &a.propose {
+        let id = params.id_of(name).ok_or_else(|| {
+            let names: Vec<&str> = params.specs().iter().map(|s| s.name).collect();
+            format!("unknown parameter {name:?}; tunable: {}", names.join(", "))
+        })?;
+        scheduled.push(Scheduled {
+            at: start + secs * NANOS_PER_SEC,
+            proposal: tf_params::Proposal {
+                param: id,
+                target: tf_params::Target::Global,
+                value: *value,
+                proposer: 1,
+                reason: 0,
+                evidence: 0,
+            },
+        });
+    }
+    let r = momentum_ab(events.iter().copied(), labels, cfg, &scheduled)?;
+    println!(
+        "momentum A/B | seed {} | {} healthy, {} dangerous, {} quiet | {} s simulated | {} proposals",
+        a.seed,
+        a.healthy,
+        a.dangerous,
+        a.quiet,
+        a.secs,
+        scheduled.len()
+    );
+    println!("--- tuned");
+    print!("{}", r.tuned.report.render());
+    println!("--- shadow (fixed parameters, same feed)");
+    print!("{}", r.shadow.report.render());
+    let c = &r.comparison;
+    let usd = |raw: i128| {
+        let cents = (raw.abs() + 5_000_000) / 10_000_000;
+        let sign = if raw < 0 && cents != 0 { '-' } else { '+' };
+        format!("{sign}{}.{:02}", cents / 100, cents % 100)
+    };
+    println!("--- tuned minus shadow");
+    println!(
+        "net {}  realised {}  drawdown {}  slippage {}  trades {:+}  shares {:+}",
+        usd(c.pnl_net),
+        usd(c.pnl_realized),
+        usd(c.max_drawdown),
+        usd(c.slippage_cost),
+        c.trades,
+        c.fills
+    );
+    for (label, d) in &c.pnl_net_by_label {
+        println!("  {label:<12} {}", usd(*d));
+    }
+    println!("--- parameters");
+    let name = |p: u16| params.specs().get(usize::from(p)).map_or("?", |s| s.name);
+    for ch in &r.changes {
+        println!(
+            "applied  +{:>4} s  {} {} -> {}",
+            (ch.ts - start) / NANOS_PER_SEC,
+            name(ch.param),
+            ch.old,
+            ch.new
+        );
+    }
+    for rf in &r.refused {
+        println!(
+            "refused  +{:>4} s  {} = {}: {:?}",
+            (rf.at - start) / NANOS_PER_SEC,
+            name(rf.proposal.param),
+            rf.proposal.value,
+            rf.why
+        );
+    }
+    let books = r.tuned.books_agree() && r.shadow.books_agree();
+    println!(
+        "books    {} | bookkeeping errors {} + {}",
+        if books { "agree" } else { "DISAGREE" },
+        r.tuned.bookkeeping_errors,
+        r.shadow.bookkeeping_errors
+    );
+    println!(
+        "outcome  tuned {:#x}  shadow {:#x}",
+        r.tuned.outcome_hash, r.shadow.outcome_hash
+    );
+    let mut metrics = r.metrics();
+    metrics.push(("books_agree".into(), i64::from(books)));
+    Ok(metrics)
 }
 
 fn backtest(args: &[String]) -> Result<(), String> {
@@ -445,47 +631,14 @@ fn backtest(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let r = if a.strategy == "trend" {
-        tf_backtest::trend_backtest(events.iter().copied(), labels, &cfg)?
+    let metrics = if a.propose.is_empty() {
+        backtest_single(&a, &cfg, &events, labels)?
     } else {
-        tf_backtest::momentum_backtest(events.iter().copied(), labels, &cfg)?
+        backtest_ab(&a, &cfg, &events, labels, start)?
     };
-    println!(
-        "{} | seed {} | {} healthy, {} dangerous, {} quiet | {} s simulated | latency {} ms",
-        a.strategy, a.seed, a.healthy, a.dangerous, a.quiet, a.secs, a.latency_ms
-    );
-    print!("{}", r.report.render());
-    println!(
-        "gateway  intents {}  accepted {}  fills {}",
-        r.intents, r.accepted, r.fills
-    );
-    if r.rejections.is_empty() {
-        println!("refused  nothing");
-    }
-    for (why, n) in &r.rejections {
-        println!("refused  {why:<22} {n}");
-    }
-    println!(
-        "books    gateway and broker positions {}  | bookkeeping errors {}",
-        if r.books_agree() { "agree" } else { "DISAGREE" },
-        r.bookkeeping_errors
-    );
-    println!("outcome  {:>#18x}", r.outcome_hash);
 
     if let Some(store) = store {
         let key = manifest.hash();
-        let mut metrics = r.report.metrics();
-        metrics.push(("gateway.intents".into(), r.intents as i64));
-        metrics.push(("gateway.accepted".into(), r.accepted as i64));
-        metrics.push((
-            "gateway.bookkeeping_errors".into(),
-            r.bookkeeping_errors as i64,
-        ));
-        metrics.push(("books_agree".into(), i64::from(r.books_agree())));
-        metrics.push(("outcome_hash".into(), r.outcome_hash as i64));
-        for (why, n) in &r.rejections {
-            metrics.push((format!("refused.{why}"), *n as i64));
-        }
         let mut result = RunResult::new(manifest, events.len() as u64, hash.finish());
         for (k, v) in metrics {
             result = result.with_metric(&k, v).map_err(|e| e.to_string())?;
@@ -662,6 +815,7 @@ mod tests {
             &["--higher-lows", "0"],
             &["--strategy", "trend"],
             &["--lead", "100"],
+            &["--propose", "min_higher_lows=2@1"],
         ] {
             assert_ne!(
                 base,
@@ -689,6 +843,59 @@ mod tests {
         }
         // The momentum-only flag does not matter to a trend run (and is not recorded for it).
         assert_eq!(base, hash(&["--strategy", "trend", "--higher-lows", "0"]));
+    }
+
+    #[test]
+    fn proposals_are_part_of_the_manifest_in_value_time_and_order() {
+        let one = hash(&["--propose", "min_higher_lows=2@1"]);
+        assert_eq!(one, hash(&["--propose", "min_higher_lows=2@1"]));
+        for flags in [
+            &["--propose", "min_higher_lows=2@2"][..],
+            &["--propose", "min_higher_lows=3@1"],
+            &["--propose", "trail_permille=20@1"],
+            &[
+                "--propose",
+                "min_higher_lows=2@1",
+                "--propose",
+                "min_higher_lows=3@62",
+            ],
+        ] {
+            assert_ne!(one, hash(flags), "{flags:?}");
+        }
+        assert_ne!(
+            hash(&[
+                "--propose",
+                "min_higher_lows=2@1",
+                "--propose",
+                "trail_permille=20@1"
+            ]),
+            hash(&[
+                "--propose",
+                "trail_permille=20@1",
+                "--propose",
+                "min_higher_lows=2@1"
+            ]),
+            "the order they are listed in is part of the setup"
+        );
+    }
+
+    #[test]
+    fn proposals_parse_strictly() {
+        assert_eq!(
+            parse_proposal("trail_permille=20@60"),
+            Ok(("trail_permille".to_owned(), 20, 60))
+        );
+        assert_eq!(parse_proposal("x=-5@0"), Ok(("x".to_owned(), -5, 0)));
+        for bad in ["", "x", "x=1", "x@1", "=1@1", "x=a@1", "x=1@a", "x=1@-1"] {
+            assert!(parse_proposal(bad).is_err(), "{bad:?}");
+        }
+        let args =
+            |v: &[&str]| parse_backtest(&v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        assert!(
+            args(&["--strategy", "trend", "--propose", "x=1@1"]).is_err(),
+            "trend has nothing to tune yet"
+        );
+        assert!(args(&["--propose"]).is_err());
     }
 
     #[test]

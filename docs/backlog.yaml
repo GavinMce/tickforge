@@ -567,6 +567,15 @@ epics:
         ac:
           - A strategy built on the indicator and bar APIs runs through tf backtest with every threshold in a typed parameter set
           - Demonstrates the pattern for new strategies; makes no claim of an edge
+      - id: E08-S10
+        jira: TIC-111
+        title: Trade explorer (decision trace, export, and replay viewer prototype)
+        status: done
+        evidence: EntryTrace/Decline in crates/tf-strategy/src/momentum.rs; tf_backtest::momentum_backtest_traced and export::export_json; `tf backtest --export FILE`; crates/tf-backtest/explorer/viewer.html; trace-vs-plain and deterministic-export tests, one mutation caught; ADR 0025. Viewer checked by hand and script smoke test only
+        deps: [E08-S03, E08-S08]
+        ac:
+          - Each entry and each give-up carries the evidence behind it
+          - A run exports to one deterministic JSON file that a static page replays by tick, event and time
   # ---------------------------------------------------------------- Phase 4
   - id: E09
     jira: TIC-10

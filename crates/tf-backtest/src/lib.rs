@@ -23,6 +23,7 @@
 //! Event time throughout; nothing here reads a clock or does I/O.
 
 pub mod ab;
+pub mod export;
 
 use std::collections::BTreeMap;
 
@@ -30,8 +31,9 @@ use tf_core::{Event, NANOS_PER_SEC, Nanos};
 use tf_risk::{Audit, GapRule, Gateway, Limits, reason_name};
 use tf_strategy::report::{Report, ReportBuilder, ReportError};
 use tf_strategy::{
-    Decision, Host, IntentId, MomentumLong, MomentumParams, MtfBars, MtfConfig, OrderId,
-    OrderState, OrderUpdate, SimBroker, SimConfig, Strategy, StrategyId, TrendLong, TrendParams,
+    Decision, Decline, EntryTrace, Fill, Host, Intent, IntentId, MomentumLong, MomentumParams,
+    MtfBars, MtfConfig, OrderId, OrderState, OrderUpdate, SimBroker, SimConfig, Strategy,
+    StrategyId, TrendLong, TrendParams,
 };
 use tf_synth::{PullbackKind, Scenario, SymbolSpec, SynthConfig, SynthStream};
 
@@ -97,6 +99,10 @@ pub struct BacktestResult {
     /// A hash of every decision and fill, for comparing runs.
     pub outcome_hash: u64,
     pub audit: Vec<Audit>,
+    /// Every intent the strategy emitted with the gateway's answer, in order.
+    pub decisions: Vec<(Intent, Decision)>,
+    /// Every fill the simulated broker made, in order.
+    pub fill_log: Vec<Fill>,
 }
 
 impl BacktestResult {
@@ -136,6 +142,7 @@ struct Loop<'a, S: Strategy> {
     errors: u64,
     n: usize,
     last_ts: Nanos,
+    decisions: Vec<(Intent, Decision)>,
 }
 
 impl<'a, S: Strategy> Loop<'a, S> {
@@ -159,6 +166,7 @@ impl<'a, S: Strategy> Loop<'a, S> {
             errors: 0,
             n,
             last_ts: 0,
+            decisions: Vec::new(),
         })
     }
 
@@ -200,6 +208,7 @@ impl<'a, S: Strategy> Loop<'a, S> {
             intents,
             accepted,
             errors,
+            decisions,
             ..
         } = self;
         BacktestResult {
@@ -215,6 +224,8 @@ impl<'a, S: Strategy> Loop<'a, S> {
             gateway_pnl: gateway.daily_pnl(),
             outcome_hash: hash.0,
             audit: gateway.drain_audit(),
+            decisions,
+            fill_log: broker.fills().to_vec(),
         }
     }
 
@@ -256,7 +267,9 @@ impl<'a, S: Strategy> Loop<'a, S> {
             }
             for i in batch {
                 self.intents += 1;
-                match self.gateway.decide(&i, i.ts) {
+                let decision = self.gateway.decide(&i, i.ts);
+                self.decisions.push((i, decision));
+                match decision {
                     Decision::Accepted(id) => {
                         self.accepted += 1;
                         self.orders.insert(i.id, id);
@@ -303,12 +316,30 @@ pub fn momentum_backtest(
     labels: Vec<String>,
     cfg: &BacktestConfig,
 ) -> Result<BacktestResult, String> {
+    momentum_backtest_traced(events, labels, cfg).map(|t| t.result)
+}
+
+/// A backtest with the strategy's own account of its decisions.
+pub struct Traced {
+    pub result: BacktestResult,
+    /// Why each entry happened.
+    pub entries: Vec<EntryTrace>,
+    /// The symbols it watched and declined.
+    pub declines: Vec<Decline>,
+}
+
+/// [`momentum_backtest`], also returning the evidence behind each entry and each decline.
+pub fn momentum_backtest_traced(
+    events: impl IntoIterator<Item = Event>,
+    labels: Vec<String>,
+    cfg: &BacktestConfig,
+) -> Result<Traced, String> {
     let n = labels.len();
     let strat = MomentumLong::new(StrategyId(1), cfg.params, n).map_err(|e| e.0.to_owned())?;
     let mut host = Host::new(strat, n);
     let mut broker = SimBroker::new(cfg.sim, n);
     let mut gateway = Gateway::new(cfg.limits, n);
-    run_gated(
+    let result = run_gated(
         &mut host,
         &mut broker,
         &mut gateway,
@@ -316,7 +347,12 @@ pub fn momentum_backtest(
         events,
         |_, _| {},
     )
-    .map_err(|e| format!("{e:?}"))
+    .map_err(|e| format!("{e:?}"))?;
+    Ok(Traced {
+        result,
+        entries: host.strategy().entry_traces().to_vec(),
+        declines: host.strategy().declines().to_vec(),
+    })
 }
 
 /// The example indicator strategy ([`TrendLong`]) over `events`, with one-minute bars

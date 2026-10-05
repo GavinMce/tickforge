@@ -41,3 +41,4 @@ How:
 | [0022](0022-the-safety-policy-returns-a-losing-tuned-side-to-baseline.md) | The safety policy returns a losing tuned side to baseline | Accepted |
 | [0023](0023-the-scanner-scores-volume-against-each-symbols-own-baseline.md) | The scanner scores volume against each symbol's own baseline | Accepted |
 | [0024](0024-tier-moves-are-hysteretic-bounded-and-on-the-tape.md) | Tier moves are hysteretic, bounded, and on the tape | Accepted |
+| [0025](0025-the-strategy-records-why-it-acted-and-the-viewer-only-reads.md) | The strategy records why it acted, and the viewer only reads | Accepted |

@@ -76,6 +76,7 @@ name = "tf-backtest"
 version = "0.1.0"
 dependencies = [
  "tf-core",
+ "tf-engine",
  "tf-manifest",
  "tf-params",
  "tf-risk",

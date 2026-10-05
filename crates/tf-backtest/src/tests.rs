@@ -363,3 +363,60 @@ fn the_trend_example_obeys_the_gateway_too() {
         "fast >= slow is refused, not run"
     );
 }
+
+#[test]
+fn traced_run_matches_plain_run_and_explains_the_entry() {
+    let (events, labels) = demo_session_with_lead(1, 520, 2, 2, 2, 120);
+    let cfg = BacktestConfig::default();
+    let plain = go(events.clone(), labels.clone(), &cfg);
+    let t = momentum_backtest_traced(events, labels, &cfg).unwrap();
+    assert_eq!(
+        (t.result.intents, t.result.accepted, t.result.fills),
+        (plain.intents, plain.accepted, plain.fills),
+        "tracing must not change the run"
+    );
+    assert_eq!(t.entries.len(), 1, "one healthy entry in this scenario");
+    assert!(
+        !t.declines.is_empty(),
+        "the dangerous runners are watched then declined"
+    );
+    assert_eq!(t.result.decisions.len() as u64, plain.intents);
+    assert_eq!(t.result.fill_log.len() as u64, plain.fills);
+    let e = &t.entries[0];
+    assert!(e.impulse_permille >= 300, "entry only after a real impulse");
+}
+
+#[test]
+fn export_is_deterministic_and_carries_the_decision_record() {
+    let (events, labels) = demo_session_with_lead(1, 520, 2, 2, 2, 120);
+    let cfg = BacktestConfig::default();
+    let run = |ev: &[Event]| {
+        let t = momentum_backtest_traced(ev.iter().copied(), labels.clone(), &cfg).unwrap();
+        export::export_json(
+            ev,
+            &labels,
+            &cfg,
+            &t.result,
+            &t.entries,
+            &t.declines,
+            &export::ExportMeta {
+                strategy: "momentum",
+                seed: 1,
+                secs: 520,
+            },
+        )
+    };
+    let a = run(&events);
+    assert_eq!(a, run(&events), "same input, same bytes");
+    for key in [
+        "\"trades\"",
+        "\"orders\"",
+        "\"stop_path\"",
+        "\"conditions\"",
+        "\"declines\"",
+        "\"hits\"",
+    ] {
+        assert!(a.contains(key), "missing {key}");
+    }
+    assert!(a.contains("pullback went on too long") || a.contains("dangerous"));
+}

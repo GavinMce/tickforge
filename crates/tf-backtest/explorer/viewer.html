@@ -1,0 +1,601 @@
+<title>Trade Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a blotter on the left, the chart with its transport controls in the centre,
+   and the evidence (why it entered, features, the order) on the right. Narrow screens stack. */
+:root {
+  --bg: #f3f4f1;
+  --panel: #ffffff;
+  --panel-2: #eceee9;
+  --ink: #1b2124;
+  --ink-2: #566066;
+  --line: #d5d9d3;
+  --grid: #e4e7e1;
+  --up: #12806f;
+  --down: #c8442f;
+  --amber: #b9770e;
+  --blue: #2c63b8;
+  --violet: #7a4fb0;
+  --good-bg: #dff1ec;
+  --bad-bg: #f8e2dd;
+  --warn-bg: #f6ead2;
+  --cursor: #1b2124;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-num: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101416;
+    --panel: #181e21;
+    --panel-2: #1f2629;
+    --ink: #e4e9e8;
+    --ink-2: #93a0a3;
+    --line: #2d373b;
+    --grid: #232b2e;
+    --up: #2fbf9f;
+    --down: #ee6a53;
+    --amber: #e5a43b;
+    --blue: #6f9ee8;
+    --violet: #b08be0;
+    --good-bg: #153029;
+    --bad-bg: #3a1e19;
+    --warn-bg: #36290f;
+    --cursor: #e4e9e8;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #101416;
+  --panel: #181e21;
+  --panel-2: #1f2629;
+  --ink: #e4e9e8;
+  --ink-2: #93a0a3;
+  --line: #2d373b;
+  --grid: #232b2e;
+  --up: #2fbf9f;
+  --down: #ee6a53;
+  --amber: #e5a43b;
+  --blue: #6f9ee8;
+  --violet: #b08be0;
+  --good-bg: #153029;
+  --bad-bg: #3a1e19;
+  --warn-bg: #36290f;
+  --cursor: #e4e9e8;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--ink); font-family: var(--font-ui); font-size: 13px; line-height: 1.4; }
+* { box-sizing: border-box; }
+#app { padding-inline: 16px; padding-block: 14px; max-width: 1500px; margin: 0 auto; }
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; margin-bottom: 12px; }
+header.top h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: 0.01em; }
+header.top .meta { color: var(--ink-2); font-family: var(--font-num); font-size: 12px; }
+header.top .meta b { color: var(--ink); font-weight: 500; }
+.grid { display: grid; grid-template-columns: 250px minmax(0, 1fr) 330px; gap: 12px; align-items: start; }
+@media (max-width: 1100px) { .grid { grid-template-columns: 220px minmax(0, 1fr); } .grid > aside.evidence { grid-column: 1 / -1; } }
+@media (max-width: 720px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.card h2 { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); margin: 0; padding: 9px 12px 7px; border-bottom: 1px solid var(--line); }
+.blotter { max-height: 640px; overflow: auto; }
+.row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px 12px; border-bottom: 1px solid var(--grid); cursor: pointer; width: 100%; text-align: left; background: none; border-inline: 0; border-top: 0; color: inherit; font: inherit; }
+.row:hover { background: var(--panel-2); }
+.row[aria-selected="true"] { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--blue); }
+.row .nm { font-weight: 500; }
+.row .sub { color: var(--ink-2); font-size: 12px; grid-column: 1; }
+.row .pl { font-family: var(--font-num); text-align: right; }
+.row .tag { grid-column: 2; justify-self: end; }
+.pill { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; padding: 1px 7px; border-radius: 99px; }
+.pill.win { background: var(--good-bg); color: var(--up); }
+.pill.loss { background: var(--bad-bg); color: var(--down); }
+.pill.skip { background: var(--warn-bg); color: var(--amber); }
+.pill.open { background: var(--panel-2); color: var(--ink-2); }
+.pos { color: var(--up); } .neg { color: var(--down); }
+.chartbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.chartbar .ttl { font-weight: 600; }
+.chartbar .ttl small { font-weight: 400; color: var(--ink-2); margin-left: 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button { background: var(--panel); color: var(--ink-2); border: 0; border-right: 1px solid var(--line); padding: 3px 9px; font: inherit; font-family: var(--font-num); font-size: 12px; cursor: pointer; }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+.spacer { flex: 1 1 auto; }
+.canvaswrap { position: relative; }
+canvas#chart { display: block; width: 100%; height: 440px; touch-action: none; }
+@media (max-width: 720px) { canvas#chart { height: 340px; } }
+#tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--panel); padding: 5px 8px; border-radius: 4px; font-size: 12px; font-family: var(--font-num); white-space: nowrap; display: none; z-index: 2; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 12px 9px; color: var(--ink-2); font-size: 11.5px; border-top: 1px solid var(--grid); }
+.legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 5px; vertical-align: -1px; background: var(--c); border-radius: var(--r, 0); }
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 9px 12px; border-top: 1px solid var(--line); }
+.transport button, .transport select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 4px 10px; font: inherit; cursor: pointer; }
+.transport button:hover { background: var(--panel-2); }
+.transport button:focus-visible, .row:focus-visible, .seg button:focus-visible, input[type=range]:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.transport button.primary { background: var(--ink); color: var(--panel); border-color: var(--ink); min-width: 64px; }
+.transport .clock { font-family: var(--font-num); font-size: 12.5px; color: var(--ink-2); min-width: 150px; }
+.transport .clock b { color: var(--ink); font-weight: 500; }
+input[type=range] { flex: 1 1 220px; min-width: 120px; accent-color: var(--blue); }
+.log { max-height: 190px; overflow: auto; border-top: 1px solid var(--line); font-family: var(--font-num); font-size: 12px; }
+.log div { display: grid; grid-template-columns: 62px 18px 1fr; gap: 6px; padding: 3px 12px; border-bottom: 1px solid var(--grid); cursor: pointer; }
+.log div:hover { background: var(--panel-2); }
+.log div.future { opacity: 0.38; }
+.log div.now { background: var(--panel-2); }
+.log .t { color: var(--ink-2); }
+.log .ico { text-align: center; }
+.evidence .sec { padding: 10px 12px 12px; border-bottom: 1px solid var(--line); }
+.evidence .sec:last-child { border-bottom: 0; }
+.evidence h3 { margin: 0 0 7px; font-size: 12px; font-weight: 600; }
+.evidence .note { color: var(--ink-2); font-size: 11.5px; margin: 6px 0 0; }
+table.cond { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.cond td { padding: 3px 0; border-bottom: 1px solid var(--grid); vertical-align: top; }
+table.cond td.v { font-family: var(--font-num); text-align: right; white-space: nowrap; padding-left: 8px; }
+table.cond td.m { width: 20px; font-weight: 700; }
+table.cond tr.ok td.m { color: var(--up); } table.cond tr.no td.m { color: var(--down); } table.cond tr.na td.m { color: var(--ink-2); }
+table.cond tr.pending { opacity: 0.55; }
+dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-size: 12px; }
+dl.kv dt { color: var(--ink-2); } dl.kv dd { margin: 0; font-family: var(--font-num); text-align: right; }
+.empty { padding: 28px 16px; color: var(--ink-2); text-align: center; }
+.foot { margin-top: 12px; color: var(--ink-2); font-size: 11.5px; max-width: 95ch; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div id="app">
+  <header class="top">
+    <h1>Trade Explorer</h1>
+    <div class="meta" id="runmeta"></div>
+  </header>
+  <div class="grid">
+    <section class="card">
+      <h2>Trades and passes</h2>
+      <div class="blotter" id="blotter" role="listbox" aria-label="Trades"></div>
+    </section>
+    <section class="card">
+      <div class="chartbar">
+        <div class="ttl" id="ttl"></div>
+        <div class="spacer"></div>
+        <div class="seg" role="group" aria-label="Candle size" id="tfseg"></div>
+      </div>
+      <div class="canvaswrap"><canvas id="chart" aria-label="Candle chart of the selected trade"></canvas><div id="tip"></div></div>
+      <div class="legend" id="legend"></div>
+      <div class="transport">
+        <button id="bStart" title="Back to the start of the window">&#9198;</button>
+        <button id="bPrevEv" title="Previous event (Shift+Left)">&#9664;&#9664;</button>
+        <button id="bPrevTick" title="Back one trade print (Left)">&#9664;</button>
+        <button id="bPlay" class="primary" title="Play or pause (Space)">Play</button>
+        <button id="bNextTick" title="Forward one trade print (Right)">&#9654;</button>
+        <button id="bNextEv" title="Next event (Shift+Right)">&#9654;&#9654;</button>
+        <label>Speed <select id="speed"><option value="1">1x</option><option value="5" selected>5x</option><option value="20">20x</option><option value="60">60x</option></select></label>
+        <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Replay position">
+        <div class="clock" id="clock"></div>
+      </div>
+      <div class="log" id="log" aria-label="Events in order"></div>
+    </section>
+    <aside class="card evidence" id="evidence"></aside>
+  </div>
+  <p class="foot" id="foot"></p>
+</div>
+
+<script id="tf-data" type="application/json">__TF_DATA__</script>
+<script>
+"use strict";
+/* ---------- data ---------- */
+const DATA = (typeof document !== "undefined") ? JSON.parse(document.getElementById("tf-data").textContent) : null;
+
+const REASONS = { 1: "healthy pullback", 2: "trailing stop", 3: "maximum hold" };
+
+function fmtP(p) { return p == null ? "–" : "$" + Number(p).toFixed(2); }
+function fmtP4(p) { return p == null ? "–" : "$" + Number(p).toFixed(4); }
+function fmtT(t) {
+  const m = Math.floor(t / 60), s = t - m * 60;
+  return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
+}
+function fmtPnl(v) { return v == null ? "open" : (v >= 0 ? "+" : "−") + "$" + Math.abs(v).toFixed(2); }
+function lowerBound(a, t, key) { // first index with a[i][key] > t
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid][key] <= t) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+function priceAt(inst, t) {
+  const i = lowerBound(inst.ticks, t, 0) - 1;
+  return i >= 0 ? inst.ticks[i][1] : (inst.ticks[0] ? inst.ticks[0][1] : null);
+}
+
+/* Candles of `tf` seconds from the trade prints up to time T (the last one may be forming). */
+function candlesUpTo(inst, tf, T, from) {
+  const out = [];
+  const end = lowerBound(inst.ticks, T, 0);
+  let i = lowerBound(inst.ticks, from - tf, 0);
+  for (; i < end; i++) {
+    const [t, p, v] = inst.ticks[i];
+    const k = Math.floor(t / tf) * tf;
+    const c = out[out.length - 1];
+    if (c && c.t === k) { if (p > c.h) c.h = p; if (p < c.l) c.l = p; c.c = p; c.v += v; }
+    else out.push({ t: k, o: p, h: p, l: p, c: p, v: v });
+  }
+  return out;
+}
+function vwapSeries(inst, T) { // cumulative from the first print of the session, sampled per second
+  const out = [];
+  let pv = 0, vol = 0, lastSec = -1;
+  const end = lowerBound(inst.ticks, T, 0);
+  for (let i = 0; i < end; i++) {
+    const [t, p, v] = inst.ticks[i];
+    pv += p * v; vol += v;
+    const s = Math.floor(t);
+    if (s !== lastSec) { lastSec = s; out.push([s, pv / vol]); } else out[out.length - 1][1] = pv / vol;
+  }
+  return out;
+}
+
+/* ---------- the things on the list ---------- */
+function buildItems(d) {
+  const items = [];
+  d.trades.forEach((tr, k) => {
+    const inst = d.instruments.find(i => i.id === tr.instrument);
+    items.push({ kind: "trade", trade: tr, inst, key: "t" + k, t_sort: tr.t_in });
+  });
+  d.instruments.forEach(inst => inst.declines.forEach((dc, k) => {
+    items.push({ kind: "decline", decline: dc, inst, key: "d" + inst.id + "_" + k, t_sort: dc.t });
+  }));
+  items.sort((a, b) => a.t_sort - b.t_sort);
+  return items;
+}
+
+function windowFor(item) {
+  if (item.kind === "trade") return [Math.max(0, item.trade.t_in - 150), (item.trade.t_out ?? item.trade.t_in + 60) + 45];
+  return [Math.max(0, item.decline.t - 150), item.decline.t + 50];
+}
+
+function timelineFor(d, item) {
+  const inst = item.inst, [w0, w1] = windowFor(item), ev = [];
+  const inW = t => t >= w0 && t <= w1;
+  const hits = inst.hits.filter(h => inW(h[0]));
+  if (hits.length) ev.push({ t: hits[0][0], ico: "◆", c: "--amber", text: `Scanner hit: volume z ${(hits[0][1] / 1000).toFixed(1)}, price +${(hits[0][2] / 10).toFixed(1)}% in 10 s (${hits.length} hits in this window)` });
+  inst.tier.filter(x => inW(x[0])).forEach(x => ev.push({ t: x[0], ico: x[1] === "promote" ? "▲" : "▽", c: "--violet", text: x[1] === "promote" ? `Promoted to Tier 1 (score ${(x[2] / 1000).toFixed(1)})` : "Demoted from Tier 1: cold for the cooldown" }));
+  inst.declines.filter(x => inW(x.t)).forEach(x => ev.push({ t: x.t, ico: "✕", c: "--amber", text: `Strategy gave up: ${x.reason}`, decline: x }));
+  d.orders.filter(o => o.instrument === inst.id && inW(o.t)).forEach(o => {
+    const what = `${o.side} ${o.qty} (${o.purpose}), ${REASONS[o.reason] || "reason " + o.reason}`;
+    ev.push({ t: o.t, ico: "→", c: "--blue", text: `Intent: ${what}; gateway ${o.accepted ? "accepted" : "refused: " + o.rejected}` });
+    o.fills.forEach(f => ev.push({ t: f[0], ico: o.purpose === "open" ? "●" : "■", c: o.purpose === "open" ? "--up" : "--down", text: `Filled ${f[2]} at ${fmtP4(f[1])} (slippage ${fmtP4(f[3])})`, price: f[1] }));
+  });
+  ev.sort((a, b) => a.t - b.t);
+  return ev;
+}
+
+/* ---------- drawing ---------- */
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function niceStep(range, n) {
+  const raw = range / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const r = raw / mag;
+  return (r < 1.5 ? 1 : r < 3.5 ? 2 : r < 7.5 ? 5 : 10) * mag;
+}
+
+const S = { items: [], item: null, tl: [], w0: 0, w1: 1, T: 0, tf: 5, playing: false, last: 0, speed: 5, hover: null, marks: [] };
+
+function currentTrace(item) {
+  return item.kind === "trade" ? item.trade.trace : item.decline;
+}
+
+function render() {
+  const item = S.item; if (!item) return;
+  const cv = document.getElementById("chart"), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const C = { up: css("--up"), down: css("--down"), ink: css("--ink"), ink2: css("--ink-2"), grid: css("--grid"), line: css("--line"), amber: css("--amber"), blue: css("--blue"), violet: css("--violet"), panel: css("--panel"), cursor: css("--cursor") };
+  const L = 8, R = 62, Tp = 10, B = 24, volH = Math.round(H * 0.16), plotB = H - B - volH - 4;
+  const x = t => L + (t - S.w0) / (S.w1 - S.w0) * (W - L - R);
+  const inst = item.inst;
+  const cs = candlesUpTo(inst, S.tf, S.T, S.w0);
+  const vis = cs.filter(c => c.t + S.tf >= S.w0);
+  const trade = item.kind === "trade" ? item.trade : null;
+
+  // Price range from what has been revealed, plus any level already shown.
+  let lo = Infinity, hi = -Infinity;
+  vis.forEach(c => { if (c.l < lo) lo = c.l; if (c.h > hi) hi = c.h; });
+  const levels = [];
+  if (trade) {
+    if (S.T >= trade.t_in) { levels.push(trade.entry_px); }
+    const sp = trade.stop_path.filter(p => p[0] <= S.T);
+    if (S.T >= trade.t_in && trade.initial_stop != null) levels.push(trade.initial_stop);
+    if (sp.length) levels.push(sp[sp.length - 1][1]);
+  }
+  levels.forEach(v => { if (v < lo) lo = v; if (v > hi) hi = v; });
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  const pad = (hi - lo) * 0.08 || 0.05; lo -= pad; hi += pad;
+  const y = p => Tp + (hi - p) / (hi - lo) * (plotB - Tp);
+
+  // Grid and axes.
+  g.font = "11px " + css("--font-num"); g.textBaseline = "middle";
+  const ps = niceStep(hi - lo, 6);
+  for (let p = Math.ceil(lo / ps) * ps; p <= hi; p += ps) {
+    g.strokeStyle = C.grid; g.lineWidth = 1; g.beginPath(); g.moveTo(L, y(p) + 0.5); g.lineTo(W - R, y(p) + 0.5); g.stroke();
+    g.fillStyle = C.ink2; g.textAlign = "left"; g.fillText(p.toFixed(2), W - R + 6, y(p));
+  }
+  const ts = niceStep(S.w1 - S.w0, Math.max(3, Math.floor((W - R) / 90)));
+  g.textBaseline = "top"; g.textAlign = "center";
+  for (let t = Math.ceil(S.w0 / ts) * ts; t <= S.w1; t += ts) {
+    g.strokeStyle = C.grid; g.beginPath(); g.moveTo(x(t) + 0.5, Tp); g.lineTo(x(t) + 0.5, plotB + volH + 4); g.stroke();
+    g.fillStyle = C.ink2; g.fillText(fmtT(t).replace(/\.0$/, ""), x(t), H - B + 6);
+  }
+
+  // Watch window: from the scanner hit (or promotion) to the decision.
+  const decT = trade ? (trade.trace ? trade.trace.t : trade.t_in) : item.decline.t;
+  const firstHit = inst.hits.find(h => h[0] >= S.w0 - 60 && h[0] <= decT);
+  const watchFrom = firstHit ? firstHit[0] : null;
+  if (watchFrom != null && S.T > watchFrom) {
+    const a = Math.max(x(watchFrom), L), b = Math.min(x(Math.min(S.T, decT)), W - R);
+    g.fillStyle = C.amber; g.globalAlpha = 0.08; g.fillRect(a, Tp, Math.max(0, b - a), plotB - Tp); g.globalAlpha = 1;
+  }
+
+  // Volume.
+  const vmax = Math.max(1, ...vis.map(c => c.v));
+  const dx = (W - L - R) / ((S.w1 - S.w0) / S.tf);
+  vis.forEach(c => {
+    const h = Math.round(c.v / vmax * (volH - 4));
+    g.fillStyle = c.c >= c.o ? C.up : C.down; g.globalAlpha = 0.45;
+    g.fillRect(x(c.t) + 0.5, plotB + volH + 2 - h, Math.max(1, dx * 0.7), h); g.globalAlpha = 1;
+  });
+
+  // Pullback structure: the impulse and the pullback low, from the decision's evidence once it exists,
+  // otherwise from the context series.
+  const ev = currentTrace(item);
+  let struct = null;
+  if (ev && S.T >= decT && ev.features) struct = { hi: ev.features.high, lo: ev.features.low, pb: ev.features.pullback_low };
+  else { const f = featureAt(inst, S.T); if (f) struct = { hi: f.high, lo: f.low, pb: f.pb, from: null }; }
+  if (struct) {
+    [[struct.hi, "impulse high"], [struct.lo, "impulse low"], [struct.pb, "pullback low"]].forEach(([p, label], k) => {
+      if (p < lo || p > hi) return;
+      g.setLineDash([4, 4]); g.strokeStyle = C.violet; g.globalAlpha = 0.75; g.beginPath(); g.moveTo(L, y(p)); g.lineTo(W - R, y(p)); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+      g.fillStyle = C.violet; g.textAlign = "left"; g.textBaseline = "bottom"; g.fillText(label, L + 4 + k * 0, y(p) - 2);
+    });
+  }
+
+  // VWAP.
+  const vw = vwapSeries(inst, S.T).filter(p => p[0] >= S.w0 - 1);
+  if (vw.length > 1) { g.strokeStyle = C.blue; g.lineWidth = 1.4; g.beginPath(); vw.forEach((p, k) => { const px = x(p[0]), py = y(p[1]); if (k) g.lineTo(px, py); else g.moveTo(px, py); }); g.stroke(); g.lineWidth = 1; }
+
+  // Candles.
+  const bw = Math.max(1, Math.min(14, dx * 0.7));
+  vis.forEach(c => {
+    const cx = x(c.t) + dx * 0.35, col = c.c >= c.o ? C.up : C.down;
+    g.strokeStyle = col; g.fillStyle = col;
+    g.beginPath(); g.moveTo(Math.round(cx) + 0.5, y(c.h)); g.lineTo(Math.round(cx) + 0.5, y(c.l)); g.stroke();
+    const top = y(Math.max(c.o, c.c)), bot = y(Math.min(c.o, c.c));
+    g.fillRect(cx - bw / 2, top, bw, Math.max(1, bot - top));
+  });
+
+  // Entry, stop and exit.
+  S.marks = [];
+  const mark = (t, p, shape, color, label, tip) => { S.marks.push({ x: x(t), y: y(p), tip }); drawMarker(g, x(t), y(p), shape, color, label, C); };
+  if (trade && S.T >= trade.t_in) {
+    g.setLineDash([2, 3]); g.strokeStyle = C.ink2; g.beginPath(); g.moveTo(x(trade.t_in), y(trade.entry_px)); g.lineTo(W - R, y(trade.entry_px)); g.stroke(); g.setLineDash([]);
+    g.fillStyle = C.ink2; g.textAlign = "left"; g.textBaseline = "middle"; g.fillText("entry " + trade.entry_px.toFixed(2), W - R + 6, y(trade.entry_px) + 11);
+    // Stop: the broker-side stop at entry, then the trailing stop (3% under the high since entry).
+    const sp = trade.stop_path.filter(p => p[0] <= S.T);
+    g.strokeStyle = C.down; g.lineWidth = 1.4; g.beginPath();
+    g.moveTo(x(trade.t_in), y(trade.initial_stop));
+    let lastY = y(trade.initial_stop), firstTrail = true;
+    sp.forEach(p => { if (firstTrail) { g.lineTo(x(p[0]), lastY); firstTrail = false; } g.lineTo(x(p[0]), y(p[1])); lastY = y(p[1]); });
+    g.stroke(); g.lineWidth = 1;
+    const cur = sp.length ? sp[sp.length - 1][1] : trade.initial_stop;
+    g.fillStyle = C.down; g.fillText("stop " + cur.toFixed(2), W - R + 6, y(cur) - 2);
+  }
+  S.tl.forEach(e => {
+    if (e.t > S.T || e.t < S.w0 || e.t > S.w1) return;
+    const p = e.price ?? priceAt(inst, e.t);
+    if (p == null) return;
+    const shape = { "◆": "diamond", "▲": "up", "▽": "down", "✕": "cross", "→": "flag", "●": "dot", "■": "square" }[e.ico];
+    mark(e.t, p, shape, C[({ "--amber": "amber", "--violet": "violet", "--blue": "blue", "--up": "up", "--down": "down" })[e.c]], null, fmtT(e.t) + "  " + e.text);
+  });
+
+  // Cursor.
+  g.strokeStyle = C.cursor; g.globalAlpha = 0.55; g.setLineDash([1, 3]); g.beginPath(); g.moveTo(x(S.T) + 0.5, Tp); g.lineTo(x(S.T) + 0.5, plotB + volH + 4); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+  const lastPx = priceAt(inst, S.T);
+  if (lastPx != null) { g.fillStyle = C.ink; g.fillRect(W - R + 1, y(lastPx) - 8, R - 2, 16); g.fillStyle = C.panel; g.textAlign = "left"; g.textBaseline = "middle"; g.fillText(lastPx.toFixed(2), W - R + 6, y(lastPx)); }
+
+  updateReadouts();
+}
+
+function drawMarker(g, x, y, shape, color, label, C) {
+  g.fillStyle = color; g.strokeStyle = C.panel; g.lineWidth = 1.5;
+  g.beginPath();
+  if (shape === "diamond") { g.moveTo(x, y - 6); g.lineTo(x + 5, y); g.lineTo(x, y + 6); g.lineTo(x - 5, y); g.closePath(); }
+  else if (shape === "up") { g.moveTo(x, y - 8); g.lineTo(x + 6, y + 2); g.lineTo(x - 6, y + 2); g.closePath(); }
+  else if (shape === "down") { g.moveTo(x, y + 8); g.lineTo(x + 6, y - 2); g.lineTo(x - 6, y - 2); g.closePath(); }
+  else if (shape === "square") { g.rect(x - 5, y - 5, 10, 10); }
+  else if (shape === "flag") { g.rect(x, y - 16, 2, 16); g.rect(x, y - 16, 11, 7); }
+  else if (shape === "cross") { g.moveTo(x - 5, y - 5); g.lineTo(x + 5, y + 5); g.moveTo(x + 5, y - 5); g.lineTo(x - 5, y + 5); g.lineWidth = 2.5; g.strokeStyle = color; g.stroke(); g.lineWidth = 1; return; }
+  else { g.arc(x, y, 5, 0, Math.PI * 2); }
+  g.fill(); g.stroke(); g.lineWidth = 1;
+}
+
+function featureAt(inst, T) {
+  const i = lowerBound(inst.features, T, 0) - 1;
+  if (i < 0) return null;
+  const f = inst.features[i];
+  return { sec: f[0], depth: f[1], retrace: f[2], vr: f[3], hl: f[4], tape: f[5], bid: f[6], high: f[7], low: f[8], pb: f[9] };
+}
+
+/* ---------- panels ---------- */
+function condRows(conds, live) {
+  return conds.map(c => {
+    const cls = c.pass ? "ok" : "no";
+    const v = c.value == null ? "n/a" : c.value;
+    return `<tr class="${cls}"><td class="m">${c.pass ? "✓" : "✗"}</td><td>${c.name}</td><td class="v">${v} ${c.op} ${c.threshold}</td></tr>`;
+  }).join("");
+}
+
+function liveConds(item, f) { // the same tests as the strategy's, from the context series, before the decision
+  const tr = currentTrace(item); if (!tr || !f) return null;
+  const by = {}; tr.conditions.forEach(c => by[c.name] = c);
+  const mk = (name, v, test) => { const c = by[name]; return c ? { name, value: v, op: c.op, threshold: c.threshold, pass: v != null && test(v, c.threshold) } : null; };
+  return [
+    mk("pullback depth (permille)", f.depth, (v, t) => v <= t),
+    mk("pullback volume rate vs impulse (permille)", f.vr, (v, t) => v <= t),
+    mk("pullback depth, at least (permille)", f.depth, (v, t) => v >= t),
+    mk("retrace from the high now (permille)", f.retrace, (v, t) => v <= t),
+    mk("higher lows", f.hl, (v, t) => v >= t),
+    mk("bid support (permille)", f.bid, (v, t) => v >= t),
+  ].filter(Boolean);
+}
+
+function updateReadouts() {
+  const item = S.item, tr = currentTrace(item), inst = item.inst;
+  const trade = item.kind === "trade" ? item.trade : null;
+  const decT = trade ? (trade.trace ? trade.trace.t : trade.t_in) : item.decline.t;
+  const decided = S.T >= decT;
+  const f = featureAt(inst, S.T);
+  const hit = inst.hits.filter(h => h[0] <= S.T).slice(-1)[0];
+  let h = "";
+  // Why.
+  h += `<div class="sec"><h3>${trade ? (decided ? "Why it entered" : "Watching: would it enter?") : (decided ? "Why it passed" : "Watching")}</h3>`;
+  if (!tr) h += `<p class="note">No decision record for this trade.</p>`;
+  else if (decided) {
+    h += `<table class="cond">${condRows(tr.conditions)}</table>`;
+    h += `<p class="note">${trade ? "The strategy's own record, taken at " + fmtT(tr.t) + "." : "Given up at " + fmtT(item.decline.t) + ": " + item.decline.reason + "."}</p>`;
+  } else {
+    const live = liveConds(item, f);
+    if (live) h += `<table class="cond">${live.map(c => `<tr class="${c.pass ? "ok" : "no"} pending"><td class="m">${c.pass ? "✓" : "✗"}</td><td>${c.name}</td><td class="v">${c.value == null ? "n/a" : c.value} ${c.op} ${c.threshold}</td></tr>`).join("")}</table><p class="note">Context series so far; the strategy decides at ${fmtT(decT)}.</p>`;
+    else h += `<p class="note">Nothing to evaluate yet.</p>`;
+  }
+  h += `</div>`;
+  // Scanner and tier.
+  h += `<div class="sec"><h3>Scanner and tier</h3><dl class="kv">`;
+  h += `<dt>Latest scanner hit</dt><dd>${hit ? "z " + (hit[1] / 1000).toFixed(1) + ", +" + (hit[2] / 10).toFixed(1) + "% / 10 s" : "none yet"}</dd>`;
+  const promoted = inst.tier.filter(x => x[0] <= S.T).slice(-1)[0];
+  h += `<dt>Tier now</dt><dd>${promoted && promoted[1] === "promote" ? "1 (since " + fmtT(promoted[0]) + ")" : "0"}</dd></dl></div>`;
+  // Features now.
+  h += `<div class="sec"><h3>Pullback features now</h3>`;
+  if (f) h += `<dl class="kv"><dt>Depth</dt><dd>${(f.depth / 10).toFixed(1)}%</dd><dt>Retrace from high</dt><dd>${(f.retrace / 10).toFixed(1)}%</dd><dt>Volume rate vs impulse</dt><dd>${f.vr == null ? "n/a" : (f.vr / 10).toFixed(0) + "%"}</dd><dt>Higher lows</dt><dd>${f.hl}</dd><dt>Bid support</dt><dd>${f.bid == null ? "n/a" : (f.bid / 10).toFixed(0) + "%"}</dd></dl><p class="note">Recomputed by the exporter over the whole session, so it can differ slightly from what the strategy's own tracker saw.</p>`;
+  else h += `<p class="note">No impulse yet.</p>`;
+  h += `</div>`;
+  // Order and fill.
+  if (trade) {
+    const o = DATA.orders[trade.order], xo = trade.exit_order != null ? DATA.orders[trade.exit_order] : null;
+    h += `<div class="sec"><h3>Order and fill</h3><dl class="kv">`;
+    h += `<dt>Decided</dt><dd>${fmtT(o.t)}</dd><dt>Reference (ask)</dt><dd>${fmtP4(o.reference)}</dd><dt>Worst allowed</dt><dd>${fmtP4(o.worst)}</dd><dt>Broker stop</dt><dd>${fmtP4(o.stop)}</dd>`;
+    h += `<dt>Gateway</dt><dd>${o.accepted ? "accepted" : "refused: " + o.rejected}</dd>`;
+    if (S.T >= trade.t_in) h += `<dt>Filled</dt><dd>${trade.qty} @ ${fmtP4(trade.entry_px)}</dd><dt>Slippage</dt><dd>${fmtP4(o.fills[0][3])}</dd><dt>Latency</dt><dd>${((o.fills[0][0] - o.t) * 1000).toFixed(0)} ms</dd>`;
+    if (xo && trade.t_out != null && S.T >= trade.t_out) h += `<dt>Exit</dt><dd>${fmtP4(trade.exit_px)}</dd><dt>Exit reason</dt><dd>${REASONS[xo.reason] || xo.reason}</dd><dt>Result</dt><dd class="${trade.pnl >= 0 ? "pos" : "neg"}">${fmtPnl(trade.pnl)}</dd>`;
+    else if (S.T >= trade.t_in) { const p = priceAt(inst, S.T); const open = (p - trade.entry_px) * trade.qty; h += `<dt>Open P&amp;L</dt><dd class="${open >= 0 ? "pos" : "neg"}">${fmtPnl(open)}</dd>`; }
+    h += `</dl></div>`;
+  }
+  document.getElementById("evidence").innerHTML = `<h2>Evidence</h2>` + h;
+
+  // Clock and scrubber.
+  document.getElementById("clock").innerHTML = `<b>${fmtT(S.T)}</b> of ${fmtT(S.w0)}–${fmtT(S.w1)}`;
+  document.getElementById("scrub").value = Math.round((S.T - S.w0) / (S.w1 - S.w0) * 1000);
+  // Event log.
+  const rows = document.getElementById("log").children;
+  let nowIdx = -1; S.tl.forEach((e, i) => { if (e.t <= S.T) nowIdx = i; });
+  for (let i = 0; i < rows.length; i++) { rows[i].className = i > nowIdx ? "future" : i === nowIdx ? "now" : ""; }
+}
+
+function renderBlotter() {
+  const d = DATA;
+  document.getElementById("blotter").innerHTML = S.items.map((it, k) => {
+    if (it.kind === "trade") {
+      const t = it.trade, cls = t.pnl == null ? "open" : t.pnl >= 0 ? "win" : "loss";
+      return `<button class="row" role="option" data-k="${k}" aria-selected="${S.item === it}"><span class="nm">${it.inst.name}</span><span class="pl ${t.pnl >= 0 ? "pos" : "neg"}">${fmtPnl(t.pnl)}</span><span class="sub">${t.qty} @ ${fmtP(t.entry_px)} · ${fmtT(t.t_in)}</span><span class="tag"><span class="pill ${cls}">${t.pnl == null ? "open" : t.pnl >= 0 ? "win" : "loss"}</span></span></button>`;
+    }
+    return `<button class="row" role="option" data-k="${k}" aria-selected="${S.item === it}"><span class="nm">${it.inst.name}</span><span class="pl"></span><span class="sub">${it.decline.reason} · ${fmtT(it.decline.t)}</span><span class="tag"><span class="pill skip">no entry</span></span></button>`;
+  }).join("");
+  document.querySelectorAll("#blotter .row").forEach(r => r.addEventListener("click", () => select(S.items[+r.dataset.k])));
+}
+
+function select(item) {
+  S.item = item; S.playing = false;
+  [S.w0, S.w1] = windowFor(item);
+  S.tl = timelineFor(DATA, item);
+  S.T = S.w0 + (S.w1 - S.w0) * 0.0; // start of the window
+  // Start a little before the first thing that happens.
+  const first = S.tl.length ? S.tl[0].t : S.w0;
+  S.T = Math.max(S.w0, first - 20);
+  const trade = item.kind === "trade" ? item.trade : null;
+  document.getElementById("ttl").innerHTML = trade
+    ? `${item.inst.name} <small>momentum long · ${trade.qty} shares · ${fmtPnl(trade.pnl)}</small>`
+    : `${item.inst.name} <small>watched, then passed · ${item.decline.reason}</small>`;
+  document.getElementById("log").innerHTML = S.tl.map((e, i) => `<div data-i="${i}"><span class="t">${fmtT(e.t)}</span><span class="ico" style="color:var(${e.c})">${e.ico}</span><span>${e.text}</span></div>`).join("");
+  document.querySelectorAll("#log div").forEach(r => r.addEventListener("click", () => { S.T = S.tl[+r.dataset.i].t; render(); }));
+  document.querySelectorAll("#blotter .row").forEach(r => r.setAttribute("aria-selected", String(S.items[+r.dataset.k] === item)));
+  document.getElementById("bPlay").textContent = "Play";
+  render();
+}
+
+/* ---------- transport ---------- */
+function stepTick(dir) {
+  const t = S.item.inst.ticks;
+  if (dir > 0) { const i = lowerBound(t, S.T, 0); if (i < t.length) S.T = Math.min(S.w1, t[i][0]); }
+  else { const i = lowerBound(t, S.T - 1e-9, 0) - 1; if (i >= 0) S.T = Math.max(S.w0, t[i][0] - 1e-6 > S.w0 ? t[i][0] : S.w0); if (i >= 1) S.T = t[i - 1][0]; }
+  render();
+}
+function stepEvent(dir) {
+  const ev = S.tl;
+  if (dir > 0) { const e = ev.find(e => e.t > S.T + 1e-6); S.T = e ? e.t : S.w1; }
+  else { const prev = ev.filter(e => e.t < S.T - 1e-6).pop(); S.T = prev ? prev.t : S.w0; }
+  render();
+}
+function frame(now) {
+  if (!S.playing) return;
+  const dt = (now - S.last) / 1000; S.last = now;
+  S.T = Math.min(S.w1, S.T + dt * S.speed);
+  if (S.T >= S.w1) { S.playing = false; document.getElementById("bPlay").textContent = "Replay"; }
+  render();
+  if (S.playing) requestAnimationFrame(frame);
+}
+function togglePlay() {
+  if (S.playing) { S.playing = false; document.getElementById("bPlay").textContent = "Play"; return; }
+  if (S.T >= S.w1 - 1e-6) S.T = S.w0;
+  S.playing = true; S.last = performance.now(); document.getElementById("bPlay").textContent = "Pause";
+  requestAnimationFrame(frame);
+}
+
+function init() {
+  const d = DATA;
+  const net = d.meta.net_pnl;
+  document.getElementById("runmeta").innerHTML = `<b>${d.meta.strategy}</b> · seed ${d.meta.seed} · ${d.meta.secs} s session · ${d.meta.intents} intents, ${d.meta.fills} fills · net <b class="${net >= 0 ? "pos" : "neg"}">${fmtPnl(net)}</b>`;
+  S.items = buildItems(d);
+  renderBlotter();
+  document.getElementById("tfseg").innerHTML = [1, 5, 15, 60].map(s => `<button data-s="${s}" aria-pressed="${s === S.tf}">${s < 60 ? s + "s" : "1m"}</button>`).join("");
+  document.querySelectorAll("#tfseg button").forEach(b => b.addEventListener("click", () => {
+    S.tf = +b.dataset.s; document.querySelectorAll("#tfseg button").forEach(x => x.setAttribute("aria-pressed", String(x === b))); render();
+  }));
+  document.getElementById("legend").innerHTML = [
+    ["--amber", "scanner hit", "50%"], ["--violet", "tier move / pullback structure", "0"], ["--blue", "VWAP, order", "0"], ["--up", "buy fill", "50%"], ["--down", "stop, exit fill", "0"],
+  ].map(([c, t, r]) => `<span style="--c:var(${c});--r:${r}">${t}</span>`).join("");
+  document.getElementById("bStart").addEventListener("click", () => { S.playing = false; S.T = S.w0; document.getElementById("bPlay").textContent = "Play"; render(); });
+  document.getElementById("bPrevEv").addEventListener("click", () => stepEvent(-1));
+  document.getElementById("bNextEv").addEventListener("click", () => stepEvent(1));
+  document.getElementById("bPrevTick").addEventListener("click", () => stepTick(-1));
+  document.getElementById("bNextTick").addEventListener("click", () => stepTick(1));
+  document.getElementById("bPlay").addEventListener("click", togglePlay);
+  document.getElementById("speed").addEventListener("change", e => { S.speed = +e.target.value; });
+  document.getElementById("scrub").addEventListener("input", e => { S.T = S.w0 + (+e.target.value / 1000) * (S.w1 - S.w0); render(); });
+  window.addEventListener("keydown", e => {
+    if (e.target && /input|select|textarea/i.test(e.target.tagName)) return;
+    if (e.key === " ") { e.preventDefault(); togglePlay(); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); e.shiftKey ? stepEvent(1) : stepTick(1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); e.shiftKey ? stepEvent(-1) : stepTick(-1); }
+  });
+  const cv = document.getElementById("chart"), tip = document.getElementById("tip");
+  cv.addEventListener("pointermove", e => {
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    let best = null, bd = 12;
+    S.marks.forEach(m => { const dd = Math.hypot(m.x - mx, m.y - my); if (dd < bd) { bd = dd; best = m; } });
+    if (best) { tip.style.display = "block"; tip.textContent = best.tip; tip.style.left = Math.min(mx + 12, r.width - 200) + "px"; tip.style.top = Math.max(4, my - 30) + "px"; } else tip.style.display = "none";
+  });
+  cv.addEventListener("pointerleave", () => { tip.style.display = "none"; });
+  cv.addEventListener("click", e => { // click the chart to move the replay cursor
+    const r = cv.getBoundingClientRect(), W = r.width, L = 8, R = 62;
+    const t = S.w0 + (e.clientX - r.left - L) / (W - L - R) * (S.w1 - S.w0);
+    if (t >= S.w0 && t <= S.w1) { S.T = t; render(); }
+  });
+  window.addEventListener("resize", render);
+  document.getElementById("foot").textContent =
+    "Prices are dollars from the simulated session. The decision record (the table under Why) is written by the strategy at the moment it decides; the feature readout and the scanner and tier markers are recomputed from the same tape by the exporter. Everything here is synthetic data.";
+  const first = S.items.find(i => i.kind === "trade") || S.items[0];
+  if (first) select(first); else document.getElementById("evidence").innerHTML = `<div class="empty">This run made no trades and watched nothing.</div>`;
+}
+
+if (typeof document !== "undefined") {
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
+}
+</script>

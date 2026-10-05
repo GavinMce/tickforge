@@ -28,7 +28,7 @@
 //! at most once per second per symbol.
 
 use tf_core::{Event, InstrumentId, NANOS_PER_SEC, Nanos, Px};
-use tf_engine::{PromoteError, Quote1, Tier1};
+use tf_engine::{PromoteError, PullbackFeatures, Quote1, Tier1};
 use tf_params::{ParamId, ParamSpec, Scope};
 
 use crate::intent::{IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif};
@@ -346,6 +346,42 @@ struct Riding {
     collar_permille: u32,
 }
 
+/// Why an entry happened: what the strategy saw when it decided, and the thresholds in force.
+/// One is recorded per entry intent, so a person (or a viewer) can see the evidence without
+/// recomputing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryTrace {
+    pub intent: IntentId,
+    pub instrument: InstrumentId,
+    pub ts: Nanos,
+    /// The pullback features at the decision.
+    pub features: PullbackFeatures,
+    /// Swing low to swing high, permille of the low.
+    pub impulse_permille: i64,
+    /// The effective parameters used for this decision.
+    pub params: MomentumParams,
+}
+
+/// Why a watched symbol was given up on without an entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclineReason {
+    /// Too deep, or volume that had not dried up.
+    Dangerous,
+    /// The pullback went on too long without turning healthy.
+    TooOld,
+}
+
+/// A symbol the strategy watched and decided not to enter, with what it saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Decline {
+    pub instrument: InstrumentId,
+    pub ts: Nanos,
+    pub reason: DeclineReason,
+    pub features: PullbackFeatures,
+    pub impulse_permille: i64,
+    pub params: MomentumParams,
+}
+
 /// Counters for what the strategy decided and why not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MomentumStats {
@@ -372,6 +408,8 @@ pub struct MomentumLong {
     effective: Vec<(u64, MomentumParams)>,
     /// Effective parameter sets that failed validation and were replaced by the base.
     conflicts: u64,
+    traces: Vec<EntryTrace>,
+    declines: Vec<Decline>,
 }
 
 impl MomentumLong {
@@ -391,7 +429,19 @@ impl MomentumLong {
             bound: None,
             effective: vec![(0, params); id_space],
             conflicts: 0,
+            traces: Vec::new(),
+            declines: Vec::new(),
         })
+    }
+
+    /// The symbols it watched and declined, in order.
+    pub fn declines(&self) -> &[Decline] {
+        &self.declines
+    }
+
+    /// The evidence behind each entry intent, in order.
+    pub fn entry_traces(&self) -> &[EntryTrace] {
+        &self.traces
     }
 
     /// Times a store's overrides, combined, made an invalid parameter set and the base
@@ -445,6 +495,25 @@ impl MomentumLong {
 
     fn cooldown_timer(&self, i: InstrumentId) -> TimerId {
         TimerId(self.phase.len() as u32 + i)
+    }
+
+    fn decline(
+        &mut self,
+        ctx: &Ctx<'_>,
+        i: InstrumentId,
+        reason: DeclineReason,
+        f: &PullbackFeatures,
+        impulse_permille: i64,
+        p: &MomentumParams,
+    ) {
+        self.declines.push(Decline {
+            instrument: i,
+            ts: ctx.now(),
+            reason,
+            features: *f,
+            impulse_permille,
+            params: *p,
+        });
     }
 
     fn stop_watching(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId) {
@@ -504,12 +573,14 @@ impl MomentumLong {
         if impulse < i128::from(p.min_impulse_permille) || f.secs_since_high < p.min_pullback_secs {
             if f.secs_since_high > p.max_pullback_secs {
                 self.stats.rejected_too_old += 1;
+                self.decline(ctx, i, DeclineReason::TooOld, &f, impulse as i64, &p);
                 self.stop_watching(ctx, i);
             }
             return;
         }
         if f.secs_since_high > p.max_pullback_secs {
             self.stats.rejected_too_old += 1;
+            self.decline(ctx, i, DeclineReason::TooOld, &f, impulse as i64, &p);
             self.stop_watching(ctx, i);
             return;
         }
@@ -518,6 +589,7 @@ impl MomentumLong {
                 .is_some_and(|r| r > p.max_volume_ratio_permille);
         if dangerous {
             self.stats.rejected_dangerous += 1;
+            self.decline(ctx, i, DeclineReason::Dangerous, &f, impulse as i64, &p);
             self.stop_watching(ctx, i);
             return;
         }
@@ -564,6 +636,14 @@ impl MomentumLong {
         };
         match ctx.submit(i, req) {
             Ok(intent) => {
+                self.traces.push(EntryTrace {
+                    intent,
+                    instrument: i,
+                    ts: ctx.now(),
+                    features: f,
+                    impulse_permille: impulse as i64,
+                    params: p,
+                });
                 self.stats.entries += 1;
                 self.positions += 1;
                 self.phase[i as usize] = Phase::Entering {

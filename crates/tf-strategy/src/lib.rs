@@ -27,7 +27,9 @@ pub use intent::{
 pub use lifecycle::{
     Decision, LifecycleError, Order, OrderId, OrderState, OrderUpdate, RejectReason,
 };
-pub use momentum::{MomentumLong, MomentumParams, MomentumStats, tunable_specs};
+pub use momentum::{
+    Decline, DeclineReason, EntryTrace, MomentumLong, MomentumParams, MomentumStats, tunable_specs,
+};
 pub use report::{Report, ReportBuilder, Stats};
 pub use sim::{Fill, SimBroker, SimConfig, run_backtest, run_backtest_observed};
 pub use strategy::{BarsError, Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};

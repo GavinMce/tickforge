@@ -1,0 +1,810 @@
+# tickforge backlog: epics (large bodies of work) and the stories inside them
+# (actionable, each independently reviewable and testable).
+#
+# This file is the source of truth; Jira mirrors it.
+#   - `id`      stable local id (E<epic>-S<story>); never reused.
+#   - `status`  todo | done. `done` means the acceptance criteria are met and
+#               covered by tests in the repo (see `evidence`).
+#   - `deps`    local ids that must land first.
+#   - `jira`    issue key, written back once the item exists in Jira.
+# Near-term epics (E01-E06) are detailed; later ones are deliberately coarse
+# and get refined when the preceding phase has taught us something.
+
+jira:
+  site: arb-it-test.atlassian.net
+  project: TIC
+  board: https://arb-it-test.atlassian.net/jira/software/projects/TIC/boards/2/backlog
+  epic_type: Epic
+  story_type: Story
+
+epics:
+  # ---------------------------------------------------------------- Phase 1
+  - id: E01
+    jira: TIC-1
+    title: Foundations and canonical data model
+    phase: 1
+    labels: [phase1, core]
+    goal: One small, fast, stable event model and the project scaffolding everything else builds on.
+    stories:
+      - id: E01-S01
+        jira: TIC-2
+        title: Cargo workspace, pinned toolchain, lints and Taskfile
+        status: done
+        evidence: Cargo.toml, rust-toolchain.toml, Taskfile.yml; `task check` is green
+        ac:
+          - Workspace builds with edition 2024; unsafe code forbidden workspace-wide
+          - "`task check` runs fmt, clippy -D warnings and tests"
+      - id: E01-S02
+        jira: TIC-17
+        title: Canonical Event model (Trade, Quote, Status) with fixed-point prices
+        status: done
+        evidence: crates/tf-core/src/{event,px}.rs
+        ac:
+          - Event is Copy and at most 64 bytes (compile-time assertion)
+          - Px is i64 at 1e-9 (Databento scale); floats only via explicit from_f64
+          - Status covers halt, resume, LULD band and SSR
+      - id: E01-S03
+        jira: TIC-18
+        title: Clock abstraction (SystemClock, monotonic SimClock)
+        status: done
+        evidence: crates/tf-core/src/clock.rs
+        ac:
+          - SimClock never moves backwards
+          - Engine-facing code takes a Clock; documented rule against direct wall-clock use
+      - id: E01-S04
+        jira: TIC-19
+        title: Stable little-endian binary encoding with decode and FNV-1a hash
+        status: done
+        evidence: crates/tf-core/src/{encode,hash}.rs
+        ac:
+          - Encode/decode round-trips every event kind back to back
+          - Truncated and corrupt input return errors, never panic
+          - Encoded sizes are pinned by a test
+      - id: E01-S05
+        jira: TIC-20
+        title: CI pipeline (GitHub Actions)
+        status: todo
+        ac:
+          - Runs fmt, clippy -D warnings and tests on every PR
+          - Cargo cache configured; runs in under 5 minutes
+          - Required check on the main branch
+      - id: E01-S06
+        jira: TIC-21
+        title: Persistent security master (stable instrument ids)
+        status: todo
+        deps: [E01-S02]
+        ac:
+          - Ids stable across days, ticker changes and corporate actions
+          - Maps provider-native ids (Databento instrument_id, Alpaca symbol) to InstrumentId
+          - Loaded at startup into a dense array for hot-path lookups
+      - id: E01-S07
+        jira: TIC-22
+        title: Event model v2 (corrections, cancel-errors, news, schema versioning)
+        status: todo
+        deps: [E01-S02]
+        ac:
+          - Correction and cancel-error events modelled (Alpaca corrections/cancelErrors)
+          - NewsEvent with arrival timestamp for point-in-time use
+          - Encoding carries a schema version; old tapes still decode
+      - id: E01-S08
+        jira: TIC-23
+        title: ADR process and contributor docs
+        status: todo
+        ac:
+          - docs/adr/ with a template and the first ADRs (language, no Redis on hot path, determinism rules)
+          - README workflow section matches how Jira keys are used in branches and commits
+
+  - id: E02
+    jira: TIC-3
+    title: Provider abstraction and synthetic provider
+    phase: 1
+    labels: [phase1, synth, providers]
+    goal: A test provider modelled closely on Databento and Alpaca, deterministic enough to build and verify everything else against.
+    stories:
+      - id: E02-S01
+        jira: TIC-24
+        title: Provider trait, capabilities and vendor-shaped error model
+        status: done
+        evidence: crates/tf-provider/src/lib.rs
+        ac:
+          - Synchronous pull-based poll contract; no async runtime in engine-facing code
+          - Capabilities express connection cap, symbol cap, wildcard, replay window and wire format
+          - Errors mirror Alpaca 405/406 semantics
+      - id: E02-S02
+        jira: TIC-25
+        title: Deterministic synthetic generator with runner scenarios
+        status: done
+        evidence: crates/tf-synth/src/{symbol_gen,scenario,stream}.rs; golden hash test
+        ac:
+          - Same seed and config give a byte-identical stream (golden hash pinned)
+          - Integer-only maths and an in-crate PRNG, no dependence on rand or libm
+          - Healthy-pullback and dangerous-pullback runner shapes asserted by tests
+      - id: E02-S03
+        jira: TIC-26
+        title: Fault injection (drops, duplicates, reordering, connection and symbol limits, replay)
+        status: done
+        evidence: crates/tf-synth/src/provider.rs; tests in tests.rs and crates/tf-replay/tests
+        ac:
+          - Shared Account enforces the concurrent-connection limit across provider instances
+          - Reconnect with replay re-delivers from a timestamp with identical seqs (one boundary duplicate)
+          - Reconnect without replay loses exactly the outage
+      - id: E02-S04
+        jira: TIC-27
+        title: Scenario library v2 (halt-up, LULD, SSR, squeeze, gap-and-go, multi-spike)
+        status: todo
+        deps: [E01-S02]
+        ac:
+          - Each scenario emits the matching Status events and price/volume behaviour
+          - Multi-spike scenario exercises Strategy 1 re-arm logic
+          - Squeeze scenario produces a gap that defeats a naive stop
+          - Golden hashes added per scenario
+      - id: E02-S05
+        jira: TIC-28
+        title: Calibrate synthetic realism against real tape
+        status: todo
+        deps: [E06-S01]
+        ac:
+          - Burstier arrivals, U-shaped intraday volume and realistic spread/size distributions fitted to Databento historical data
+          - Calibration is a documented, reproducible script
+          - Synthetic message rates reach realistic open-bell peaks
+      - id: E02-S06
+        jira: TIC-29
+        title: Synthetic news and sentiment events correlated with scenarios
+        status: todo
+        deps: [E01-S07]
+        ac:
+          - Headline events precede or follow price scenarios with configurable lead and lag
+          - Deterministic under seed
+      - id: E02-S07
+        jira: TIC-30
+        title: Synthetic provider as a WebSocket server
+        status: todo
+        ac:
+          - Serves the Alpaca-style JSON/msgpack protocol with auth, subscribe and 405/406 errors
+          - Lets ingestor networking, reconnect and backpressure code paths be tested end to end
+          - Deployable as a pod for cluster integration tests
+      - id: E02-S08
+        jira: TIC-31
+        title: Wire-format emulation and parse-cost realism
+        status: todo
+        deps: [E02-S07]
+        ac:
+          - JSON and msgpack framing selectable per run
+          - Benchmark shows ingest cost with realistic message sizes
+
+  - id: E03
+    jira: TIC-4
+    title: Deterministic run loop and replay
+    phase: 1
+    labels: [phase1, replay]
+    goal: A run is a pure function of (provider, subscription, sink, config), so live, replay and backtest share one code path and runs parallelise freely.
+    stories:
+      - id: E03-S01
+        jira: TIC-32
+        title: run() loop on a simulated clock with reconnect and resume
+        status: done
+        evidence: crates/tf-replay/src/lib.rs
+        ac:
+          - Drives any Provider to exhaustion, advancing SimClock to each ts_recv
+          - Reconnects up to a limit, resuming from the last ts_recv; reports Stalled and TooManyReconnects
+      - id: E03-S02
+        jira: TIC-33
+        title: Sinks (hash, stats, dedupe, vec, tee)
+        status: done
+        evidence: crates/tf-replay/src/sinks.rs; crates/tf-replay/tests/determinism.rs
+        ac:
+          - Identical runs give identical hashes
+          - A run that drops, replays and dedupes matches the clean run exactly
+      - id: E03-S03
+        jira: TIC-34
+        title: Run manifest and results schema
+        status: todo
+        ac:
+          - Manifest records git sha, config, seed, params hash and data range
+          - Results written as a stable schema, keyed by the manifest hash for dedupe of reruns
+      - id: E03-S04
+        jira: TIC-35
+        title: Tape replay driver (1x to Nx) as a Provider
+        status: todo
+        deps: [E04-S01]
+        ac:
+          - Reads a tape file through the same Provider trait
+          - Speed control with injected clock; as-fast-as-possible mode for backtests
+      - id: E03-S05
+        jira: TIC-36
+        title: Throughput and tail-latency benchmark harness
+        status: todo
+        ac:
+          - Benchmarks events/s and per-event p50/p99/p99.9 through the run loop with a realistic sink
+          - Results tracked per commit so regressions are visible
+      - id: E03-S06
+        jira: TIC-37
+        title: Cross-platform determinism gate
+        status: todo
+        deps: [E01-S05]
+        ac:
+          - CI runs the golden-hash tests on x86_64 and aarch64 Linux
+          - Any hash drift fails the build
+
+  - id: E04
+    jira: TIC-5
+    title: Storage and archival
+    phase: 1
+    labels: [phase1, storage]
+    goal: Every session is captured as a replayable raw tape and queryable columnar data; flushing never blocks the engine.
+    stories:
+      - id: E04-S01
+        jira: TIC-38
+        title: Raw tape format and writer/reader
+        status: todo
+        deps: [E01-S04]
+        ac:
+          - Length-prefixed encoded events, zstd-compressed blocks, footer index, versioned header
+          - 10M synthetic events round-trip bit-exactly
+          - Seek by ts_recv in O(log n)
+      - id: E04-S02
+        jira: TIC-39
+        title: Parquet writer partitioned by date, schema and symbol bucket
+        status: todo
+        deps: [E01-S02]
+        ac:
+          - Row groups sized for DuckDB scans; zstd
+          - Prices stored as integers with the scale in metadata
+      - id: E04-S03
+        jira: TIC-40
+        title: MinIO deployment, buckets and lifecycle rules
+        status: todo
+        ac:
+          - Buckets for tapes, parquet and results; retention policy per bucket
+          - Credentials via SOPS-managed secrets
+      - id: E04-S04
+        jira: TIC-41
+        title: Archiver service consuming JetStream
+        status: todo
+        deps: [E04-S01, E04-S02, E05-S01]
+        ac:
+          - Consumer-group based; restarts resume without loss or duplicates
+          - Flushes row groups every few minutes; engine is never blocked by it
+      - id: E04-S05
+        jira: TIC-42
+        title: DuckDB query layer with agent-safe read-only views
+        status: todo
+        deps: [E04-S02]
+        ac:
+          - Documented sample queries (bars, volume by symbol, tick windows)
+          - Read-only credentials and row/time limits for agent use
+      - id: E04-S06
+        jira: TIC-43
+        title: Nightly compaction CronJob and retention
+        status: todo
+        deps: [E04-S02, E04-S03]
+        ac:
+          - Small files merged per partition; idempotent and safe to rerun
+          - Retention enforced and logged
+
+  # ---------------------------------------------------------------- Phase 0 / 2
+  - id: E05
+    jira: TIC-6
+    title: Messaging backbone and ingestor framework
+    phase: 2
+    labels: [phase2, ingest, k8s]
+    goal: A robust ingestor shell that any provider adapter plugs into.
+    stories:
+      - id: E05-S01
+        jira: TIC-44
+        title: Deploy NATS JetStream
+        status: todo
+        ac:
+          - Single-node on the cluster with persistent storage; subject taxonomy md.<shard>.<kind>
+          - Retention sized for one trading day
+      - id: E05-S02
+        jira: TIC-45
+        title: Ingestor skeleton (provider to engine channel and JetStream publish)
+        status: todo
+        deps: [E02-S01, E05-S01]
+        ac:
+          - Runs against the synthetic provider end to end in-cluster
+          - Batching and publish never block the engine feed
+      - id: E05-S03
+        jira: TIC-46
+        title: Lease-based leader election for singleton ingestors
+        status: todo
+        deps: [E05-S02]
+        ac:
+          - Failover within seconds; no two active sessions on a one-connection plan
+      - id: E05-S04
+        jira: TIC-47
+        title: Bounded dedupe window and gap detection with gap-fill
+        status: todo
+        deps: [E05-S02]
+        ac:
+          - Dedupes on (provider, instrument, ts_event, seq) in bounded memory
+          - Gaps detected and filled via provider replay or REST backfill
+          - Proven against synthetic drop, duplicate and reorder faults
+      - id: E05-S05
+        jira: TIC-48
+        title: Backpressure and drop policy
+        status: todo
+        deps: [E05-S02]
+        ac:
+          - Bounded SPSC queue between feed and engine; feed is never blocked
+          - Drops are counted and exported as metrics; policy documented
+  - id: E06
+    jira: TIC-7
+    title: Databento integration
+    phase: 2
+    labels: [phase0, phase2, databento]
+    goal: Real market data in, measured and captured.
+    stories:
+      - id: E06-S01
+        jira: TIC-49
+        title: "Phase 0: measure real message rates and symbol skew"
+        status: todo
+        ac:
+          - Pull one day of Databento historical data for the target universe
+          - Report per-second peak and sustained rates, per-symbol skew, trades vs quotes
+          - Decide whether Tier 0 can afford quotes; resize hot-state estimates
+      - id: E06-S02
+        jira: TIC-50
+        title: Databento live adapter (official Rust client)
+        status: todo
+        deps: [E01-S06, E05-S02]
+        ac:
+          - Maps trades/top-of-book/status records to canonical events with zero rounding on prices
+          - Passes the same provider conformance tests as the synthetic provider
+      - id: E06-S03
+        jira: TIC-51
+        title: Session management with intraday replay and symbol sharding
+        status: todo
+        deps: [E06-S02]
+        ac:
+          - Reconnect resumes with a start timestamp; no loss across a forced disconnect
+          - Universe changes mid-session handled by a new session where replay is needed
+          - Shards symbols across sessions within the plan limit
+      - id: E06-S04
+        jira: TIC-52
+        title: Raw DBN tape capture to MinIO
+        status: todo
+        deps: [E06-S02, E04-S03]
+        ac:
+          - Provider-native stream stored alongside normalized data
+          - Replayable through the tape driver
+      - id: E06-S05
+        jira: TIC-53
+        title: Symbology mapping and daily instrument definitions
+        status: todo
+        deps: [E01-S06, E06-S02]
+        ac:
+          - instrument_id to symbol mapping kept current intraday
+      - id: E06-S06
+        jira: TIC-54
+        title: Halt, LULD and status handling
+        status: todo
+        deps: [E06-S02]
+        ac:
+          - Halts and LULD bands surface as Status events with correct timestamps
+
+  # ---------------------------------------------------------------- Phase 3
+  - id: E07
+    jira: TIC-8
+    title: Hot engine (Tier 0 and Tier 1)
+    phase: 3
+    labels: [phase3, engine]
+    goal: Per-symbol state for the whole universe in RAM, a scanner, and detailed state for promoted symbols.
+    stories:
+      - id: E07-S01
+        jira: TIC-55
+        title: Tier 0 state arrays indexed by InstrumentId
+        status: todo
+        deps: [E01-S02]
+        ac:
+          - Last, bid/ask, day high/low, VWAP and cumulative volume per symbol
+          - No heap allocation and no hashing per event
+      - id: E07-S02
+        jira: TIC-56
+        title: Allocation-free rolling-window primitives
+        status: todo
+        ac:
+          - Ring buffers for 1s/5s/60s volume and price change; 1s bars; EWMA baselines
+          - Property tests against a naive reference implementation
+      - id: E07-S03
+        jira: TIC-57
+        title: Premarket baseline loader (ADV and RVOL baselines)
+        status: todo
+        deps: [E04-S05]
+        ac:
+          - Built nightly from stored data; loaded into arrays at startup
+      - id: E07-S04
+        jira: TIC-58
+        title: Scanner (volume z-score and price spike with universe filters)
+        status: todo
+        deps: [E07-S01, E07-S02, E14-S01]
+        ac:
+          - Detects every synthetic runner scenario with zero false negatives and a measured false-positive rate on quiet symbols
+          - Filters by float, price and spread
+      - id: E07-S05
+        jira: TIC-59
+        title: Promotion and demotion between tiers with hysteresis
+        status: todo
+        deps: [E07-S04]
+        ac:
+          - Promotion and demotion events logged to the tape; bounded Tier 1 size
+      - id: E07-S06
+        jira: TIC-60
+        title: Tier 1 rings and pullback features
+        status: todo
+        deps: [E07-S05]
+        ac:
+          - Tick/quote rings plus pullback depth, higher-low structure, tape speed and spread features
+          - Features deterministic under replay
+      - id: E07-S07
+        jira: TIC-61
+        title: Engine performance budget and benchmark
+        status: todo
+        deps: [E03-S05, E07-S06]
+        ac:
+          - p99 per-event latency under a synthetic open-bell burst meets a documented budget
+      - id: E07-S08
+        jira: TIC-62
+        title: Spike - shard-by-instrument design and subject routing
+        status: todo
+        ac:
+          - Written recommendation, backed by E06-S01 numbers, on whether and how to shard
+  - id: E08
+    jira: TIC-9
+    title: Strategy framework and Strategy 1 (low-float momentum)
+    phase: 3
+    labels: [phase3, strategy]
+    goal: Strategies as deterministic state machines emitting intents, backtestable on the same engine.
+    stories:
+      - id: E08-S01
+        jira: TIC-63
+        title: Strategy trait (events and timers in, intents out)
+        status: todo
+        deps: [E07-S01]
+        ac:
+          - No wall clock and no I/O available to strategy code
+      - id: E08-S02
+        jira: TIC-64
+        title: Intent and order-lifecycle types
+        status: todo
+        ac:
+          - Intents carry strategy, symbol, side, size, limit/collar and protective-order parameters
+      - id: E08-S03
+        jira: TIC-65
+        title: Strategy 1 long side (healthy-pullback entry and ride)
+        status: todo
+        deps: [E08-S01, E07-S06, E02-S02]
+        ac:
+          - Enters on the healthy-pullback synthetic scenario and not on the dangerous one
+          - All thresholds come from a typed parameter set
+      - id: E08-S04
+        jira: TIC-66
+        title: Strategy 1 short side (dangerous-pullback fade)
+        status: todo
+        deps: [E08-S03, E09-S02]
+        ac:
+          - Shorts only when every gateway short check passes
+          - Sizing derived from worst-case gap
+      - id: E08-S05
+        jira: TIC-67
+        title: Re-arm and cooldown for multi-spike names
+        status: todo
+        deps: [E08-S03, E02-S04]
+        ac:
+          - Handles repeated spikes on one symbol without double entries
+      - id: E08-S06
+        jira: TIC-68
+        title: Fill, slippage and borrow-cost simulation for backtests
+        status: todo
+        ac:
+          - Marketable-limit fills against recorded quotes with latency; borrow fee modelled
+      - id: E08-S07
+        jira: TIC-69
+        title: Backtest report
+        status: todo
+        deps: [E08-S06, E03-S03]
+        ac:
+          - PnL, drawdown, slippage, hit rate and per-scenario breakdown
+  # ---------------------------------------------------------------- Phase 4
+  - id: E09
+    jira: TIC-10
+    title: Risk gateway, OMS and Alpaca paper execution
+    phase: 4
+    labels: [phase4, risk, execution]
+    goal: Nothing reaches the broker without passing hard limits; state survives restarts.
+    stories:
+      - id: E09-S01
+        jira: TIC-70
+        title: Risk gateway process (caps, daily loss, rate limits, kill switch)
+        status: todo
+        deps: [E08-S02]
+        ac:
+          - Rejections are explicit, logged and metriced; limits are not agent-tunable
+      - id: E09-S02
+        jira: TIC-71
+        title: Short-specific checks
+        status: todo
+        deps: [E09-S01, E14-S02]
+        ac:
+          - Shortable/ETB or locate, SSR, halt/LULD, spread and run-up checks
+      - id: E09-S03
+        jira: TIC-72
+        title: Gap-based position sizing
+        status: todo
+        deps: [E09-S01]
+        ac:
+          - A +100 percent gap on any short loses at most a configured fraction of equity
+      - id: E09-S04
+        jira: TIC-73
+        title: Order state machine and event-sourced Postgres ledger
+        status: todo
+        ac:
+          - Restart reconstructs open orders and positions exactly
+      - id: E09-S05
+        jira: TIC-74
+        title: Alpaca trading adapter (paper)
+        status: todo
+        deps: [E09-S04]
+        ac:
+          - Orders, brackets and trade_updates stream; marketable-limit collars
+      - id: E09-S06
+        jira: TIC-75
+        title: Broker reconciliation loop
+        status: todo
+        deps: [E09-S05]
+        ac:
+          - Divergence between ledger and broker alerts within seconds
+      - id: E09-S07
+        jira: TIC-76
+        title: External watchdog (heartbeat then flatten)
+        status: todo
+        deps: [E09-S05]
+        ac:
+          - Runs off-cluster; flattens or protects positions when the engine heartbeat stops
+      - id: E09-S08
+        jira: TIC-77
+        title: Simulated broker for backtests and CI
+        status: todo
+        deps: [E09-S04, E02-S02]
+        ac:
+          - Same adapter interface as Alpaca; fills against synthetic quotes with latency and rejects
+  - id: E10
+    jira: TIC-11
+    title: Alpaca data and news adapter
+    phase: 5
+    labels: [phase5, alpaca]
+    goal: Alpaca as secondary market data and the news source.
+    stories:
+      - id: E10-S01
+        jira: TIC-78
+        title: Alpaca market data websocket adapter
+        status: todo
+        deps: [E05-S02]
+        ac:
+          - Trades, quotes, statuses, lulds and corrections mapped to canonical events; passes provider conformance tests
+      - id: E10-S02
+        jira: TIC-79
+        title: News stream ingestion
+        status: todo
+        deps: [E01-S07]
+        ac:
+          - Canonical NewsEvent with arrival timestamp stored for point-in-time use
+      - id: E10-S03
+        jira: TIC-80
+        title: REST backfill for gaps
+        status: todo
+        deps: [E05-S04]
+        ac:
+          - Fills detected gaps from the REST API without duplicating events
+
+  # ---------------------------------------------------------------- Later phases
+  - id: E11
+    jira: TIC-12
+    title: Parallel compute (backtests and sweeps on Kubernetes)
+    phase: 3
+    labels: [phase3, k8s, backtest]
+    goal: Thousands of independent runs as Jobs, reproducible and cached.
+    stories:
+      - id: E11-S01
+        jira: TIC-81
+        title: Container image and Job template for tf run
+        status: todo
+        deps: [E03-S03]
+        ac:
+          - Run is parameterised by manifest; reads from MinIO and writes results
+      - id: E11-S02
+        jira: TIC-82
+        title: Indexed-Job sweep orchestrator and results store
+        status: todo
+        deps: [E11-S01]
+        ac:
+          - Grid and suggestion-driven sweeps; reruns deduped by manifest hash
+      - id: E11-S03
+        jira: TIC-83
+        title: Kueue and PriorityClasses
+        status: todo
+        ac:
+          - A large sweep cannot starve the live engine; batch work is preemptible
+      - id: E11-S04
+        jira: TIC-84
+        title: Walk-forward evaluation harness
+        status: todo
+        deps: [E11-S02]
+        ac:
+          - Out-of-sample metrics reported next to in-sample; overfit flagged
+      - id: E11-S05
+        jira: TIC-85
+        title: Optional cloud-burst node pool
+        status: todo
+        ac:
+          - Sweeps can run on spot nodes with only a node-pool change
+  - id: E12
+    jira: TIC-13
+    title: Agent layer
+    phase: 5
+    labels: [phase5, agents, mcp]
+    goal: Agents do research, news triage, review and bounded live tuning, without touching the fast loop or risk limits.
+    stories:
+      - id: E12-S01
+        jira: TIC-86
+        title: ParamStore with typed bounds and param-change events
+        status: todo
+        deps: [E08-S03]
+        ac:
+          - Each parameter has min, max, max_step, cooldown and scope; out-of-bounds proposals rejected
+          - Every change is an event in the tape with reason and evidence; replay reproduces it
+          - Changes apply to new entries only
+      - id: E12-S02
+        jira: TIC-87
+        title: Shadow fixed-parameter baseline and A/B metrics
+        status: todo
+        deps: [E12-S01, E09-S08]
+        ac:
+          - Baseline runs on the same feed with virtual fills; comparison metrics exported
+      - id: E12-S03
+        jira: TIC-88
+        title: Auto-revert policy
+        status: todo
+        deps: [E12-S02]
+        ac:
+          - Reverts to baseline parameters on a configured drawdown versus the shadow
+      - id: E12-S04
+        jira: TIC-89
+        title: MCP server read tools
+        status: todo
+        deps: [E04-S05]
+        ac:
+          - snapshot, scan, bars and query_ticks with read-only access
+      - id: E12-S05
+        jira: TIC-90
+        title: MCP research tools (sandboxed run_backtest)
+        status: todo
+        deps: [E11-S02]
+        ac:
+          - Agents can launch bounded backtests; no broker credentials reachable
+      - id: E12-S06
+        jira: TIC-91
+        title: MCP action tools with permission tiers and approval gate
+        status: todo
+        deps: [E09-S01]
+        ac:
+          - read-only, paper and live-with-approval tiers enforced server-side
+      - id: E12-S07
+        jira: TIC-92
+        title: News triage agent
+        status: todo
+        deps: [E10-S02]
+        ac:
+          - Cheap-model classification with per-article caching; output is a point-in-time feature
+      - id: E12-S08
+        jira: TIC-93
+        title: Universe curator, strategy researcher, trade reviewer and ops agents
+        status: todo
+        deps: [E12-S04, E12-S05]
+        ac:
+          - Each has a defined tool allowlist and a reviewable output
+      - id: E12-S09
+        jira: TIC-94
+        title: Agent sandbox and isolation
+        status: todo
+        ac:
+          - gVisor/Kata runtime class and NetworkPolicy; no egress to broker credentials
+  - id: E13
+    jira: TIC-14
+    title: Platform and observability
+    phase: 2
+    labels: [k8s, platform, observability]
+    goal: Deployable, observable, secure on the Talos cluster.
+    stories:
+      - id: E13-S01
+        jira: TIC-95
+        title: Dedicated node, taints, PriorityClasses, Guaranteed QoS and CPU manager on Talos
+        status: todo
+        ac:
+          - Live-path pods land only on the dedicated node; static CPU policy verified
+      - id: E13-S02
+        jira: TIC-96
+        title: Kustomize/Helm packaging and Flux integration
+        status: todo
+        ac:
+          - Services deployed from this repo via the existing GitOps flow
+      - id: E13-S03
+        jira: TIC-97
+        title: Metrics and dashboards (tick-to-trade, feed lag, gaps, drops)
+        status: todo
+        ac:
+          - Histograms for ts_event, ts_recv, engine, order_sent and ack stages in Grafana
+      - id: E13-S04
+        jira: TIC-98
+        title: Alerting (feed stalled, gaps, risk breaches, reconciliation drift)
+        status: todo
+        ac:
+          - Alerts reach a human within a minute of each condition in tests
+      - id: E13-S05
+        jira: TIC-99
+        title: Secrets management for Databento and Alpaca keys
+        status: todo
+        ac:
+          - SOPS-encrypted in git; never in logs or images
+  - id: E14
+    jira: TIC-15
+    title: Reference data
+    phase: 3
+    labels: [phase3, refdata]
+    goal: Float, short interest and borrow data that neither provider supplies.
+    stories:
+      - id: E14-S01
+        jira: TIC-100
+        title: Float and short-interest source evaluation and ingest
+        status: todo
+        ac:
+          - Source chosen with cost, freshness and coverage documented; daily ingest job
+      - id: E14-S02
+        jira: TIC-101
+        title: Borrow availability and fees
+        status: todo
+        ac:
+          - Shortable/ETB and locate availability queryable by the risk gateway
+      - id: E14-S03
+        jira: TIC-102
+        title: Daily universe builder
+        status: todo
+        deps: [E14-S01]
+        ac:
+          - Produces the watched universe each premarket as a versioned artifact
+  - id: E15
+    jira: TIC-16
+    title: "Strategy 2 (swing: sweeps and news)"
+    phase: 5
+    labels: [phase5, strategy]
+    goal: A slow-loop strategy on bars and news sentiment.
+    stories:
+      - id: E15-S01
+        jira: TIC-103
+        title: Bar aggregation (1m, 5m, daily) and storage
+        status: todo
+        deps: [E04-S02]
+        ac:
+          - Bars reproducible from ticks; stored and queryable
+      - id: E15-S02
+        jira: TIC-104
+        title: Sweep-of-lows detector
+        status: todo
+        deps: [E15-S01]
+        ac:
+          - Detects swing-low sweeps and reclaims on bars, validated on synthetic and real data
+      - id: E15-S03
+        jira: TIC-105
+        title: News sentiment feature pipeline
+        status: todo
+        deps: [E12-S07]
+        ac:
+          - Point-in-time correct; never leaks future information into backtests
+      - id: E15-S04
+        jira: TIC-106
+        title: Strategy 2 service
+        status: todo
+        deps: [E15-S02, E15-S03, E09-S01]
+        ac:
+          - Confirms tape strength via Tier 1 promotion before entry; orders go through the risk gateway

@@ -1,0 +1,18 @@
+[package]
+name = "tf-replay"
+description = "Deterministic run loop: drive any Provider into sinks on a simulated clock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+tf-provider.workspace = true
+
+[dev-dependencies]
+tf-synth.workspace = true

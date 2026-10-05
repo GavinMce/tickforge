@@ -1,0 +1,39 @@
+version: '3'
+
+vars:
+  # Rust was installed with --no-modify-path, so ~/.cargo/bin is not on PATH
+  # by default. Calling cargo by full path works either way.
+  CARGO: '{{env "HOME"}}/.cargo/bin/cargo'
+
+tasks:
+  build:
+    desc: Build the workspace
+    cmds:
+      - '{{.CARGO}} build --workspace'
+
+  test:
+    desc: Run all tests
+    cmds:
+      - '{{.CARGO}} test --workspace'
+
+  lint:
+    desc: Format check + clippy (warnings are errors)
+    cmds:
+      - '{{.CARGO}} fmt --all --check'
+      - '{{.CARGO}} clippy --workspace --all-targets -- -D warnings'
+
+  fmt:
+    desc: Format the workspace
+    cmds:
+      - '{{.CARGO}} fmt --all'
+
+  check:
+    desc: Everything CI should run
+    cmds:
+      - task: lint
+      - task: test
+
+  synth:
+    desc: "Run the synthetic provider through the run loop (ARGS='--symbols 5000 --secs 600')"
+    cmds:
+      - '{{.CARGO}} run --release --quiet --bin tf -- synth {{.ARGS}}'

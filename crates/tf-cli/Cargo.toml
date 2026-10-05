@@ -1,0 +1,21 @@
+[package]
+name = "tf-cli"
+description = "tickforge command line"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tf"
+path = "src/main.rs"
+
+[dependencies]
+tf-core.workspace = true
+tf-provider.workspace = true
+tf-synth.workspace = true
+tf-replay.workspace = true

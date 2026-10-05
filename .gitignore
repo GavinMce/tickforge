@@ -1,0 +1,5 @@
+/target
+*.tape
+*.tape.zst
+/data
+.env

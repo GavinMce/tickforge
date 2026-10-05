@@ -533,7 +533,8 @@ epics:
       - id: E09-S01
         jira: TIC-70
         title: Risk gateway process (caps, daily loss, rate limits, kill switch)
-        status: todo
+        status: done
+        evidence: crates/tf-risk (Gateway, Limits; audit log and per-reason counters; 17 tests incl. random-traffic invariants; 14 mutations caught, one found a test gap that was then closed); ADR 0012. The hosting process and limits file are still to do, so the process aspect is library-only
         deps: [E08-S02]
         ac:
           - Rejections are explicit, logged and metriced; limits are not agent-tunable

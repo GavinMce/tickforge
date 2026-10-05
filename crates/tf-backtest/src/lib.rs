@@ -23,6 +23,7 @@
 //! Event time throughout; nothing here reads a clock or does I/O.
 
 pub mod ab;
+pub mod compare;
 pub mod export;
 
 use std::collections::BTreeMap;

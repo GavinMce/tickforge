@@ -123,6 +123,82 @@ fn write_evaluations(w: &mut W, evals: &[Evaluation]) {
     w.raw("]");
 }
 
+/// One entry and, if it closed, its exit, from the gateway's decisions and the fills.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoundTrip {
+    pub instrument: InstrumentId,
+    /// Index into `result.decisions` of the entry and exit orders.
+    pub order: usize,
+    pub exit_order: Option<usize>,
+    pub qty: u32,
+    pub entry_px: i64,
+    pub exit_px: Option<i64>,
+    pub t_in: Nanos,
+    pub t_out: Option<Nanos>,
+    pub pnl: Option<i128>,
+}
+
+/// Every accepted, filled opening order with the first accepted close that follows it.
+pub fn round_trips(result: &BacktestResult) -> Vec<RoundTrip> {
+    let mut out = Vec::new();
+    for (k, (intent, decision)) in result.decisions.iter().enumerate() {
+        let entry_fills: Vec<_> = result
+            .fill_log
+            .iter()
+            .filter(|f| f.intent == intent.id)
+            .collect();
+        if intent.purpose != Purpose::Open
+            || !matches!(decision, Decision::Accepted(_))
+            || entry_fills.is_empty()
+        {
+            continue;
+        }
+        let inst = intent.instrument;
+        let exit = result
+            .decisions
+            .iter()
+            .enumerate()
+            .skip(k + 1)
+            .find(|(_, (i, d))| {
+                i.instrument == inst
+                    && i.purpose == Purpose::Close
+                    && matches!(d, Decision::Accepted(_))
+            });
+        let exit_fills: Vec<_> = exit
+            .map(|(_, (i, _))| {
+                result
+                    .fill_log
+                    .iter()
+                    .filter(|f| f.intent == i.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let qty: u32 = entry_fills.iter().map(|f| f.qty).sum();
+        let avg = |fs: &[&tf_strategy::Fill]| -> Option<i64> {
+            let q: i128 = fs.iter().map(|f| i128::from(f.qty)).sum();
+            (q > 0).then(|| {
+                (fs.iter()
+                    .map(|f| i128::from(f.px.raw()) * i128::from(f.qty))
+                    .sum::<i128>()
+                    / q) as i64
+            })
+        };
+        let (entry_px, exit_px) = (avg(&entry_fills).unwrap_or(0), avg(&exit_fills));
+        out.push(RoundTrip {
+            instrument: inst,
+            order: k,
+            exit_order: exit.map(|(j, _)| j),
+            qty,
+            entry_px,
+            exit_px,
+            t_in: entry_fills[0].ts,
+            t_out: exit_fills.last().map(|f| f.ts),
+            pnl: exit_px.map(|e| i128::from(e - entry_px) * i128::from(qty)),
+        });
+    }
+    out
+}
+
 /// Build the JSON document.
 pub fn export_json(
     events: &[Event],
@@ -372,52 +448,12 @@ pub fn export_json(
     // Round trips: an entry order and, if any, its exit, with the stop's path.
     w.raw("\"trades\":[");
     let mut first = true;
-    for (k, (intent, decision)) in result.decisions.iter().enumerate() {
-        let entry_fills: Vec<_> = result
-            .fill_log
-            .iter()
-            .filter(|f| f.intent == intent.id)
-            .collect();
-        if intent.purpose != Purpose::Open
-            || !matches!(decision, Decision::Accepted(_))
-            || entry_fills.is_empty()
-        {
-            continue;
-        }
-        let inst = intent.instrument;
-        let exit = result
-            .decisions
-            .iter()
-            .enumerate()
-            .skip(k + 1)
-            .find(|(_, (i, d))| {
-                i.instrument == inst
-                    && i.purpose == Purpose::Close
-                    && matches!(d, Decision::Accepted(_))
-            });
-        let exit_fills: Vec<_> = exit
-            .map(|(_, (i, _))| {
-                result
-                    .fill_log
-                    .iter()
-                    .filter(|f| f.intent == i.id)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let qty: u32 = entry_fills.iter().map(|f| f.qty).sum();
-        let avg = |fs: &[&tf_strategy::Fill]| -> Option<i64> {
-            let q: i128 = fs.iter().map(|f| i128::from(f.qty)).sum();
-            (q > 0).then(|| {
-                (fs.iter()
-                    .map(|f| i128::from(f.px.raw()) * i128::from(f.qty))
-                    .sum::<i128>()
-                    / q) as i64
-            })
-        };
-        let (entry_px, exit_px) = (avg(&entry_fills).unwrap_or(0), avg(&exit_fills));
-        let pnl = exit_px.map(|e| i128::from(e - entry_px) * i128::from(qty));
-        let t_in = entry_fills[0].ts;
-        let t_out = exit_fills.last().map(|f| f.ts);
+    for rt in round_trips(result) {
+        let k = rt.order;
+        let (intent, _) = &result.decisions[k];
+        let (inst, qty, entry_px, exit_px, pnl) =
+            (rt.instrument, rt.qty, rt.entry_px, rt.exit_px, rt.pnl);
+        let (t_in, t_out) = (rt.t_in, rt.t_out);
         if !first {
             w.raw(",");
         }
@@ -425,7 +461,7 @@ pub fn export_json(
         w.f(format_args!(
             "{{\"instrument\":{inst},\"label\":\"{}\",\"order\":{k},\"exit_order\":{},\"qty\":{qty},\"entry_px\":{},\"exit_px\":{},\"t_in\":{},\"t_out\":{},\"pnl\":{},",
             esc(&labels[inst as usize]),
-            opt(exit.map(|(j, _)| j)),
+            opt(rt.exit_order),
             px(entry_px),
             exit_px.map_or("null".to_owned(), px),
             secs(rel(t_in)),
@@ -527,4 +563,42 @@ fn write_order(w: &mut W, intent: &Intent, decision: Decision, result: &Backtest
         ));
     }
     w.raw("]}");
+}
+
+/// The viewer page, without a document wrapper: a fragment that fills in `<head>` and `<body>`
+/// itself, ready to publish as is.
+pub const VIEWER: &str = include_str!("../explorer/viewer.html");
+
+const PLACEHOLDER: &str = "__TF_DATA__";
+
+/// One document for the viewer: a single run, or two runs and their comparison.
+pub fn bundle(runs: &[String], compare: Option<&str>) -> String {
+    match (runs, compare) {
+        ([one], None) => one.clone(),
+        _ => {
+            let mut s = String::from("{\"runs\":[");
+            s.push_str(&runs.join(","));
+            s.push(']');
+            if let Some(c) = compare {
+                s.push_str(",\"compare\":");
+                s.push_str(c);
+            }
+            s.push('}');
+            s
+        }
+    }
+}
+
+/// The viewer with `data` (from [`export_json`] or [`bundle`]) embedded: the fragment as is.
+pub fn fragment(data: &str) -> String {
+    // `</` cannot appear in a script element's text, and the JSON may carry it in a label.
+    VIEWER.replacen(PLACEHOLDER, &data.replace("</", "<\\/"), 1)
+}
+
+/// A complete, standalone HTML document of the viewer with `data` embedded.
+pub fn page(data: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n{}</html>\n",
+        fragment(data)
+    )
 }

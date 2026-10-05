@@ -904,7 +904,8 @@ epics:
       - id: E16-S02
         jira: TIC-114
         title: Trade explorer on stored runs (rule-set diffs and run comparison)
-        status: todo
+        status: done
+        evidence: tf explore (crates/tf-cli/src/explore.rs) rebuilds a stored run from its manifest, replays it and checks event hash and every metric before showing it; tf_backtest::compare pairs trades (overlap, then symbol) as same/changed/only-in-one with the other run's reason; viewer has run switch, A-vs-B list and same-symbol jump; `tf backtest --export FILE.html` standalone page; 20 mutations caught (5 survivors found and closed); ADR 0027. Viewer checked by running its init and navigation under Node with stubbed DOM, not in a browser. Runs stored before a behaviour change are refused, by design
         deps: [E16-S01, E04-S02]
         ac:
           - The explorer loads a stored run by manifest hash and shows which rule set and version produced each trade

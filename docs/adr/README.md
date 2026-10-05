@@ -24,3 +24,4 @@ How:
 | [0005](0005-security-master-identity.md) | Security master: stable ids, dated tickers, dated provider keys | Accepted |
 | [0006](0006-raw-tape-format.md) | Raw tape format and the zstd dependency | Accepted |
 | [0007](0007-paced-replay-waits-inside-poll.md) | Paced replay waits inside `poll`, on an injected pacer | Accepted |
+| [0008](0008-benchmarks-are-informational-and-tracked-per-commit.md) | Benchmarks are informational and tracked per commit | Accepted |

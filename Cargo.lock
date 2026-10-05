@@ -72,9 +72,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "tf-bench"
+version = "0.1.0"
+dependencies = [
+ "tf-core",
+ "tf-engine",
+ "tf-provider",
+ "tf-replay",
+ "tf-synth",
+ "tf-tape",
+]
+
+[[package]]
 name = "tf-cli"
 version = "0.1.0"
 dependencies = [
+ "tf-bench",
  "tf-core",
  "tf-provider",
  "tf-replay",

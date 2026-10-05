@@ -763,3 +763,20 @@ fn rounding_in_the_gateway_never_loosens_the_rule() {
         "0.999 rounds up to 1, which fits"
     );
 }
+
+#[test]
+fn every_limit_is_recorded_once_and_the_gap_rule_shows() {
+    let plain = Limits::new(5_000 * D, 500, 8_000 * D, 100 * D, 3, 10 * SEC).unwrap();
+    let with_rule = plain.with_gap_rule(generous());
+    let (a, b) = (plain.pairs(), with_rule.pairs());
+    for v in [&a, &b] {
+        let mut names: Vec<_> = v.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), v.len(), "names are unique");
+    }
+    assert!(a.contains(&("gap_rule", "none".to_owned())));
+    assert!(b.iter().any(|(n, _)| *n == "gap_permille"));
+    assert_ne!(a, b);
+    assert!(a.contains(&("max_orders_per_window", "3".to_owned())));
+}

@@ -1,0 +1,17 @@
+[package]
+name = "tf-backtest"
+description = "Backtest loop: strategy, risk gateway, simulated broker and report wired together"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+tf-strategy.workspace = true
+tf-risk.workspace = true
+tf-synth.workspace = true

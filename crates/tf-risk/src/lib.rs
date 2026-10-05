@@ -157,6 +157,41 @@ impl Limits {
         self.gap.as_ref()
     }
 
+    /// Every limit as a name and a value, for recording in a run manifest. It
+    /// destructures the struct, so a new limit that is not recorded is a compile error.
+    pub fn pairs(&self) -> Vec<(&'static str, String)> {
+        let Limits {
+            max_order_notional,
+            max_position_shares,
+            max_gross_notional,
+            max_daily_loss,
+            max_orders_per_window,
+            rate_window_ns,
+            gap,
+        } = *self;
+        let mut v = vec![
+            ("max_order_notional_raw", max_order_notional.to_string()),
+            ("max_position_shares", max_position_shares.to_string()),
+            ("max_gross_notional_raw", max_gross_notional.to_string()),
+            ("max_daily_loss_raw", max_daily_loss.to_string()),
+            ("max_orders_per_window", max_orders_per_window.to_string()),
+            ("rate_window_ns", rate_window_ns.to_string()),
+        ];
+        match gap {
+            Some(GapRule {
+                equity,
+                max_loss_ppm,
+                gap_permille,
+            }) => {
+                v.push(("gap_equity_raw", equity.to_string()));
+                v.push(("gap_max_loss_ppm", max_loss_ppm.to_string()));
+                v.push(("gap_permille", gap_permille.to_string()));
+            }
+            None => v.push(("gap_rule", "none".to_owned())),
+        }
+        v
+    }
+
     pub fn max_order_notional(&self) -> u128 {
         self.max_order_notional
     }

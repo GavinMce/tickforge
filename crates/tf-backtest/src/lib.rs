@@ -1,0 +1,328 @@
+//! The backtest loop: strategy -> risk gateway -> simulated broker -> report.
+//!
+//! Each piece was built and tested alone; this wires them the way a live run
+//! would be, so the gateway's limits apply to a strategy's real intents and the
+//! fills the broker makes flow back to the gateway's book and to the strategy.
+//!
+//! Per market event, in this order:
+//! 1. the broker processes the event (orders that have reached the venue meet the
+//!    market as it was before it);
+//! 2. new fills go to the gateway's position book and the report; orders that
+//!    ended unfilled (expired, cancelled) release the gateway's working exposure;
+//!    the strategy is told what became of its orders;
+//! 3. the report and the gateway's marks see the event;
+//! 4. the strategy sees the event;
+//! 5. every intent it emitted goes to the gateway. An accepted one is sent to the
+//!    broker. A rejected one comes back to the strategy as a rejection, at once,
+//!    so it can free whatever it was holding for the order.
+//!
+//! At the end the broker's remaining orders expire and borrow fees are charged.
+//! The result carries the report, the gateway's rejection counts and audit log,
+//! and both books' final positions so a caller can check they agree.
+//!
+//! Event time throughout; nothing here reads a clock or does I/O.
+
+use std::collections::BTreeMap;
+
+use tf_core::{Event, NANOS_PER_SEC, Nanos};
+use tf_risk::{Audit, GapRule, Gateway, Limits, reason_name};
+use tf_strategy::report::{Report, ReportBuilder, ReportError};
+use tf_strategy::{
+    Decision, Host, IntentId, MomentumLong, MomentumParams, OrderId, OrderState, OrderUpdate,
+    SimBroker, SimConfig, Strategy, StrategyId,
+};
+use tf_synth::{PullbackKind, Scenario, SymbolSpec, SynthConfig, SynthStream};
+
+const DOLLAR: u128 = 1_000_000_000;
+
+#[derive(Clone, Copy, Debug)]
+pub struct BacktestConfig {
+    pub sim: SimConfig,
+    pub limits: Limits,
+    pub params: MomentumParams,
+}
+
+/// Limits for demonstration runs: $5,000 an order, 5,000 shares a name, $20,000
+/// gross, $1,000 daily loss, 20 orders per 10 s, and shorts sized so a doubling
+/// loses at most 2% of $100,000.
+pub fn default_limits() -> Limits {
+    Limits::new(
+        5_000 * DOLLAR,
+        5_000,
+        20_000 * DOLLAR,
+        1_000 * DOLLAR,
+        20,
+        10 * NANOS_PER_SEC,
+    )
+    .expect("valid limits")
+    .with_gap_rule(GapRule::new(100_000 * DOLLAR, 20_000, 1000).expect("valid rule"))
+}
+
+impl Default for BacktestConfig {
+    fn default() -> Self {
+        BacktestConfig {
+            sim: SimConfig {
+                latency_ns: 50_000_000,
+                borrow_bps_per_year: 0,
+            },
+            limits: default_limits(),
+            params: MomentumParams::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BacktestResult {
+    pub report: Report,
+    /// Intents the strategy emitted.
+    pub intents: u64,
+    pub accepted: u64,
+    /// Gateway rejections by reason name.
+    pub rejections: BTreeMap<&'static str, u64>,
+    pub fills: u64,
+    /// Things that should never happen: a fill for an order the gateway did not
+    /// accept, or the gateway refusing a fill or close the broker reported.
+    pub bookkeeping_errors: u64,
+    pub gateway_positions: Vec<i64>,
+    pub broker_positions: Vec<i64>,
+    /// Orders the gateway still counts as working at the end. Zero unless something
+    /// was left open on purpose.
+    pub gateway_working: usize,
+    /// The gateway's P&L (realised plus marked) at the end, raw units.
+    pub gateway_pnl: i128,
+    /// A hash of every decision and fill, for comparing runs.
+    pub outcome_hash: u64,
+    pub audit: Vec<Audit>,
+}
+
+impl BacktestResult {
+    /// The two position books agree on every instrument.
+    pub fn books_agree(&self) -> bool {
+        self.gateway_positions == self.broker_positions
+    }
+}
+
+#[derive(Default)]
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Fnv {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+    fn put(&mut self, v: u64) {
+        for b in v.to_le_bytes() {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+}
+
+/// The state of one gated run.
+struct Loop<'a, S: Strategy> {
+    host: &'a mut Host<S>,
+    broker: &'a mut SimBroker,
+    gateway: &'a mut Gateway,
+    report: ReportBuilder,
+    /// The gateway's order for each accepted intent.
+    orders: BTreeMap<IntentId, OrderId>,
+    seen_fills: usize,
+    hash: Fnv,
+    intents: u64,
+    accepted: u64,
+    errors: u64,
+}
+
+impl<S: Strategy> Loop<'_, S> {
+    /// Everything the broker did since the last call goes to the gateway, the
+    /// report and the strategy.
+    fn settle(&mut self) {
+        for f in &self.broker.fills()[self.seen_fills..] {
+            match self.orders.get(&f.intent) {
+                Some(&id) if self.gateway.on_fill(id, f.qty, f.px).is_ok() => {}
+                _ => self.errors += 1,
+            }
+            self.report.on_fill(f);
+            self.hash.put(f.intent.seq);
+            self.hash.put(u64::from(f.qty));
+            self.hash.put(f.px.raw() as u64);
+            self.hash.put(f.ts);
+        }
+        self.seen_fills = self.broker.fills().len();
+        for u in self.broker.drain_updates() {
+            // An order that finished short of its size frees what it was holding. One
+            // that filled completely was already removed by its last fill.
+            if u.state.is_terminal() && u.state != OrderState::Filled {
+                match self.orders.get(&u.intent) {
+                    Some(&id) if self.gateway.on_closed(id).is_ok() => {}
+                    _ => self.errors += 1,
+                }
+            }
+            self.host.on_order_update(&u);
+        }
+    }
+
+    /// Send what the strategy asked for through the gateway.
+    fn submit_pending(&mut self) {
+        // A rejection can make the strategy submit again, so go round until quiet.
+        for _ in 0..8 {
+            let batch = self.host.drain_intents();
+            if batch.is_empty() {
+                return;
+            }
+            for i in batch {
+                self.intents += 1;
+                match self.gateway.decide(&i, i.ts) {
+                    Decision::Accepted(id) => {
+                        self.accepted += 1;
+                        self.orders.insert(i.id, id);
+                        self.hash.put(i.id.seq << 1);
+                        self.broker.submit(&i);
+                    }
+                    Decision::Rejected(r) => {
+                        self.hash.put(i.id.seq << 1 | 1);
+                        for b in reason_name(&r).bytes() {
+                            self.hash.put(u64::from(b));
+                        }
+                        self.host
+                            .on_order_update(&OrderUpdate::rejected(i.id, r, i.ts));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Run `host` over `events` with its intents gated by `gateway` and executed by
+/// `broker`. `labels[i]` groups instrument `i` in the report. `before_event` is
+/// called before each event so a caller can act on the gateway (for example
+/// engage the kill switch at a chosen time).
+pub fn run_gated<S: Strategy>(
+    host: &mut Host<S>,
+    broker: &mut SimBroker,
+    gateway: &mut Gateway,
+    labels: Vec<String>,
+    events: impl IntoIterator<Item = Event>,
+    mut before_event: impl FnMut(&Event, &mut Gateway),
+) -> Result<BacktestResult, ReportError> {
+    let n = labels.len();
+    let mut l = Loop {
+        host,
+        broker,
+        gateway,
+        report: ReportBuilder::new(labels)?,
+        orders: BTreeMap::new(),
+        seen_fills: 0,
+        hash: Fnv::new(),
+        intents: 0,
+        accepted: 0,
+        errors: 0,
+    };
+    let mut last_ts: Nanos = 0;
+    for ev in events {
+        last_ts = ev.ts_recv();
+        before_event(&ev, l.gateway);
+        l.broker.on_event(&ev);
+        l.settle();
+        l.report.on_event(&ev);
+        if let Event::Trade(t) = &ev {
+            l.gateway.mark(t.hdr.instrument, t.px);
+        }
+        l.host.on_event(&ev);
+        l.submit_pending();
+    }
+    l.broker.end_of_day(last_ts);
+    l.settle();
+
+    let borrow: Vec<u128> = (0..n as u32).map(|i| l.broker.borrow_fee(i)).collect();
+    let Loop {
+        broker,
+        gateway,
+        report,
+        hash,
+        intents,
+        accepted,
+        errors,
+        ..
+    } = l;
+    Ok(BacktestResult {
+        report: report.finish(&borrow),
+        intents,
+        accepted,
+        rejections: gateway.rejection_counts().clone(),
+        fills: broker.fills().len() as u64,
+        bookkeeping_errors: errors,
+        gateway_positions: (0..n as u32).map(|i| gateway.position(i)).collect(),
+        broker_positions: (0..n as u32).map(|i| broker.position(i)).collect(),
+        gateway_working: gateway.working_orders(),
+        gateway_pnl: gateway.daily_pnl(),
+        outcome_hash: hash.0,
+        audit: gateway.drain_audit(),
+    })
+}
+
+/// Strategy 1 (long side) over `events`, gated by the configured limits.
+pub fn momentum_backtest(
+    events: impl IntoIterator<Item = Event>,
+    labels: Vec<String>,
+    cfg: &BacktestConfig,
+) -> Result<BacktestResult, String> {
+    let n = labels.len();
+    let strat = MomentumLong::new(StrategyId(1), cfg.params, n).map_err(|e| e.0.to_owned())?;
+    let mut host = Host::new(strat, n);
+    let mut broker = SimBroker::new(cfg.sim, n);
+    let mut gateway = Gateway::new(cfg.limits, n);
+    run_gated(
+        &mut host,
+        &mut broker,
+        &mut gateway,
+        labels,
+        events,
+        |_, _| {},
+    )
+    .map_err(|e| format!("{e:?}"))
+}
+
+/// A synthetic session: `healthy` and `dangerous` runners (staggered lead-ins so
+/// they do not move in lockstep) and `quiet` symbols. Returns the events and the
+/// label of each instrument (`healthy`, `dangerous`, `quiet`).
+pub fn demo_session(
+    seed: u64,
+    secs: u64,
+    healthy: u32,
+    dangerous: u32,
+    quiet: u32,
+) -> (Vec<Event>, Vec<String>) {
+    let lead = |i: usize| (20 + 7 * i as u64) * NANOS_PER_SEC;
+    let mut specs: Vec<(&str, u32, Option<PullbackKind>)> = Vec::new();
+    specs.extend((0..healthy).map(|k| ("healthy", k, Some(PullbackKind::Healthy))));
+    specs.extend((0..dangerous).map(|k| ("dangerous", k, Some(PullbackKind::Dangerous))));
+    specs.extend((0..quiet).map(|k| ("quiet", k, None)));
+    let symbols: Vec<SymbolSpec> = specs
+        .iter()
+        .enumerate()
+        .map(|(i, &(label, k, kind))| SymbolSpec {
+            symbol: format!("{}{k:02}", label.to_uppercase()),
+            base_px_cents: 300 + 50 * (i as i64 % 20),
+            base_interval_ns: 300_000_000,
+            quote_every: 2,
+            scenario: kind.map_or_else(Scenario::quiet, |kind| Scenario::runner(kind, lead(i))),
+            news: Vec::new(),
+        })
+        .collect();
+    let labels = specs.iter().map(|&(label, ..)| label.to_owned()).collect();
+    let cfg = SynthConfig {
+        seed,
+        session_start: tf_synth::DEFAULT_SESSION_START,
+        duration: secs * NANOS_PER_SEC,
+        symbols,
+    };
+    (SynthStream::new(&cfg).collect(), labels)
+}
+
+/// Raw price units for whole dollars.
+pub fn dollars(d: u64) -> u128 {
+    u128::from(d) * DOLLAR
+}
+
+#[cfg(test)]
+mod tests;

@@ -78,6 +78,17 @@ fn synth(args: &[String]) -> Result<(), String> {
                     );
                 }
                 Event::Status(s) => println!("{:>16} {name} status {:?}", s.hdr.ts_recv, s.kind),
+                Event::Correction(c) => println!(
+                    "{:>16} {name} correction {} x {} -> {} x {}",
+                    c.hdr.ts_recv, c.orig_px, c.orig_size, c.px, c.size
+                ),
+                Event::CancelError(c) => println!(
+                    "{:>16} {name} {:?} {} x {}",
+                    c.hdr.ts_recv, c.kind, c.px, c.size
+                ),
+                Event::News(n) => {
+                    println!("{:>16} {name} news #{}", n.hdr.ts_recv, n.article_id)
+                }
             }
         }
         println!();

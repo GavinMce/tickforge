@@ -17,7 +17,14 @@ fn px(cents: i64) -> Px {
 
 /// $5,000 per order, 500 shares, $8,000 gross, $100 daily loss, 3 orders / 10 s.
 fn limits() -> Limits {
-    Limits::new(5_000 * D, 500, 8_000 * D, 100 * D, 3, 10 * SEC).unwrap()
+    Limits::new(5_000 * D, 500, 8_000 * D, 100 * D, 3, 10 * SEC)
+        .unwrap()
+        .with_gap_rule(generous())
+}
+
+/// A gap rule that does not bind: 100% of $1M equity, for a price doubling.
+fn generous() -> GapRule {
+    GapRule::new(1_000_000 * D, 1_000_000, 1000).unwrap()
 }
 
 fn gw() -> Gateway {
@@ -358,7 +365,9 @@ fn daily_loss_trips_at_the_limit_and_latches_until_the_next_day() {
 #[test]
 fn realised_losses_count_and_a_short_loses_when_the_price_rises() {
     let mut g = Gateway::new(
-        Limits::new(5_000 * D, 500, 8_000 * D, 100 * D, 99, 10 * SEC).unwrap(),
+        Limits::new(5_000 * D, 500, 8_000 * D, 100 * D, 99, 10 * SEC)
+            .unwrap()
+            .with_gap_rule(generous()),
         3,
     );
     let id = accepted(g.decide(&intent(0, 0, Side::SellShort, Purpose::Open, 100, 1000), 0));
@@ -443,7 +452,9 @@ fn position_averaging_realisation_and_flips() {
 
 #[test]
 fn whatever_is_asked_the_book_stays_inside_the_limits() {
-    let lim = Limits::new(2_000 * D, 300, 3_000 * D, 10_000_000 * D, 40, 5 * SEC).unwrap();
+    let lim = Limits::new(2_000 * D, 300, 3_000 * D, 10_000_000 * D, 40, 5 * SEC)
+        .unwrap()
+        .with_gap_rule(generous());
     for seed in 0..20u64 {
         let mut rng = SplitMix64::new(seed);
         let mut g = Gateway::new(lim, 3);
@@ -500,4 +511,255 @@ fn whatever_is_asked_the_book_stays_inside_the_limits() {
             "seed {seed} exercised both paths"
         );
     }
+}
+
+// ---- the gap rule ----
+
+/// $100,000 of equity; a price doubling may cost at most 2% of it.
+fn gap_gw() -> Gateway {
+    let rule = GapRule::new(100_000 * D, 20_000, 1000).unwrap();
+    let l = Limits::new(
+        50_000 * D,
+        100_000,
+        500_000 * D,
+        10_000_000 * D,
+        99,
+        10 * SEC,
+    )
+    .unwrap()
+    .with_gap_rule(rule);
+    Gateway::new(l, 3)
+}
+
+fn short(seq: u64, inst: u32, qty: u32, cents: i64) -> Intent {
+    intent(seq, inst, Side::SellShort, Purpose::Open, qty, cents)
+}
+
+#[test]
+fn rule_validation() {
+    assert_eq!(GapRule::new(0, 1, 1), Err(LimitsError::Zero("equity")));
+    assert_eq!(GapRule::new(1, 0, 1), Err(LimitsError::BadGapRule));
+    assert_eq!(GapRule::new(1, 1_000_001, 1), Err(LimitsError::BadGapRule));
+    assert_eq!(
+        GapRule::new(1, 1, 0),
+        Err(LimitsError::Zero("gap_permille"))
+    );
+    assert!(GapRule::new(1, 1_000_000, 1).is_ok());
+}
+
+#[test]
+fn shorts_are_refused_without_a_gap_rule() {
+    let l = Limits::new(5_000 * D, 500, 8_000 * D, 100 * D, 3, 10 * SEC).unwrap();
+    let mut g = Gateway::new(l, 3);
+    assert_eq!(
+        rejected(g.decide(&short(0, 0, 1, 1000), 0)),
+        RejectReason::GapRisk
+    );
+    accepted(g.decide(&open(1, 1, 1000), 0)); // longs do not need one
+}
+
+#[test]
+fn a_double_on_a_short_loses_at_most_the_configured_fraction_of_equity() {
+    let mut g = gap_gw();
+    let n = max_short_shares(100_000 * D, 20_000, 1000, px(1000));
+    assert_eq!(
+        n, 200,
+        "2% of $100,000 is $2,000; doubling a $10 stock costs $10 a share"
+    );
+    assert_eq!(
+        rejected(g.decide(&short(0, 0, n + 1, 1000), 0)),
+        RejectReason::GapRisk,
+        "one share too many"
+    );
+    let id = accepted(g.decide(&short(1, 0, n, 1000), 1));
+    g.on_fill(id, n, px(1000)).unwrap();
+    g.mark(0, px(2000)); // the gap
+    assert_eq!(g.daily_pnl(), -2_000 * D as i128, "exactly the allowance");
+}
+
+#[test]
+fn the_rule_covers_all_shorts_gapping_together_including_working_ones() {
+    let mut g = gap_gw(); // $2,000 allowance: 200 shares' worth at $10
+    let a = accepted(g.decide(&short(0, 0, 100, 1000), 0));
+    accepted(g.decide(&short(1, 1, 100, 1000), 0)); // still unfilled: counts
+    assert_eq!(
+        rejected(g.decide(&short(2, 2, 1, 1000), 0)),
+        RejectReason::GapRisk
+    );
+    g.on_fill(a, 100, px(1000)).unwrap(); // filling does not change the sum
+    assert_eq!(
+        rejected(g.decide(&short(3, 2, 1, 1000), 0)),
+        RejectReason::GapRisk
+    );
+    // Covering one frees its share of the allowance.
+    let c = accepted(g.decide(&intent(4, 0, Side::Buy, Purpose::Close, 100, 1000), 1));
+    g.on_fill(c, 100, px(1000)).unwrap();
+    accepted(g.decide(&short(5, 2, 100, 1000), 2));
+}
+
+#[test]
+fn a_rising_price_and_lost_equity_both_shrink_what_may_be_added() {
+    let mut g = gap_gw();
+    let id = accepted(g.decide(&short(0, 0, 100, 1000), 0)); // $1,000 of a $2,000 allowance
+    g.on_fill(id, 100, px(1000)).unwrap();
+    g.mark(0, px(1500)); // the short is now $1,500, and equity is down $500 to $99,500
+    // Allowance is 2% of $99,500 = $1,990; held is $1,500, so $490 remains: 32 shares at $15.
+    assert_eq!(
+        rejected(g.decide(&short(1, 1, 33, 1500), 1)),
+        RejectReason::GapRisk
+    );
+    accepted(g.decide(&short(2, 1, 32, 1500), 1));
+}
+
+#[test]
+fn the_rule_is_never_looser_than_stated_after_rounding() {
+    // One raw unit short of $100,000 allows one raw unit short of $2,000: not 200 shares.
+    assert_eq!(
+        max_short_shares(100_000 * D - 1, 20_000, 1000, px(1000)),
+        199
+    );
+    assert_eq!(max_short_shares(100_000 * D, 20_000, 1000, px(1000)), 200);
+    assert_eq!(max_short_shares(100_000 * D, 20_000, 1000, Px::ZERO), 0);
+    assert_eq!(max_short_shares(0, 20_000, 1000, px(1000)), 0);
+}
+
+#[test]
+fn sizing_and_the_gateway_agree_exactly() {
+    for cents in [1, 37, 250, 1000, 4999, 123_456] {
+        let n = max_short_shares(100_000 * D, 20_000, 1000, px(cents));
+        let capped = n.min(100_000);
+        if capped == 0 {
+            continue;
+        }
+        let mut g = gap_gw();
+        assert!(
+            matches!(
+                g.decide(&short(0, 0, capped, cents), 0),
+                Decision::Accepted(_)
+            ),
+            "{cents}c: {capped} shares"
+        );
+        if n < 100_000 {
+            let mut g = gap_gw();
+            // Notional caps may bind first for big sizes; the gap rule is the one that must
+            // refuse `n + 1` when it is the binding constraint.
+            let r = g.decide(&short(0, 0, n + 1, cents), 0);
+            assert!(
+                matches!(r, Decision::Rejected(_)),
+                "{cents}c: {} shares",
+                n + 1
+            );
+        }
+    }
+}
+
+#[test]
+fn a_negative_equity_account_cannot_short() {
+    let mut g = gap_gw();
+    let s = accepted(g.decide(&short(0, 0, 200, 1000), 0));
+    g.on_fill(s, 200, px(1000)).unwrap();
+    g.mark(0, px(100_000)); // a 100x squeeze: equity goes negative
+    assert!(g.daily_pnl() < -100_000 * D as i128);
+    assert_eq!(
+        rejected(g.decide(&short(1, 1, 1, 1000), 1)),
+        RejectReason::GapRisk
+    );
+}
+
+#[test]
+fn whatever_is_shorted_a_gap_costs_no_more_than_the_allowance() {
+    for seed in 0..30u64 {
+        let mut rng = SplitMix64::new(seed);
+        let mut g = gap_gw();
+        let mut accepted_any = 0;
+        for step in 0..300u64 {
+            let inst = (rng.next_u64() % 3) as u32;
+            let cents = 50 + (rng.next_u64() % 3000) as i64;
+            let qty = 1 + (rng.next_u64() % 400) as u32;
+            let i = if rng.next_u64() % 4 == 0 {
+                intent(step, inst, Side::Buy, Purpose::Close, qty, cents)
+            } else {
+                short(step, inst, qty, cents)
+            };
+            g.mark(inst, px(cents)); // the price is known when the decision is made
+            let Decision::Accepted(id) = g.decide(&i, step) else {
+                continue;
+            };
+            g.on_fill(id, i.qty, px(cents)).unwrap();
+            if i.purpose == Purpose::Close {
+                continue; // reducing risk is always allowed; the market may have moved since
+            }
+            accepted_any += 1;
+            // The price of every instrument now doubles. What it costs, from here:
+            let before = g.total_pnl();
+            let equity = 100_000 * D as i128 + before;
+            let marks: Vec<(u32, i64)> = (0..3).map(|k| (k, g.marks[k as usize])).collect();
+            for (k, m) in marks {
+                if m > 0 {
+                    g.mark(k, Px::from_raw(m * 2));
+                }
+            }
+            let cost = before - g.total_pnl();
+            assert!(
+                cost <= equity * 20_000 / 1_000_000,
+                "seed {seed} step {step}: cost {cost} of equity {equity}"
+            );
+            // Put the marks back so the walk continues from real prices.
+            for k in 0..3u32 {
+                let m = g.marks[k as usize];
+                if m > 0 {
+                    g.mark(k, Px::from_raw(m / 2));
+                }
+            }
+        }
+        assert!(accepted_any > 5, "seed {seed} accepted {accepted_any}");
+    }
+}
+
+#[test]
+fn rounding_in_the_gateway_never_loosens_the_rule() {
+    let gw = |equity: u128, ppm: u32, gap: u32| {
+        let l = Limits::new(
+            50_000 * D,
+            100_000,
+            500_000 * D,
+            10_000_000 * D,
+            99,
+            10 * SEC,
+        )
+        .unwrap()
+        .with_gap_rule(GapRule::new(equity, ppm, gap).unwrap());
+        Gateway::new(l, 1)
+    };
+    let raw_short = |qty: u32, raw_px: i64| {
+        let mut i = short(0, 0, qty, 0);
+        i.pricing = Pricing::Limit(Px::from_raw(raw_px));
+        i.protect = Some(Protective {
+            stop_trigger: Px::from_raw(raw_px * 2),
+            stop_limit: None,
+            take_profit: None,
+        });
+        i
+    };
+    // The allowance (50% of $1,000.000000001) is $500.0000000005: floored to ...000.
+    // A loss of one raw unit more must be refused.
+    let mut g = gw(1000 * D + 1, 500_000, 1000);
+    assert_eq!(
+        rejected(g.decide(&raw_short(1, 500 * D as i64 + 1), 0)),
+        RejectReason::GapRisk
+    );
+    assert!(matches!(
+        g.decide(&raw_short(1, 500 * D as i64), 0),
+        Decision::Accepted(_)
+    ));
+    // The loss (33.3% of 5 raw = 1.665) is rounded up to 2 and the allowance (1% of 100 raw) is 1.
+    let mut g = gw(100, 10_000, 333);
+    assert_eq!(
+        rejected(g.decide(&raw_short(1, 5), 0)),
+        RejectReason::GapRisk
+    );
+    assert!(
+        matches!(g.decide(&raw_short(1, 3), 0), Decision::Accepted(_)),
+        "0.999 rounds up to 1, which fits"
+    );
 }

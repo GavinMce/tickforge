@@ -548,7 +548,8 @@ epics:
       - id: E09-S03
         jira: TIC-72
         title: Gap-based position sizing
-        status: todo
+        status: done
+        evidence: tf-risk GapRule + max_short_shares + Gateway gap check; tests include the 2 percent / double-the-price example to the raw unit, portfolio-wide and working-order cases, rounding, fail-closed and a 30-seed property run; all 9 mutations tried are caught; ADR 0012
         deps: [E09-S01]
         ac:
           - A +100 percent gap on any short loses at most a configured fraction of equity

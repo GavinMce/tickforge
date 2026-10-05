@@ -36,6 +36,16 @@ rules that are boring, explicit and tested at their edges.
   switch can be engaged, never released, and a daily-loss trip latches until
   `new_day` even if the price recovers. Releasing the switch means building a
   new gateway, i.e. a restart under the operator's control.
+- **Shorts are sized by the worst-case gap** (`GapRule`, added with E09-S03):
+  if every short, held or working, including the one being decided, gapped up
+  by the rule's percentage at once (1000 permille = the price doubles), the loss
+  must not exceed the rule's fraction of current equity (starting equity plus the
+  gateway's profit and loss). Loss rounds up and the allowance rounds down, so
+  rounding never loosens it. A stop is deliberately not part of the sum, because
+  halts and squeezes jump over stops. Shorts are refused outright when no rule is
+  configured (fail closed), and `max_short_shares` gives strategies a size that
+  the gateway will accept exactly. The rule is portfolio-wide, which is stricter
+  than the per-short wording of the story.
 - The gateway keeps its own position book from fills reported to it and marks
   from `mark`. Daily P&L is realised plus marked, from average cost.
 - The crate carries the same clippy ban list as strategies (ADR 0010).
@@ -47,5 +57,8 @@ It is not a sandbox: an agent that can edit the operator's configuration, or
 that shares the gateway's process, defeats it. The gateway process (still to be
 built) must run separately, with limits read from a file the agent cannot
 write. Daily loss ignores costs not yet known (borrow fees, commissions) and is
-only as good as the marks it is given. Short-specific checks, gap-based sizing
-and persistence across restarts are later stories (E09-S02..S04).
+only as good as the marks it is given. The gap rule is checked at the decision, from the
+reference price and the latest mark: a later price rise is market risk that the
+next decision sees but that nothing here undoes, and a fill better than its
+reference (a higher price for a short sale) can exceed the sized amount slightly.
+Short-specific checks and persistence across restarts are later stories (E09-S02..S04).

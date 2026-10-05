@@ -16,7 +16,12 @@
 //! 4. a close must not exceed what is held less closes already working;
 //! 5. an open must not go against a position or working open the other way;
 //! 6. opens: **order notional**, **position size** (held + working + this) and
-//!    **gross notional** over all instruments, each measured at the order's limit.
+//!    **gross notional** over all instruments, each measured at the order's limit;
+//! 7. short opens: the **gap rule**. If every short, held or working, including
+//!    this one, gapped up by the rule's percentage at once, the loss must not exceed
+//!    the rule's fraction of current equity. This is stricter than one short at a
+//!    time, and it is what makes size depend on the worst-case gap rather than on a
+//!    stop that a halt or squeeze can jump over. Without a rule, shorts are refused.
 //!
 //! [`Limits`] are fixed when the gateway is built and nothing on the gateway or
 //! its inputs changes them, so a strategy or agent holding a `Gateway` handle
@@ -41,10 +46,65 @@ pub struct Limits {
     max_daily_loss: u128,
     max_orders_per_window: u32,
     rate_window_ns: Nanos,
+    gap: Option<GapRule>,
+}
+
+/// How much a short book may lose to a gap. Equity is what the account starts
+/// with; the gateway adds its profit and loss to get current equity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GapRule {
+    equity: u128,
+    max_loss_ppm: u32,
+    gap_permille: u32,
+}
+
+impl GapRule {
+    /// `max_loss_ppm`: the largest loss as parts per million of equity (1 to
+    /// 1,000,000). `gap_permille`: the jump to survive, 1000 = the price doubles.
+    pub fn new(equity: u128, max_loss_ppm: u32, gap_permille: u32) -> Result<GapRule, LimitsError> {
+        if equity == 0 {
+            return Err(LimitsError::Zero("equity"));
+        }
+        if max_loss_ppm == 0 || max_loss_ppm > 1_000_000 {
+            return Err(LimitsError::BadGapRule);
+        }
+        if gap_permille == 0 {
+            return Err(LimitsError::Zero("gap_permille"));
+        }
+        Ok(GapRule {
+            equity,
+            max_loss_ppm,
+            gap_permille,
+        })
+    }
+
+    pub fn equity(&self) -> u128 {
+        self.equity
+    }
+    pub fn max_loss_ppm(&self) -> u32 {
+        self.max_loss_ppm
+    }
+    pub fn gap_permille(&self) -> u32 {
+        self.gap_permille
+    }
+}
+
+/// The most shares of a stock at `px` that can be shorted so that a gap of
+/// `gap_permille` loses no more than `max_loss_ppm` of `equity`. Rounds down.
+/// Sizing with this and checking with the gateway agree exactly.
+pub fn max_short_shares(equity: u128, max_loss_ppm: u32, gap_permille: u32, px: Px) -> u32 {
+    let per_share = u128::try_from(px.raw()).unwrap_or(0) * u128::from(gap_permille);
+    if per_share == 0 {
+        return 0;
+    }
+    let allowed = equity * u128::from(max_loss_ppm) / 1_000_000;
+    u32::try_from(allowed * 1000 / per_share).unwrap_or(u32::MAX)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LimitsError {
+    /// A gap loss fraction outside (0, 100%].
+    BadGapRule,
     /// Every limit must be positive: a zero would silently disable trading or,
     /// worse, be mistaken for "no limit".
     Zero(&'static str),
@@ -83,7 +143,18 @@ impl Limits {
             max_daily_loss,
             max_orders_per_window,
             rate_window_ns,
+            gap: None,
         })
+    }
+
+    /// These limits plus a gap rule (consumes `self`: limits are never edited in place).
+    pub fn with_gap_rule(mut self, rule: GapRule) -> Limits {
+        self.gap = Some(rule);
+        self
+    }
+
+    pub fn gap_rule(&self) -> Option<&GapRule> {
+        self.gap.as_ref()
     }
 
     pub fn max_order_notional(&self) -> u128 {
@@ -136,6 +207,8 @@ struct Working {
     purpose: Purpose,
     remaining: u32,
     limit: i64,
+    /// Where a gap would start from: the intent's reference price.
+    reference: i64,
 }
 
 pub struct Gateway {
@@ -171,6 +244,7 @@ pub fn reason_name(r: &RejectReason) -> &'static str {
         RejectReason::RunUpTooLarge => "run_up_too_large",
         RejectReason::Broker => "broker",
         RejectReason::OpposingPosition => "opposing_position",
+        RejectReason::GapRisk => "gap_risk",
         RejectReason::NothingToClose => "nothing_to_close",
         RejectReason::UnknownInstrument => "unknown_instrument",
         _ => "other",
@@ -239,6 +313,7 @@ impl Gateway {
                     purpose: intent.purpose,
                     remaining: intent.qty,
                     limit: intent.limit_price().raw(),
+                    reference: intent.pricing.reference_price().raw(),
                 });
                 Decision::Accepted(id)
             }
@@ -328,6 +403,42 @@ impl Gateway {
         }
         if self.gross_notional() + notional > self.limits.max_gross_notional {
             return Err(RejectReason::MaxNotional);
+        }
+        if intent.side == Side::SellShort {
+            self.check_gap(intent)?;
+        }
+        Ok(())
+    }
+
+    /// The gap rule: all shorts gapping at once, this one included, must fit.
+    fn check_gap(&self, intent: &Intent) -> Result<(), RejectReason> {
+        let rule = self.limits.gap.ok_or(RejectReason::GapRisk)?;
+        let equity = i128::try_from(rule.equity).unwrap_or(i128::MAX) + self.total_pnl();
+        let Ok(equity) = u128::try_from(equity) else {
+            return Err(RejectReason::GapRisk);
+        };
+        let held: u128 = self
+            .pos
+            .iter()
+            .zip(&self.marks)
+            .filter(|(p, _)| p.qty < 0)
+            .map(|(p, m)| {
+                u128::from(p.qty.unsigned_abs()) * u128::try_from(p.avg.max(*m)).unwrap_or(0)
+            })
+            .sum();
+        let working: u128 = self
+            .working
+            .iter()
+            .filter(|w| w.purpose == Purpose::Open && !w.side.is_buy())
+            .map(|w| u128::from(w.remaining) * u128::try_from(w.reference).unwrap_or(0))
+            .sum();
+        let this = u128::from(intent.qty)
+            * u128::try_from(intent.pricing.reference_price().raw()).unwrap_or(0);
+        // Loss rounds up and the allowance rounds down, so the rule is never looser than stated.
+        let loss = ((held + working + this) * u128::from(rule.gap_permille)).div_ceil(1000);
+        let allowed = equity * u128::from(rule.max_loss_ppm) / 1_000_000;
+        if loss > allowed {
+            return Err(RejectReason::GapRisk);
         }
         Ok(())
     }

@@ -86,6 +86,8 @@ pub enum RejectReason {
     OutsideLuldBand,
     SpreadTooWide,
     RunUpTooLarge,
+    /// Shorting would risk more than the allowed share of equity if the price gapped up.
+    GapRisk,
     /// An open against an existing position the other way (close it first).
     OpposingPosition,
     /// A close for more than is held, or with nothing held.

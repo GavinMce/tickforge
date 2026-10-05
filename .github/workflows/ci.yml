@@ -43,3 +43,52 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  # Determinism is a feature (README, "Rules of the road"): the synthetic stream
+  # and its encoding must hash identically on every platform. The golden hash in
+  # crates/tf-synth/src/tests.rs pins the value, so running it on each arch is
+  # the gate. If only one arch fails, the code depends on the platform (endianness,
+  # pointer width, arithmetic, iteration order): fix that, never the golden. If
+  # every arch fails, the generator or encoding changed: regenerate the golden
+  # deliberately and say why in the PR.
+  #
+  # The job names are the status checks branch protection requires; keep both
+  # in sync with it.
+  determinism:
+    name: determinism (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `cargo test <filter>` passes with "0 passed" when nothing matches, so a
+      # renamed test would leave this gate green and empty. Fail loudly instead.
+      # No `grep -q`: it exits on the first match, cargo then writes to a closed
+      # pipe and prints a confusing SIGPIPE error (and fails under pipefail).
+      - name: Golden test still exists
+        run: |
+          cargo test -p tf-synth -- --list | grep -x 'tests::golden_stream_hash: test' > /dev/null
+
+      - name: Golden hash (debug)
+        run: cargo test -p tf-synth golden_stream_hash
+
+      # Release drops overflow checks and optimises differently; the hash must
+      # not care.
+      - name: Golden hash (release)
+        run: cargo test --release -p tf-synth golden_stream_hash
+
+      - name: Workspace tests (release)
+        run: cargo test --release --workspace

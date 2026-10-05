@@ -780,3 +780,91 @@ fn every_limit_is_recorded_once_and_the_gap_rule_shows() {
     assert_ne!(a, b);
     assert!(a.contains(&("max_orders_per_window", "3".to_owned())));
 }
+
+#[test]
+fn limits_round_trip_through_their_pairs_and_bad_pairs_are_refused() {
+    let owned = |l: &Limits| -> Vec<(String, String)> {
+        l.pairs()
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v))
+            .collect()
+    };
+    let plain = Limits::new(5_000, 100, 20_000, 400, 6, 10).unwrap();
+    let gap = plain.with_gap_rule(GapRule::new(100_000, 20_000, 1000).unwrap());
+    for l in [plain, gap] {
+        assert_eq!(Limits::from_pairs(&owned(&l)).unwrap().pairs(), l.pairs());
+    }
+    let base = owned(&plain);
+    let without = |k: &str| -> Vec<(String, String)> {
+        base.iter().filter(|(n, _)| n != k).cloned().collect()
+    };
+    for k in [
+        "max_order_notional_raw",
+        "max_position_shares",
+        "max_gross_notional_raw",
+        "max_daily_loss_raw",
+        "max_orders_per_window",
+        "rate_window_ns",
+        "gap_rule",
+    ] {
+        assert!(
+            Limits::from_pairs(&without(k))
+                .unwrap_err()
+                .contains("missing"),
+            "{k}"
+        );
+    }
+    let mut extra = base.clone();
+    extra.push(("surprise".into(), "1".into()));
+    assert!(
+        Limits::from_pairs(&extra)
+            .unwrap_err()
+            .contains("unknown limit `surprise`")
+    );
+    let mut twice = base.clone();
+    twice.push(base[0].clone());
+    assert!(Limits::from_pairs(&twice).unwrap_err().contains("twice"));
+    let mut bad = base.clone();
+    bad[1].1 = "many".into();
+    assert!(
+        Limits::from_pairs(&bad)
+            .unwrap_err()
+            .contains("not a whole number")
+    );
+    let mut zero = base.clone();
+    zero[1].1 = "0".into();
+    assert!(
+        Limits::from_pairs(&zero).is_err(),
+        "a zero limit is still refused"
+    );
+    // A gap rule given in part is refused.
+    let mut partial = owned(&gap);
+    partial.retain(|(n, _)| n != "gap_permille");
+    assert!(
+        Limits::from_pairs(&partial)
+            .unwrap_err()
+            .contains("gap_permille")
+    );
+}
+
+#[test]
+fn a_snapshot_shows_every_part_of_the_state_that_decisions_depend_on() {
+    let l = Limits::new(
+        5_000 * 1_000_000_000,
+        1_000,
+        20_000 * 1_000_000_000,
+        400 * 1_000_000_000,
+        6,
+        10_000_000_000,
+    )
+    .unwrap();
+    let mut g = Gateway::new(l, 2);
+    let empty = g.snapshot();
+    assert!(empty.positions.is_empty() && empty.working.is_empty() && !empty.killed);
+    g.mark(1, Px::from_raw(7)); // a flat instrument's mark is not state
+    assert_eq!(g.snapshot(), empty);
+    assert_eq!(g.mark_of(1), 7);
+    assert_eq!(g.instruments(), 2);
+    g.engage_kill_switch();
+    assert_ne!(g.snapshot(), empty);
+}

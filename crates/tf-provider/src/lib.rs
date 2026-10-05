@@ -19,17 +19,23 @@ impl Channels {
     pub const TRADES: Channels = Channels(1);
     pub const QUOTES: Channels = Channels(2);
     pub const STATUS: Channels = Channels(4);
-    pub const ALL: Channels = Channels(7);
+    pub const NEWS: Channels = Channels(8);
+    pub const ALL: Channels = Channels(15);
 
     pub const fn contains(self, other: Channels) -> bool {
         self.0 & other.0 == other.0
     }
 
+    /// Corrections and cancel/errors ride on `TRADES`: a consumer of trades is
+    /// wrong without the amendments to them.
     pub const fn admits(self, kind: EventKind) -> bool {
         match kind {
-            EventKind::Trade => self.contains(Channels::TRADES),
+            EventKind::Trade | EventKind::Correction | EventKind::CancelError => {
+                self.contains(Channels::TRADES)
+            }
             EventKind::Quote => self.contains(Channels::QUOTES),
             EventKind::Status => self.contains(Channels::STATUS),
+            EventKind::News => self.contains(Channels::NEWS),
         }
     }
 }
@@ -202,6 +208,26 @@ mod tests {
         assert!(c.admits(EventKind::Status));
         assert!(!c.admits(EventKind::Quote));
         assert!(Channels::ALL.contains(c));
+    }
+
+    #[test]
+    fn amendments_ride_on_trades_and_news_has_its_own_channel() {
+        let trades = Channels::TRADES;
+        assert!(trades.admits(EventKind::Correction));
+        assert!(trades.admits(EventKind::CancelError));
+        assert!(!trades.admits(EventKind::News));
+        assert!(!Channels::NEWS.admits(EventKind::Trade));
+        assert!(Channels::NEWS.admits(EventKind::News));
+        for kind in [
+            EventKind::Trade,
+            EventKind::Quote,
+            EventKind::Status,
+            EventKind::Correction,
+            EventKind::CancelError,
+            EventKind::News,
+        ] {
+            assert!(Channels::ALL.admits(kind), "ALL does not admit {kind:?}");
+        }
     }
 
     #[test]

@@ -4,18 +4,46 @@
 //! struct (padding bytes are uninitialised and layout is not a contract).
 //! This is the seed of the raw tape format and the input to golden hashes.
 //!
-//! Layout: `tag:u8` then header (`ts_event:u64 ts_recv:u64 seq:u64
+//! Layout of one event: `tag:u8` then header (`ts_event:u64 ts_recv:u64 seq:u64
 //! instrument:u32 provider:u8`) then the per-kind body.
+//!
+//! # Schema versions
+//!
+//! A stream or tape is a run of events back to back, optionally preceded by an
+//! 8-byte header: `"TFEV"`, `version:u16`, `reserved:u16` (zero).
+//!
+//! - **v1**: bare events, no header; tags 1-3 (trade, quote, status).
+//! - **v2**: adds tags 4-6 (correction, cancel-error, news) and the header. The
+//!   layout of every v1 event is unchanged, so v1 data decodes as it is.
+//!
+//! Event tags stay below `b'T'`, the first byte of the header, so a headerless
+//! v1 stream is never mistaken for one with a header. [`Decoder`] does the
+//! dispatch; a v1 stream that contains a v2-only tag is corrupt.
 
 use std::fmt;
 
-use crate::event::{Event, Header, Quote, Status, StatusKind, Trade, TradeFlags};
+use crate::event::{
+    CancelError, CancelErrorKind, Correction, Event, Header, News, Quote, Status, StatusKind,
+    Trade, TradeFlags,
+};
 use crate::ids::ProviderId;
 use crate::px::Px;
 
 const TAG_TRADE: u8 = 1;
 const TAG_QUOTE: u8 = 2;
 const TAG_STATUS: u8 = 3;
+const TAG_CORRECTION: u8 = 4;
+const TAG_CANCEL_ERROR: u8 = 5;
+const TAG_NEWS: u8 = 6;
+
+/// The schema version this build writes.
+pub const SCHEMA_VERSION: u16 = 2;
+/// The first four bytes of a stream that has a header.
+pub const STREAM_MAGIC: [u8; 4] = *b"TFEV";
+pub const STREAM_HEADER_LEN: usize = 8;
+
+// A headerless v1 stream opens with an event tag; no tag may look like the magic.
+const _: () = assert!(TAG_NEWS < STREAM_MAGIC[0]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError {
@@ -23,6 +51,11 @@ pub enum DecodeError {
     BadTag(u8),
     BadProvider(u8),
     BadStatusKind(u8),
+    BadCancelKind(u8),
+    /// Starts like a stream header but is not one.
+    BadMagic,
+    /// A header with a version this build cannot read (zero, or newer).
+    UnsupportedVersion(u16),
 }
 
 impl fmt::Display for DecodeError {
@@ -32,6 +65,9 @@ impl fmt::Display for DecodeError {
             DecodeError::BadTag(t) => write!(f, "unknown event tag {t}"),
             DecodeError::BadProvider(p) => write!(f, "unknown provider id {p}"),
             DecodeError::BadStatusKind(k) => write!(f, "unknown status kind {k}"),
+            DecodeError::BadCancelKind(k) => write!(f, "unknown cancel/error kind {k}"),
+            DecodeError::BadMagic => write!(f, "bad stream header magic"),
+            DecodeError::UnsupportedVersion(v) => write!(f, "unsupported schema version {v}"),
         }
     }
 }
@@ -44,6 +80,34 @@ fn put_hdr(out: &mut Vec<u8>, h: &Header) {
     out.extend_from_slice(&h.seq.to_le_bytes());
     out.extend_from_slice(&h.instrument.to_le_bytes());
     out.push(h.provider.as_u8());
+}
+
+/// Append the stream header for [`SCHEMA_VERSION`] to `out`.
+pub fn write_stream_header(out: &mut Vec<u8>) {
+    out.extend_from_slice(&STREAM_MAGIC);
+    out.extend_from_slice(&SCHEMA_VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+}
+
+/// The schema version of a stream and the offset of its first event.
+///
+/// A buffer that does not open with the header magic is a v1 stream: v1 had no
+/// header, and its first byte is an event tag, which can never be the magic's.
+pub fn read_stream_header(buf: &[u8]) -> Result<(u16, usize), DecodeError> {
+    if buf.first() != Some(&STREAM_MAGIC[0]) {
+        return Ok((1, 0));
+    }
+    if buf.len() < STREAM_HEADER_LEN {
+        return Err(DecodeError::Truncated);
+    }
+    if buf[..4] != STREAM_MAGIC {
+        return Err(DecodeError::BadMagic);
+    }
+    let version = u16::from_le_bytes([buf[4], buf[5]]);
+    if version == 0 || version > SCHEMA_VERSION {
+        return Err(DecodeError::UnsupportedVersion(version));
+    }
+    Ok((version, STREAM_HEADER_LEN))
 }
 
 impl Event {
@@ -72,13 +136,46 @@ impl Event {
                 out.extend_from_slice(&s.lo.raw().to_le_bytes());
                 out.extend_from_slice(&s.hi.raw().to_le_bytes());
             }
+            Event::Correction(c) => {
+                out.push(TAG_CORRECTION);
+                put_hdr(out, &c.hdr);
+                out.extend_from_slice(&c.orig_px.raw().to_le_bytes());
+                out.extend_from_slice(&c.orig_size.to_le_bytes());
+                out.extend_from_slice(&c.px.raw().to_le_bytes());
+                out.extend_from_slice(&c.size.to_le_bytes());
+            }
+            Event::CancelError(c) => {
+                out.push(TAG_CANCEL_ERROR);
+                put_hdr(out, &c.hdr);
+                out.push(c.kind as u8);
+                out.extend_from_slice(&c.px.raw().to_le_bytes());
+                out.extend_from_slice(&c.size.to_le_bytes());
+            }
+            Event::News(n) => {
+                out.push(TAG_NEWS);
+                put_hdr(out, &n.hdr);
+                out.extend_from_slice(&n.article_id.to_le_bytes());
+            }
         }
     }
 
-    /// Decode one event from the front of `buf`; returns it and the bytes consumed.
+    /// Decode one event of the current schema from the front of `buf`; returns
+    /// it and the bytes consumed. Use [`Decoder`] for whole streams.
     pub fn decode(buf: &[u8]) -> Result<(Event, usize), DecodeError> {
+        Event::decode_versioned(SCHEMA_VERSION, buf)
+    }
+
+    /// Like [`Event::decode`] for an event of schema `version`: a v1 stream
+    /// cannot contain the kinds that v2 introduced.
+    pub fn decode_versioned(version: u16, buf: &[u8]) -> Result<(Event, usize), DecodeError> {
+        if version == 0 || version > SCHEMA_VERSION {
+            return Err(DecodeError::UnsupportedVersion(version));
+        }
         let mut r = Reader { buf, pos: 0 };
         let tag = r.u8()?;
+        if version < 2 && tag >= TAG_CORRECTION {
+            return Err(DecodeError::BadTag(tag));
+        }
         let hdr = Header {
             ts_event: r.u64()?,
             ts_recv: r.u64()?,
@@ -112,9 +209,71 @@ impl Event {
                     hi: Px::from_raw(r.i64()?),
                 })
             }
+            TAG_CORRECTION => Event::Correction(Correction {
+                hdr,
+                orig_px: Px::from_raw(r.i64()?),
+                orig_size: r.u32()?,
+                px: Px::from_raw(r.i64()?),
+                size: r.u32()?,
+            }),
+            TAG_CANCEL_ERROR => {
+                let k = r.u8()?;
+                Event::CancelError(CancelError {
+                    hdr,
+                    kind: CancelErrorKind::from_u8(k).ok_or(DecodeError::BadCancelKind(k))?,
+                    px: Px::from_raw(r.i64()?),
+                    size: r.u32()?,
+                })
+            }
+            TAG_NEWS => Event::News(News {
+                hdr,
+                article_id: r.u64()?,
+            }),
             other => return Err(DecodeError::BadTag(other)),
         };
         Ok((ev, r.pos))
+    }
+}
+
+/// Decodes a whole stream or tape: reads the header if there is one (a stream
+/// without one is v1), then yields events until the end. After an error it
+/// yields nothing more, since there is no way to find the next event boundary.
+#[derive(Debug)]
+pub struct Decoder<'a> {
+    buf: &'a [u8],
+    pos: usize,
+    version: u16,
+}
+
+impl<'a> Decoder<'a> {
+    pub fn new(buf: &'a [u8]) -> Result<Self, DecodeError> {
+        let (version, pos) = read_stream_header(buf)?;
+        Ok(Decoder { buf, pos, version })
+    }
+
+    /// The schema version of the stream being read.
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+}
+
+impl Iterator for Decoder<'_> {
+    type Item = Result<Event, DecodeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.buf.len() {
+            return None;
+        }
+        match Event::decode_versioned(self.version, &self.buf[self.pos..]) {
+            Ok((ev, n)) => {
+                self.pos += n;
+                Some(Ok(ev))
+            }
+            Err(e) => {
+                self.pos = self.buf.len();
+                Some(Err(e))
+            }
+        }
     }
 }
 
@@ -166,6 +325,7 @@ mod tests {
         }
     }
 
+    /// The first three are the events in `V1_TAPE_HEX`; keep them as they are.
     fn samples() -> Vec<Event> {
         vec![
             Event::Trade(Trade {
@@ -187,16 +347,49 @@ mod tests {
                 lo: Px::from_cents(900),
                 hi: Px::from_cents(1500),
             }),
+            Event::Correction(Correction {
+                hdr: hdr(4),
+                orig_px: Px::from_cents(1234),
+                orig_size: 300,
+                px: Px::from_cents(1230),
+                size: 200,
+            }),
+            Event::CancelError(CancelError {
+                hdr: hdr(5),
+                kind: CancelErrorKind::Error,
+                px: Px::from_cents(1234),
+                size: 300,
+            }),
+            Event::News(News {
+                hdr: hdr(6),
+                article_id: 0x0123_4567_89ab_cdef,
+            }),
         ]
     }
+
+    fn encode_all(evs: &[Event]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for e in evs {
+            e.encode(&mut buf);
+        }
+        buf
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// A tape written by the v1 encoder (commit 3a61d90, before schema
+    /// versions existed): `samples()[..3]`, byte for byte, with no header.
+    const V1_TAPE_HEX: &str = "01e903000000000000d10700000000000001000000000000002a00000002007585df020000002c010000020002ea03000000000000d20700000000000002000000000000002a0000000280deecde02000000800b1ee00200000064000000c800000003eb03000000000000d30700000000000003000000000000002a0000000202001a71180200000000d6117e03000000";
 
     #[test]
     fn roundtrip_back_to_back() {
         let evs = samples();
-        let mut buf = Vec::new();
-        for e in &evs {
-            e.encode(&mut buf);
-        }
+        let buf = encode_all(&evs);
         let mut pos = 0;
         let mut got = Vec::new();
         while pos < buf.len() {
@@ -222,6 +415,23 @@ mod tests {
     }
 
     #[test]
+    fn every_prefix_of_every_kind_is_truncated_never_a_panic() {
+        for ev in samples() {
+            let mut buf = Vec::new();
+            ev.encode(&mut buf);
+            for n in 0..buf.len() {
+                assert_eq!(
+                    Event::decode(&buf[..n]),
+                    Err(DecodeError::Truncated),
+                    "{:?} cut to {n} bytes",
+                    ev.kind()
+                );
+            }
+            assert_eq!(Event::decode(&buf), Ok((ev, buf.len())));
+        }
+    }
+
+    #[test]
     fn encoded_sizes_are_documented_sizes() {
         let sizes: Vec<usize> = samples()
             .iter()
@@ -231,6 +441,104 @@ mod tests {
                 b.len()
             })
             .collect();
-        assert_eq!(sizes, vec![44, 54, 47]);
+        // trade, quote, status, correction, cancel-error, news
+        assert_eq!(sizes, vec![44, 54, 47, 54, 43, 38]);
+    }
+
+    #[test]
+    fn a_v1_tape_from_the_old_encoder_still_decodes() {
+        let tape = unhex(V1_TAPE_HEX);
+        let mut dec = Decoder::new(&tape).unwrap();
+        assert_eq!(dec.version(), 1);
+        let got: Vec<Event> = dec.by_ref().map(Result::unwrap).collect();
+        assert_eq!(got, samples()[..3]);
+
+        // The v1 layout is frozen: today's encoder writes the same bytes.
+        assert_eq!(encode_all(&samples()[..3]), tape);
+    }
+
+    #[test]
+    fn a_v1_stream_cannot_contain_v2_only_kinds() {
+        for ev in &samples()[3..] {
+            let mut buf = Vec::new();
+            ev.encode(&mut buf);
+            let mut dec = Decoder::new(&buf).unwrap();
+            assert_eq!(dec.version(), 1, "no header, so v1");
+            let tag = buf[0];
+            assert_eq!(dec.next(), Some(Err(DecodeError::BadTag(tag))));
+            assert_eq!(dec.next(), None, "nothing after an error");
+        }
+    }
+
+    #[test]
+    fn a_stream_with_a_header_carries_its_version() {
+        let mut buf = Vec::new();
+        write_stream_header(&mut buf);
+        assert_eq!(buf, [b'T', b'F', b'E', b'V', 2, 0, 0, 0]);
+        assert_eq!(buf.len(), STREAM_HEADER_LEN);
+        buf.extend(encode_all(&samples()));
+
+        let mut dec = Decoder::new(&buf).unwrap();
+        assert_eq!(dec.version(), SCHEMA_VERSION);
+        let got: Vec<Event> = dec.by_ref().map(Result::unwrap).collect();
+        assert_eq!(got, samples());
+    }
+
+    #[test]
+    fn bad_headers_are_errors_not_guesses() {
+        let header = |v: u16| {
+            let mut b = STREAM_MAGIC.to_vec();
+            b.extend_from_slice(&v.to_le_bytes());
+            b.extend_from_slice(&[0, 0]);
+            b
+        };
+        assert_eq!(
+            Decoder::new(&header(3)).unwrap_err(),
+            DecodeError::UnsupportedVersion(3)
+        );
+        assert_eq!(
+            Decoder::new(&header(0)).unwrap_err(),
+            DecodeError::UnsupportedVersion(0)
+        );
+        assert_eq!(
+            Decoder::new(&header(2)[..5]).unwrap_err(),
+            DecodeError::Truncated
+        );
+        assert_eq!(Decoder::new(b"T").unwrap_err(), DecodeError::Truncated);
+        assert_eq!(
+            Decoder::new(b"TXEV\x02\x00\x00\x00").unwrap_err(),
+            DecodeError::BadMagic
+        );
+        assert_eq!(
+            Event::decode_versioned(3, &[]).unwrap_err(),
+            DecodeError::UnsupportedVersion(3)
+        );
+    }
+
+    #[test]
+    fn an_empty_buffer_is_an_empty_v1_tape() {
+        let mut dec = Decoder::new(&[]).unwrap();
+        assert_eq!(dec.version(), 1);
+        assert_eq!(dec.next(), None);
+    }
+
+    #[test]
+    fn the_decoder_stops_at_the_first_error() {
+        let mut buf = encode_all(&samples()[..1]);
+        let second = encode_all(&samples()[1..2]);
+        buf.extend_from_slice(&second[..second.len() - 1]);
+        let got: Vec<_> = Decoder::new(&buf).unwrap().collect();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], Ok(samples()[0]));
+        assert_eq!(got[1], Err(DecodeError::Truncated));
+    }
+
+    #[test]
+    fn unknown_cancel_kind_is_an_error() {
+        let mut buf = Vec::new();
+        samples()[4].encode(&mut buf);
+        let kind_at = 1 + 29; // tag + header
+        buf[kind_at] = 7;
+        assert_eq!(Event::decode(&buf), Err(DecodeError::BadCancelKind(7)));
     }
 }

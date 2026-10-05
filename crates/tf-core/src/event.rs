@@ -79,11 +79,73 @@ pub struct Status {
     pub hi: Px,
 }
 
+/// A correction to an earlier trade (Alpaca `corrections`): the print that was
+/// `orig_px` x `orig_size` is now `px` x `size`.
+///
+/// The canonical model has no trade id, so the original is identified by
+/// `(instrument, hdr.ts_event, orig_px, orig_size)`. `hdr.ts_event` is the
+/// *original trade's* event time; `hdr.ts_recv` is when the correction arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Correction {
+    pub hdr: Header,
+    pub orig_px: Px,
+    pub orig_size: u32,
+    pub px: Px,
+    pub size: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CancelErrorKind {
+    /// The trade was cancelled.
+    Cancel = 0,
+    /// The trade was reported in error.
+    Error = 1,
+}
+
+impl CancelErrorKind {
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(CancelErrorKind::Cancel),
+            1 => Some(CancelErrorKind::Error),
+            _ => None,
+        }
+    }
+}
+
+/// A trade that was cancelled or reported in error (Alpaca `cancelErrors`).
+/// The trade is identified like a [`Correction`]'s original: `hdr.ts_event` is
+/// its event time, and `px` and `size` are what it printed at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CancelError {
+    pub hdr: Header,
+    pub kind: CancelErrorKind,
+    pub px: Px,
+    pub size: u32,
+}
+
+/// A news article tagged with one instrument.
+///
+/// `hdr.ts_event` is when the article was published and `hdr.ts_recv` when we
+/// received it. Anything that must be point-in-time correct (backtests,
+/// features) may use the article only from `ts_recv` onward. An article tagged
+/// with several symbols arrives as one `News` per symbol, all sharing
+/// `article_id`. The text is not part of the event, since events are `Copy` and
+/// at most 64 bytes; it is stored separately, keyed by `article_id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct News {
+    pub hdr: Header,
+    pub article_id: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Trade(Trade),
     Quote(Quote),
     Status(Status),
+    Correction(Correction),
+    CancelError(CancelError),
+    News(News),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +153,9 @@ pub enum EventKind {
     Trade,
     Quote,
     Status,
+    Correction,
+    CancelError,
+    News,
 }
 
 impl Event {
@@ -99,6 +164,9 @@ impl Event {
             Event::Trade(t) => &t.hdr,
             Event::Quote(q) => &q.hdr,
             Event::Status(s) => &s.hdr,
+            Event::Correction(c) => &c.hdr,
+            Event::CancelError(c) => &c.hdr,
+            Event::News(n) => &n.hdr,
         }
     }
 
@@ -107,6 +175,9 @@ impl Event {
             Event::Trade(t) => &mut t.hdr,
             Event::Quote(q) => &mut q.hdr,
             Event::Status(s) => &mut s.hdr,
+            Event::Correction(c) => &mut c.hdr,
+            Event::CancelError(c) => &mut c.hdr,
+            Event::News(n) => &mut n.hdr,
         }
     }
 
@@ -115,6 +186,9 @@ impl Event {
             Event::Trade(_) => EventKind::Trade,
             Event::Quote(_) => EventKind::Quote,
             Event::Status(_) => EventKind::Status,
+            Event::Correction(_) => EventKind::Correction,
+            Event::CancelError(_) => EventKind::CancelError,
+            Event::News(_) => EventKind::News,
         }
     }
 
@@ -169,5 +243,49 @@ mod tests {
         );
         ev.hdr_mut().seq = 9;
         assert_eq!(ev.seq(), 9);
+    }
+
+    #[test]
+    fn corrections_cancels_and_news_expose_their_header() {
+        let hdr = Header {
+            ts_event: 10,
+            ts_recv: 20,
+            seq: 3,
+            instrument: 7,
+            provider: ProviderId::Alpaca,
+        };
+        let mut evs = [
+            Event::Correction(Correction {
+                hdr,
+                orig_px: Px::from_cents(100),
+                orig_size: 200,
+                px: Px::from_cents(101),
+                size: 200,
+            }),
+            Event::CancelError(CancelError {
+                hdr,
+                kind: CancelErrorKind::Cancel,
+                px: Px::from_cents(100),
+                size: 200,
+            }),
+            Event::News(News {
+                hdr,
+                article_id: 99,
+            }),
+        ];
+        let kinds = [
+            EventKind::Correction,
+            EventKind::CancelError,
+            EventKind::News,
+        ];
+        for (ev, kind) in evs.iter_mut().zip(kinds) {
+            assert_eq!(ev.kind(), kind);
+            assert_eq!(
+                (ev.ts_event(), ev.ts_recv(), ev.seq(), ev.instrument()),
+                (10, 20, 3, 7)
+            );
+            ev.hdr_mut().seq = 9;
+            assert_eq!(ev.seq(), 9);
+        }
     }
 }

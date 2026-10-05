@@ -37,6 +37,9 @@ pub struct StatsSink {
     pub trades: u64,
     pub quotes: u64,
     pub status: u64,
+    pub corrections: u64,
+    pub cancel_errors: u64,
+    pub news: u64,
     pub shares: u64,
     pub first_ts_event: Option<Nanos>,
     pub last_ts_event: Option<Nanos>,
@@ -50,6 +53,9 @@ impl EventSink for StatsSink {
             EventKind::Trade => self.trades += 1,
             EventKind::Quote => self.quotes += 1,
             EventKind::Status => self.status += 1,
+            EventKind::Correction => self.corrections += 1,
+            EventKind::CancelError => self.cancel_errors += 1,
+            EventKind::News => self.news += 1,
         }
         if let Event::Trade(t) = ev {
             self.shares += u64::from(t.size);

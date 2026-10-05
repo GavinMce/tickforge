@@ -14,8 +14,11 @@ pub mod ids;
 pub mod px;
 
 pub use clock::{Clock, SimClock, SystemClock};
-pub use encode::DecodeError;
-pub use event::{Event, EventKind, Header, Quote, Status, StatusKind, Trade, TradeFlags};
+pub use encode::{DecodeError, Decoder, SCHEMA_VERSION};
+pub use event::{
+    CancelError, CancelErrorKind, Correction, Event, EventKind, Header, News, Quote, Status,
+    StatusKind, Trade, TradeFlags,
+};
 pub use hash::Fnv1a64;
 pub use ids::{InstrumentId, Nanos, ProviderId, SymbolTable};
 pub use px::{PX_SCALE, Px};

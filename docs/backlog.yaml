@@ -243,7 +243,8 @@ epics:
       - id: E04-S01
         jira: TIC-38
         title: Raw tape format and writer/reader
-        status: todo
+        status: done
+        evidence: crates/tf-tape/; 10M-event round trip and seek tests in tests.rs (release builds, run by the determinism job); docs/adr/0006-raw-tape-format.md
         deps: [E01-S04]
         ac:
           - Length-prefixed encoded events, zstd-compressed blocks, footer index, versioned header

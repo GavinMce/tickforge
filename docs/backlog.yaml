@@ -431,7 +431,7 @@ epics:
         jira: TIC-58
         title: Scanner (volume z-score and price spike with universe filters)
         status: done
-        evidence: crates/tf-engine/src/scanner.rs (Scanner, ScannerConfig, Hit); 12 integration tests in tests/scanner.rs: every runner/halt-up/squeeze/multi-spike scenario detected within 3 s of its catalyst and never early, 400-symbol universes with no hit on a quiet name and no missed runner, zero hits in 200 quiet symbol-hours (and dozens with the gates relaxed); 12 mutations caught; ADR 0023. Float comes from a caller-filled table until E14-S01 supplies a source
+        evidence: "crates/tf-engine/src/scanner.rs (Scanner, ScannerConfig, Hit); 12 integration tests in tests/scanner.rs: every runner/halt-up/squeeze/multi-spike scenario detected within 3 s of its catalyst and never early, 400-symbol universes with no hit on a quiet name and no missed runner, zero hits in 200 quiet symbol-hours (and dozens with the gates relaxed); 12 mutations caught; ADR 0023. Float comes from a caller-filled table until E14-S01 supplies a source"
         deps: [E07-S01, E07-S02, E14-S01]
         ac:
           - Detects every synthetic runner scenario with zero false negatives and a measured false-positive rate on quiet symbols
@@ -440,7 +440,7 @@ epics:
         jira: TIC-59
         title: Promotion and demotion between tiers with hysteresis
         status: done
-        evidence: crates/tf-engine/src/promoter.rs (Promoter, follower mode), TierChange event in tf-core (encoding schema v4, tag 8), Host::with_promoter / ctx.tier1 / pinning; 15 integration tests: only runners promoted and none missed, bound never exceeded with refusals counted, hysteresis band, dwell, re-promote wait, confirm, pinning, silent symbols demoted, a follower reproduces membership and features at every step of a 900 s universe; 18 mutations caught (replay gaps found and closed; a real live-vs-replay ordering bug found and fixed); ADR 0024. The momentum strategy still has its own private Tier 1
+        evidence: "crates/tf-engine/src/promoter.rs (Promoter, follower mode), TierChange event in tf-core (encoding schema v4, tag 8), Host::with_promoter / ctx.tier1 / pinning; 15 integration tests: only runners promoted and none missed, bound never exceeded with refusals counted, hysteresis band, dwell, re-promote wait, confirm, pinning, silent symbols demoted, a follower reproduces membership and features at every step of a 900 s universe; 18 mutations caught (replay gaps found and closed; a real live-vs-replay ordering bug found and fixed); ADR 0024. The momentum strategy still has its own private Tier 1"
         deps: [E07-S04]
         ac:
           - Promotion and demotion events logged to the tape; bounded Tier 1 size
@@ -883,3 +883,28 @@ epics:
         deps: [E15-S02, E15-S03, E09-S01]
         ac:
           - Confirms tape strength via Tier 1 promotion before entry; orders go through the risk gateway
+  - id: E16
+    jira: TIC-112
+    title: "Strategy workbench: declarative entry rules and trade explorer"
+    phase: 3
+    labels: [phase3, strategy, tooling]
+    goal: Entry conditions as versioned data, and every trade inspectable on a candle chart with step-by-step replay. Grew out of the E08-S10 prototype; the surface the agent layer tunes rules through.
+    stories:
+      - id: E16-S01
+        jira: TIC-113
+        title: Declarative entry-rule layer (conditions as data, with a per-decision trace)
+        status: todo
+        deps: [E08-S10, E08-S03]
+        ac:
+          - A rule set (feature, comparison, threshold, AND/OR groups) is versioned data evaluated by one deterministic engine
+          - Every decision emits the per-condition trace (value, threshold, pass) the explorer reads
+          - Rule edits go through the parameter store (bounds, audit, auto-revert)
+          - MomentumLong's eight tests expressed as a rule set give identical backtest results
+      - id: E16-S02
+        jira: TIC-114
+        title: Trade explorer on stored runs (rule-set diffs and run comparison)
+        status: todo
+        deps: [E16-S01, E04-S02]
+        ac:
+          - The explorer loads a stored run by manifest hash and shows which rule set and version produced each trade
+          - Two runs or rule sets can be compared: trades that appear, vanish or change

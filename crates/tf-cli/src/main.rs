@@ -1,3 +1,5 @@
+mod explore;
+
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -30,7 +32,7 @@ USAGE:
                 [--daily-loss USD] [--max-orders N] [--higher-lows N] [--store DIR]
                 [--strategy momentum|trend] [--lead SECS] [--fast N] [--slow N]
                 [--propose NAME=VALUE@SECS]... [--revert-drawdown USD] [--lockout SECS]
-                [--export FILE.json]
+                [--export FILE.json|FILE.html] [--rules FILE]
 
     Run Strategy 1 (long side) over a synthetic session of healthy and dangerous
     runners and quiet names, through the risk gateway and the simulated broker,
@@ -62,7 +64,8 @@ USAGE:
                       broker and gateway. Prints both reports, the difference, the
                       changes applied and the proposals refused (with why).
     --rules FILE      momentum only: decide with the entry rules in FILE (see `tf_strategy::rules`)
-    --export FILE     momentum only: also write a JSON document for the trade explorer
+    --export FILE     momentum only: also write the trade explorer's data (FILE.json) or a
+                      standalone explorer page (FILE.html)
                       (bars, ticks, scanner hits, tier moves, orders with the gateway's
                       answer, fills, stop paths, and the strategy's own record of why it
                       entered or declined each symbol)
@@ -73,6 +76,17 @@ USAGE:
                       revert (default 300)
     --store DIR       keep the result keyed by a manifest hash of the whole setup
                       (seed, git sha, session, limits, parameters); reruns are skipped
+
+    tf explore HASH [HASH2] --store DIR [--rules FILE]... [--out FILE.html]
+
+    Open stored backtest runs (kept by `tf backtest --store DIR`) in the trade explorer.
+    The run is rebuilt from its manifest and replayed, and the replay is checked against
+    the stored result (event hash and every metric) before anything is shown; a run the
+    code no longer reproduces is refused. With two hashes, the page also compares them
+    trade by trade. A run that used --rules needs the same file given here.
+
+    HASH              a manifest hash, or a prefix of 8 or more digits
+    --out FILE        where to write the page (default explorer.html)
 
     tf bench [--symbols N] [--secs N] [--seed N] [--runs N] [--out FILE]
              [--compare FILE] [--commit SHA] [--flag-drop PCT] [--flag-rise PCT]
@@ -287,6 +301,7 @@ fn synth(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct BacktestArgs {
     seed: u64,
     secs: u64,
@@ -544,8 +559,13 @@ fn backtest_single(
                 secs: a.secs,
             },
         );
-        std::fs::write(path, &json).map_err(|e| format!("{path}: {e}"))?;
-        println!("exported {path} ({} bytes)", json.len());
+        let out = if path.ends_with(".html") {
+            tf_backtest::export::page(&json)
+        } else {
+            json
+        };
+        std::fs::write(path, &out).map_err(|e| format!("{path}: {e}"))?;
+        println!("exported {path} ({} bytes)", out.len());
         traced.result
     } else {
         tf_backtest::momentum_backtest(events.iter().copied(), labels, cfg)?
@@ -571,6 +591,11 @@ fn backtest_single(
         r.bookkeeping_errors
     );
     println!("outcome  {:>#18x}", r.outcome_hash);
+    Ok(momentum_metrics(&r))
+}
+
+/// The integers a single backtest stores as its result.
+fn momentum_metrics(r: &tf_backtest::BacktestResult) -> Vec<(String, i64)> {
     let mut metrics = r.report.metrics();
     metrics.push(("gateway.intents".into(), r.intents as i64));
     metrics.push(("gateway.accepted".into(), r.accepted as i64));
@@ -583,7 +608,7 @@ fn backtest_single(
     for (why, n) in &r.rejections {
         metrics.push((format!("refused.{why}"), *n as i64));
     }
-    Ok(metrics)
+    metrics
 }
 
 fn backtest_ab(
@@ -863,6 +888,7 @@ fn main() -> ExitCode {
         Some("synth") => synth(&args[1..]),
         Some("bench") => bench(&args[1..]),
         Some("backtest") => backtest(&args[1..]),
+        Some("explore") => explore::explore(&args[1..]),
         Some("help" | "--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())

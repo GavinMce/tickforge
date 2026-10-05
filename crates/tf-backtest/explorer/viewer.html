@@ -98,6 +98,15 @@ header.top .meta b { color: var(--ink); font-weight: 500; }
 .seg button:last-child { border-right: 0; }
 .seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
 .spacer { flex: 1 1 auto; }
+.modebar { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+button.other { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+button.other:hover { background: var(--panel-2); }
+.pill.same { background: var(--panel-2); color: var(--ink-2); }
+.pill.changed { background: var(--warn-bg); color: var(--amber); }
+.pill.only { background: var(--bad-bg); color: var(--blue); }
+.cmpsum { padding: 8px 12px; border-bottom: 1px solid var(--grid); font-family: var(--font-num); font-size: 12px; color: var(--ink-2); }
+.row .sub2 { grid-column: 1 / -1; color: var(--ink-2); font-size: 11.5px; }
+[hidden] { display: none !important; }
 .canvaswrap { position: relative; }
 canvas#chart { display: block; width: 100%; height: 440px; touch-action: none; }
 @media (max-width: 720px) { canvas#chart { height: 340px; } }
@@ -145,16 +154,19 @@ dl.kv dt { color: var(--ink-2); } dl.kv dd { margin: 0; font-family: var(--font-
   <header class="top">
     <h1>Trade Explorer</h1>
     <div class="meta" id="runmeta"></div>
+    <div class="seg" id="runseg" role="group" aria-label="Run" hidden></div>
   </header>
   <div class="grid">
     <section class="card">
       <h2>Trades and passes</h2>
+      <div class="modebar" id="modebar" hidden><div class="seg" id="viewseg" role="group" aria-label="List"></div></div>
       <div class="blotter" id="blotter" role="listbox" aria-label="Trades"></div>
     </section>
     <section class="card">
       <div class="chartbar">
         <div class="ttl" id="ttl"></div>
         <div class="spacer"></div>
+        <button class="other" id="bOther" hidden></button>
         <div class="seg" role="group" aria-label="Candle size" id="tfseg"></div>
       </div>
       <div class="canvaswrap"><canvas id="chart" aria-label="Candle chart of the selected trade"></canvas><div id="tip"></div></div>
@@ -181,7 +193,11 @@ dl.kv dt { color: var(--ink-2); } dl.kv dd { margin: 0; font-family: var(--font-
 <script>
 "use strict";
 /* ---------- data ---------- */
-const DATA = (typeof document !== "undefined") ? JSON.parse(document.getElementById("tf-data").textContent) : null;
+/* One run, or {runs: [A, B], compare}. The runs share one session, so the tape in each is the same. */
+const RAW = (typeof document !== "undefined") ? JSON.parse(document.getElementById("tf-data").textContent) : null;
+const RUNS = RAW ? (RAW.runs || [RAW]) : [];
+const COMPARE = RAW && RAW.compare ? RAW.compare : null;
+let DATA = RUNS[0] || null;
 
 const REASONS = { 1: "healthy pullback", 2: "trailing stop", 3: "maximum hold" };
 
@@ -273,7 +289,7 @@ function niceStep(range, n) {
   return (r < 1.5 ? 1 : r < 3.5 ? 2 : r < 7.5 ? 5 : 10) * mag;
 }
 
-const S = { items: [], item: null, tl: [], w0: 0, w1: 1, T: 0, tf: 5, playing: false, last: 0, speed: 5, hover: null, marks: [] };
+const S = { run: 0, view: "items", items: [], item: null, tl: [], w0: 0, w1: 1, T: 0, tf: 5, playing: false, last: 0, speed: 5, hover: null, marks: [] };
 
 function currentTrace(item) {
   return item.kind === "trade" ? item.trade.trace : item.decline;
@@ -498,6 +514,14 @@ function updateReadouts() {
     else if (S.T >= trade.t_in) { const p = priceAt(inst, S.T); const open = (p - trade.entry_px) * trade.qty; h += `<dt>Open P&amp;L</dt><dd class="${open >= 0 ? "pos" : "neg"}">${fmtPnl(open)}</dd>`; }
     h += `</dl></div>`;
   }
+  if (COMPARE && trade) {
+    const ti = DATA.trades.indexOf(trade), p = COMPARE.pairs.find(q => (S.run === COMPARE.a ? q.a : q.b) === ti);
+    if (p) {
+      const here = S.run === COMPARE.a ? "A" : "B";
+      const word = p.kind === "same" ? "The other run made the identical trade." : p.kind === "changed" ? "The other run made this trade too, but it differs in " + p.diff.join(", ") + "." : "Only run " + here + " made this trade; " + p.note + ".";
+      h += `<div class="sec"><h3>Against the other run</h3><p class="note" style="margin:0">${esc(word)}</p></div>`;
+    }
+  }
   h += `<div class="sec"><details><summary>Entry rules (version ${DATA.rules.id.slice(0, 8)})</summary><pre class="rules">${esc(DATA.rules.text)}</pre><p class="note">A threshold written @name follows that tunable parameter; a number is fixed.</p></details></div>`;
   document.getElementById("evidence").innerHTML = `<h2>Evidence</h2>` + h;
 
@@ -510,7 +534,58 @@ function updateReadouts() {
   for (let i = 0; i < rows.length; i++) { rows[i].className = i > nowIdx ? "future" : i === nowIdx ? "now" : ""; }
 }
 
+const KIND_LABEL = { same: "same", changed: "changed", only_a: "only in A", only_b: "only in B" };
+const letter = i => (i === 0 ? "A" : "B");
+
+function instName(id) { const i = DATA.instruments.find(x => x.id === id); return i ? i.name : "#" + id; }
+
+function renderCompare() {
+  const A = RUNS[COMPARE.a], B = RUNS[COMPARE.b];
+  const counts = { same: 0, changed: 0, only_a: 0, only_b: 0 };
+  COMPARE.pairs.forEach(p => counts[p.kind]++);
+  const dn = B.meta.net_pnl - A.meta.net_pnl;
+  let h = `<div class="cmpsum">A ${fmtPnl(A.meta.net_pnl)} · B ${fmtPnl(B.meta.net_pnl)} · B − A <span class="${dn >= 0 ? "pos" : "neg"}">${fmtPnl(dn)}</span><br>${counts.same} same · ${counts.changed} changed · ${counts.only_a} only in A · ${counts.only_b} only in B</div>`;
+  if (!COMPARE.pairs.length) h += `<div class="empty">Neither run traded.</div>`;
+  h += COMPARE.pairs.map((p, k) => {
+    const ta = p.a != null ? A.trades[p.a] : null, tb = p.b != null ? B.trades[p.b] : null;
+    const id = (ta || tb).instrument;
+    const cls = p.kind === "same" ? "same" : p.kind === "changed" ? "changed" : "only";
+    const detail = p.kind === "changed" ? "differs in " + p.diff.join(", ") : p.note;
+    return `<button class="row" role="option" data-p="${k}"><span class="nm">${instName(id)}</span><span class="tag"><span class="pill ${cls}">${KIND_LABEL[p.kind]}</span></span><span class="sub">A ${ta ? fmtPnl(ta.pnl) : "–"} · B ${tb ? fmtPnl(tb.pnl) : "–"}</span>${detail ? `<span class="sub2">${esc(detail)}</span>` : ""}</button>`;
+  }).join("");
+  const el = document.getElementById("blotter");
+  el.innerHTML = h;
+  el.querySelectorAll(".row").forEach(r => r.addEventListener("click", () => openPair(COMPARE.pairs[+r.dataset.p])));
+}
+
+function openPair(p) {
+  const ri = p.a != null ? COMPARE.a : COMPARE.b, ti = p.a != null ? p.a : p.b;
+  setRun(ri, false);
+  const tr = DATA.trades[ti];
+  const item = S.items.find(i => i.kind === "trade" && i.trade === tr);
+  if (item) select(item);
+}
+
+/* The same symbol in the other run: its counterpart trade, or what that run did instead. */
+function counterpart(item) {
+  if (!COMPARE) return null;
+  const other = S.run === COMPARE.a ? COMPARE.b : COMPARE.a;
+  const O = RUNS[other];
+  if (item.kind === "trade") {
+    const ti = DATA.trades.indexOf(item.trade);
+    const p = COMPARE.pairs.find(q => (S.run === COMPARE.a ? q.a : q.b) === ti);
+    const oi = p ? (S.run === COMPARE.a ? p.b : p.a) : null;
+    if (oi != null) return { run: other, pick: it => it.kind === "trade" && it.trade === O.trades[oi], what: "trade" };
+    const ds = O.instruments.find(x => x.id === item.trade.instrument)?.declines.filter(d => d.t <= item.trade.t_in) || [];
+    const d = ds[ds.length - 1];
+    return d ? { run: other, pick: it => it.kind === "decline" && it.decline === d, what: "where it passed" } : null;
+  }
+  const t = O.trades.find(x => x.instrument === item.inst.id && x.t_in >= item.decline.t - 1);
+  return t ? { run: other, pick: it => it.kind === "trade" && it.trade === t, what: "trade" } : null;
+}
+
 function renderBlotter() {
+  if (S.view === "compare" && COMPARE) return renderCompare();
   const d = DATA;
   document.getElementById("blotter").innerHTML = S.items.map((it, k) => {
     if (it.kind === "trade") {
@@ -538,6 +613,12 @@ function select(item) {
   document.querySelectorAll("#log div").forEach(r => r.addEventListener("click", () => { S.T = S.tl[+r.dataset.i].t; render(); }));
   document.querySelectorAll("#blotter .row").forEach(r => r.setAttribute("aria-selected", String(S.items[+r.dataset.k] === item)));
   document.getElementById("bPlay").textContent = "Play";
+  const cp = counterpart(item), ob = document.getElementById("bOther");
+  ob.hidden = !cp;
+  if (cp) {
+    ob.textContent = `Same symbol in run ${letter(cp.run)} →`;
+    ob.onclick = () => { setRun(cp.run, false); const it = S.items.find(cp.pick); if (it) select(it); };
+  }
   render();
 }
 
@@ -569,11 +650,37 @@ function togglePlay() {
   requestAnimationFrame(frame);
 }
 
+function renderMeta() {
+  const d = DATA, net = d.meta.net_pnl;
+  document.getElementById("runmeta").innerHTML = `${RUNS.length > 1 ? "run <b>" + letter(S.run) + "</b> · " : ""}<b>${d.meta.strategy}</b> · seed ${d.meta.seed} · ${d.meta.secs} s session · ${d.meta.intents} intents, ${d.meta.fills} fills · rules <b>${d.rules.id.slice(0, 8)}</b> · net <b class="${net >= 0 ? "pos" : "neg"}">${fmtPnl(net)}</b>`;
+}
+
+function setRun(i, choose = true) {
+  S.run = i; DATA = RUNS[i]; S.playing = false;
+  S.items = buildItems(DATA);
+  renderMeta();
+  document.querySelectorAll("#runseg button").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.r === i)));
+  renderBlotter();
+  if (choose) { const first = S.items.find(x => x.kind === "trade") || S.items[0]; if (first) select(first); }
+}
+
 function init() {
   const d = DATA;
-  const net = d.meta.net_pnl;
-  document.getElementById("runmeta").innerHTML = `<b>${d.meta.strategy}</b> · seed ${d.meta.seed} · ${d.meta.secs} s session · ${d.meta.intents} intents, ${d.meta.fills} fills · rules <b>${d.rules.id.slice(0, 8)}</b> · net <b class="${net >= 0 ? "pos" : "neg"}">${fmtPnl(net)}</b>`;
   S.items = buildItems(d);
+  renderMeta();
+  if (RUNS.length > 1) {
+    const rs = document.getElementById("runseg"); rs.hidden = false;
+    rs.innerHTML = RUNS.map((r, i) => `<button data-r="${i}" aria-pressed="${i === 0}">Run ${letter(i)} · ${r.rules.id.slice(0, 8)}</button>`).join("");
+    rs.querySelectorAll("button").forEach(b => b.addEventListener("click", () => setRun(+b.dataset.r)));
+  }
+  if (COMPARE) {
+    document.getElementById("modebar").hidden = false;
+    const vs = document.getElementById("viewseg");
+    vs.innerHTML = [["items", "Trades and passes"], ["compare", "A vs B"]].map(([k, t]) => `<button data-v="${k}" aria-pressed="${k === S.view}">${t}</button>`).join("");
+    vs.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+      S.view = b.dataset.v; vs.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b))); renderBlotter();
+    }));
+  }
   renderBlotter();
   document.getElementById("tfseg").innerHTML = [1, 5, 15, 60].map(s => `<button data-s="${s}" aria-pressed="${s === S.tf}">${s < 60 ? s + "s" : "1m"}</button>`).join("");
   document.querySelectorAll("#tfseg button").forEach(b => b.addEventListener("click", () => {

@@ -42,3 +42,4 @@ How:
 | [0023](0023-the-scanner-scores-volume-against-each-symbols-own-baseline.md) | The scanner scores volume against each symbol's own baseline | Accepted |
 | [0024](0024-tier-moves-are-hysteretic-bounded-and-on-the-tape.md) | Tier moves are hysteretic, bounded, and on the tape | Accepted |
 | [0025](0025-the-strategy-records-why-it-acted-and-the-viewer-only-reads.md) | The strategy records why it acted, and the viewer only reads | Accepted |
+| [0026](0026-entry-rules-are-data-and-the-decision-records-each-condition.md) | Entry rules are data, and the decision records each condition | Accepted |

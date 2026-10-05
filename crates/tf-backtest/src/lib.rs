@@ -32,19 +32,21 @@ use tf_risk::{Audit, GapRule, Gateway, Limits, reason_name};
 use tf_strategy::report::{Report, ReportBuilder, ReportError};
 use tf_strategy::{
     Decision, Decline, EntryTrace, Fill, Host, Intent, IntentId, MomentumLong, MomentumParams,
-    MtfBars, MtfConfig, OrderId, OrderState, OrderUpdate, SimBroker, SimConfig, Strategy,
+    MtfBars, MtfConfig, OrderId, OrderState, OrderUpdate, RuleSet, SimBroker, SimConfig, Strategy,
     StrategyId, TrendLong, TrendParams,
 };
 use tf_synth::{PullbackKind, Scenario, SymbolSpec, SynthConfig, SynthStream};
 
 const DOLLAR: u128 = 1_000_000_000;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct BacktestConfig {
     pub sim: SimConfig,
     pub limits: Limits,
     pub params: MomentumParams,
     pub trend: TrendParams,
+    /// Entry rules for the momentum strategy; `None` is the built-in set.
+    pub rules: Option<RuleSet>,
 }
 
 /// Limits for demonstration runs: $5,000 an order, 5,000 shares a name, $20,000
@@ -73,6 +75,7 @@ impl Default for BacktestConfig {
             limits: default_limits(),
             params: MomentumParams::default(),
             trend: TrendParams::default(),
+            rules: None,
         }
     }
 }
@@ -336,6 +339,10 @@ pub fn momentum_backtest_traced(
 ) -> Result<Traced, String> {
     let n = labels.len();
     let strat = MomentumLong::new(StrategyId(1), cfg.params, n).map_err(|e| e.0.to_owned())?;
+    let strat = match &cfg.rules {
+        Some(r) => strat.with_rules(r.clone()),
+        None => strat,
+    };
     let mut host = Host::new(strat, n);
     let mut broker = SimBroker::new(cfg.sim, n);
     let mut gateway = Gateway::new(cfg.limits, n);

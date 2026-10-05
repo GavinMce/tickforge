@@ -128,7 +128,12 @@ table.cond td { padding: 3px 0; border-bottom: 1px solid var(--grid); vertical-a
 table.cond td.v { font-family: var(--font-num); text-align: right; white-space: nowrap; padding-left: 8px; }
 table.cond td.m { width: 20px; font-weight: 700; }
 table.cond tr.ok td.m { color: var(--up); } table.cond tr.no td.m { color: var(--down); } table.cond tr.na td.m { color: var(--ink-2); }
-table.cond tr.pending { opacity: 0.55; }
+table.cond tr.pending { opacity: 0.6; }
+table.cond td.stage { padding-top: 8px; font-weight: 600; font-size: 11.5px; color: var(--ink-2); }
+table.cond td.stage span { font-weight: 400; }
+pre.rules { margin: 8px 0 0; padding: 8px; background: var(--panel-2); border-radius: 4px; font-family: var(--font-num); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+summary { cursor: pointer; font-weight: 600; font-size: 12px; }
+abbr { text-decoration: underline dotted; cursor: help; }
 dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-size: 12px; }
 dl.kv dt { color: var(--ink-2); } dl.kv dd { margin: 0; font-family: var(--font-num); text-align: right; }
 .empty { padding: 28px 16px; color: var(--ink-2); text-align: center; }
@@ -180,6 +185,7 @@ const DATA = (typeof document !== "undefined") ? JSON.parse(document.getElementB
 
 const REASONS = { 1: "healthy pullback", 2: "trailing stop", 3: "maximum hold" };
 
+function esc(t) { return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 function fmtP(p) { return p == null ? "–" : "$" + Number(p).toFixed(2); }
 function fmtP4(p) { return p == null ? "–" : "$" + Number(p).toFixed(4); }
 function fmtT(t) {
@@ -415,26 +421,40 @@ function featureAt(inst, T) {
 }
 
 /* ---------- panels ---------- */
-function condRows(conds, live) {
-  return conds.map(c => {
-    const cls = c.pass ? "ok" : "no";
-    const v = c.value == null ? "n/a" : c.value;
-    return `<tr class="${cls}"><td class="m">${c.pass ? "✓" : "✗"}</td><td>${c.name}</td><td class="v">${v} ${c.op} ${c.threshold}</td></tr>`;
-  }).join("");
+const FEATURE_LABEL = { impulse: "impulse (‰ of the low)", impulse_secs: "seconds of impulse", secs_since_high: "seconds since the high", depth: "pullback depth (‰)", retrace_now: "retrace from the high now (‰)", volume_ratio: "volume rate vs impulse (‰)", higher_lows: "higher lows", tape_ratio: "tape rate vs impulse (‰)", bid_support: "bid support (‰)" };
+const STAGE_TITLE = { too_old: "Gives up if the pullback is too old", armed: "Ready to judge", dangerous: "Gives up if dangerous", enter: "Enters if healthy" };
+const STAGE_ORDER = ["too_old", "armed", "dangerous", "enter"];
+const VETO = { too_old: true, dangerous: true }; // a true condition here is the bad news
+
+function cmpTest(op, v, t) { return v != null && (op === ">=" ? v >= t : op === ">" ? v > t : op === "<=" ? v <= t : v < t); }
+
+function condTable(conds, pending) {
+  let h = "";
+  STAGE_ORDER.forEach(st => {
+    const rows = conds.filter(c => c.stage === st);
+    if (!rows.length) return;
+    const any = rows[0].mode === "any";
+    h += `<tr><td colspan="3" class="stage">${STAGE_TITLE[st]} <span>(${any ? "any of" : "all of"})</span></td></tr>`;
+    h += rows.map(c => {
+      const veto = VETO[st];
+      const cls = c.pass ? (veto ? "no" : "ok") : "na";
+      const mark = c.pass ? (veto ? "!" : "✓") : "·";
+      const v = c.value == null ? "n/a" : c.value;
+      const lim = c.param ? `<abbr title="follows the parameter ${c.param}">${c.threshold}</abbr>` : c.threshold;
+      return `<tr class="${cls}${pending ? " pending" : ""}"><td class="m">${mark}</td><td>${FEATURE_LABEL[c.feature] || c.feature}</td><td class="v">${v} ${c.op} ${lim}</td></tr>`;
+    }).join("");
+  });
+  return `<table class="cond">${h}</table>`;
 }
 
 function liveConds(item, f) { // the same tests as the strategy's, from the context series, before the decision
   const tr = currentTrace(item); if (!tr || !f) return null;
-  const by = {}; tr.conditions.forEach(c => by[c.name] = c);
-  const mk = (name, v, test) => { const c = by[name]; return c ? { name, value: v, op: c.op, threshold: c.threshold, pass: v != null && test(v, c.threshold) } : null; };
-  return [
-    mk("pullback depth (permille)", f.depth, (v, t) => v <= t),
-    mk("pullback volume rate vs impulse (permille)", f.vr, (v, t) => v <= t),
-    mk("pullback depth, at least (permille)", f.depth, (v, t) => v >= t),
-    mk("retrace from the high now (permille)", f.retrace, (v, t) => v <= t),
-    mk("higher lows", f.hl, (v, t) => v >= t),
-    mk("bid support (permille)", f.bid, (v, t) => v >= t),
-  ].filter(Boolean);
+  const series = { depth: f.depth, retrace_now: f.retrace, volume_ratio: f.vr, higher_lows: f.hl, tape_ratio: f.tape, bid_support: f.bid };
+  return tr.conditions.map(c => {
+    if (!(c.feature in series)) return { ...c, value: null, pass: false }; // not in the series: shown once decided
+    const v = series[c.feature];
+    return { ...c, value: v, pass: cmpTest(c.op, v, c.threshold) };
+  });
 }
 
 function updateReadouts() {
@@ -449,11 +469,11 @@ function updateReadouts() {
   h += `<div class="sec"><h3>${trade ? (decided ? "Why it entered" : "Watching: would it enter?") : (decided ? "Why it passed" : "Watching")}</h3>`;
   if (!tr) h += `<p class="note">No decision record for this trade.</p>`;
   else if (decided) {
-    h += `<table class="cond">${condRows(tr.conditions)}</table>`;
+    h += condTable(tr.conditions, false);
     h += `<p class="note">${trade ? "The strategy's own record, taken at " + fmtT(tr.t) + "." : "Given up at " + fmtT(item.decline.t) + ": " + item.decline.reason + "."}</p>`;
   } else {
     const live = liveConds(item, f);
-    if (live) h += `<table class="cond">${live.map(c => `<tr class="${c.pass ? "ok" : "no"} pending"><td class="m">${c.pass ? "✓" : "✗"}</td><td>${c.name}</td><td class="v">${c.value == null ? "n/a" : c.value} ${c.op} ${c.threshold}</td></tr>`).join("")}</table><p class="note">Context series so far; the strategy decides at ${fmtT(decT)}.</p>`;
+    if (live) h += condTable(live, true) + `<p class="note">Context series so far (impulse and timing rows fill in at the decision); the strategy decides at ${fmtT(decT)}.</p>`;
     else h += `<p class="note">Nothing to evaluate yet.</p>`;
   }
   h += `</div>`;
@@ -478,6 +498,7 @@ function updateReadouts() {
     else if (S.T >= trade.t_in) { const p = priceAt(inst, S.T); const open = (p - trade.entry_px) * trade.qty; h += `<dt>Open P&amp;L</dt><dd class="${open >= 0 ? "pos" : "neg"}">${fmtPnl(open)}</dd>`; }
     h += `</dl></div>`;
   }
+  h += `<div class="sec"><details><summary>Entry rules (version ${DATA.rules.id.slice(0, 8)})</summary><pre class="rules">${esc(DATA.rules.text)}</pre><p class="note">A threshold written @name follows that tunable parameter; a number is fixed.</p></details></div>`;
   document.getElementById("evidence").innerHTML = `<h2>Evidence</h2>` + h;
 
   // Clock and scrubber.
@@ -551,7 +572,7 @@ function togglePlay() {
 function init() {
   const d = DATA;
   const net = d.meta.net_pnl;
-  document.getElementById("runmeta").innerHTML = `<b>${d.meta.strategy}</b> · seed ${d.meta.seed} · ${d.meta.secs} s session · ${d.meta.intents} intents, ${d.meta.fills} fills · net <b class="${net >= 0 ? "pos" : "neg"}">${fmtPnl(net)}</b>`;
+  document.getElementById("runmeta").innerHTML = `<b>${d.meta.strategy}</b> · seed ${d.meta.seed} · ${d.meta.secs} s session · ${d.meta.intents} intents, ${d.meta.fills} fills · rules <b>${d.rules.id.slice(0, 8)}</b> · net <b class="${net >= 0 ? "pos" : "neg"}">${fmtPnl(net)}</b>`;
   S.items = buildItems(d);
   renderBlotter();
   document.getElementById("tfseg").innerHTML = [1, 5, 15, 60].map(s => `<button data-s="${s}" aria-pressed="${s === S.tf}">${s < 60 ? s + "s" : "1m"}</button>`).join("");

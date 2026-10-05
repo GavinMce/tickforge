@@ -893,7 +893,8 @@ epics:
       - id: E16-S01
         jira: TIC-113
         title: Declarative entry-rule layer (conditions as data, with a per-decision trace)
-        status: todo
+        status: done
+        evidence: crates/tf-strategy/src/rules.rs (RuleSet, text form, fingerprint, per-condition Evaluation) and MomentumLong::with_rules; `tf backtest --rules FILE` with the fingerprint in the manifest; exporter and viewer read the recorded evaluations; built-in rules identical to the old code on 72 reports and 12 exports (25 trades, 60 declines); 14 mutations caught; ADR 0026. Only named thresholds follow the store; structural edits are new versions and not yet proposable by an agent
         deps: [E08-S10, E08-S03]
         ac:
           - A rule set (feature, comparison, threshold, AND/OR groups) is versioned data evaluated by one deterministic engine

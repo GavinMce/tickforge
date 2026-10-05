@@ -420,3 +420,66 @@ fn export_is_deterministic_and_carries_the_decision_record() {
     }
     assert!(a.contains("pullback went on too long") || a.contains("dangerous"));
 }
+
+#[test]
+fn rules_in_the_config_decide_and_the_export_records_them() {
+    let (events, labels) = demo_session_with_lead(1, 520, 2, 2, 2, 120);
+    let base = BacktestConfig::default();
+    let never = BacktestConfig {
+        rules: Some(
+            RuleSet::parse(
+                &tf_strategy::rules::MOMENTUM_RULES
+                    .replace("higher_lows >= @min_higher_lows", "higher_lows >= 99"),
+            )
+            .unwrap(),
+        ),
+        ..BacktestConfig::default()
+    };
+    let a = go(events.clone(), labels.clone(), &base);
+    let b = go(events.clone(), labels.clone(), &never);
+    assert!(a.intents > 0);
+    assert_eq!(b.intents, 0, "the edited rules never enter");
+
+    let export = |cfg: &BacktestConfig| {
+        let t = momentum_backtest_traced(events.iter().copied(), labels.clone(), cfg).unwrap();
+        export::export_json(
+            &events,
+            &labels,
+            cfg,
+            &t.result,
+            &t.entries,
+            &t.declines,
+            &export::ExportMeta {
+                strategy: "momentum",
+                seed: 1,
+                secs: 520,
+            },
+        )
+    };
+    let ja = export(&base);
+    let id = format!("{:016x}", RuleSet::momentum().fingerprint());
+    assert!(
+        ja.contains(&format!("\"rules\":{{\"id\":\"{id}\"")),
+        "the rule version is recorded"
+    );
+    assert!(
+        ja.contains("enter all: depth >= @min_depth_permille;"),
+        "with its text"
+    );
+    assert!(
+        ja.contains("\\nenter all"),
+        "newlines are escaped, not dropped"
+    );
+    for key in [
+        "\"stage\":\"enter\"",
+        "\"feature\":\"higher_lows\"",
+        "\"param\":\"max_depth_permille\"",
+        "\"param\":null",
+    ] {
+        assert!(ja.contains(key), "missing {key}");
+    }
+    let jb = export(&never);
+    assert_ne!(ja, jb);
+    assert!(!jb.contains(&id), "the edited rules have their own id");
+    assert!(jb.contains("higher_lows >= 99"));
+}

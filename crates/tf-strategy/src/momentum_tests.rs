@@ -628,3 +628,149 @@ fn every_parameter_is_recorded_once_and_a_change_shows() {
         .collect();
     assert_eq!(diff, ["min_higher_lows"]);
 }
+
+// ---- entry rules as data ----
+
+use crate::rules::{MOMENTUM_RULES, RuleSet, StageKind};
+
+type Evidence = (Vec<crate::EntryTrace>, Vec<crate::Decline>);
+
+fn run_rules(events: &[Event], rules: &str, p: MomentumParams) -> (Outcome, Evidence) {
+    let strat = MomentumLong::new(StrategyId(1), p, 1)
+        .unwrap()
+        .with_rules(RuleSet::parse(rules).unwrap());
+    let mut host = Host::new(strat, 1);
+    let mut broker = SimBroker::new(
+        SimConfig {
+            latency_ns: 50_000_000,
+            borrow_bps_per_year: 0,
+        },
+        1,
+    );
+    let intents = run_backtest_observed(&mut host, &mut broker, events.iter().copied(), |_, _| {});
+    let out = Outcome {
+        intents,
+        stats: host.strategy().stats(),
+        watched: host.strategy().watched(),
+    };
+    let ev = (
+        host.strategy().entry_traces().to_vec(),
+        host.strategy().declines().to_vec(),
+    );
+    (out, ev)
+}
+
+#[test]
+fn the_built_in_rules_given_explicitly_decide_exactly_as_the_default_does() {
+    for seed in 0..12 {
+        for kind in [PullbackKind::Healthy, PullbackKind::Dangerous] {
+            let ev = one(kind, seed);
+            let a = run(&ev, 1, MomentumParams::default());
+            let (b, _) = run_rules(&ev, MOMENTUM_RULES, MomentumParams::default());
+            assert_eq!(a.intents, b.intents, "{kind:?} seed {seed}");
+            assert_eq!(a.stats, b.stats);
+        }
+    }
+}
+
+#[test]
+fn editing_the_rules_changes_the_decision_without_touching_the_parameters() {
+    let ev = healthy(1);
+    // A literal nobody reaches: never enters, and does not give up either.
+    let never = MOMENTUM_RULES.replace("higher_lows >= @min_higher_lows", "higher_lows >= 99");
+    let (o, _) = run_rules(&ev, &never, MomentumParams::default());
+    assert!(opens(&o).is_empty());
+    // Dropping the higher-lows and bid-support conditions is the same as setting those
+    // parameters to zero: the rule edit and the parameter edit agree to the intent.
+    let dropped = MOMENTUM_RULES
+        .replace("; higher_lows >= @min_higher_lows", "")
+        .replace("; bid_support >= @min_bid_support_permille", "");
+    let (by_rules, _) = run_rules(&ev, &dropped, MomentumParams::default());
+    let by_params = run(
+        &ev,
+        1,
+        with(|p| {
+            p.min_higher_lows = 0;
+            p.min_bid_support_permille = 0;
+        }),
+    );
+    assert_eq!(by_rules.intents.len(), by_params.intents.len());
+    assert_eq!(opens(&by_rules).len(), 1);
+    // bid support 0 still needs a bid reading, which the dropped condition did not, so
+    // the two may differ in timing by a tick; both enter on the early, pre-bounce reading.
+    let base = run(&ev, 1, MomentumParams::default());
+    assert!(
+        opens(&by_rules)[0].ts <= opens(&base)[0].ts,
+        "no later than with the bounce required"
+    );
+    // An empty `dangerous` stage means nothing is dangerous.
+    let none = MOMENTUM_RULES.replace(
+        "dangerous any: depth > @max_depth_permille; volume_ratio > @max_volume_ratio_permille",
+        "dangerous any:",
+    );
+    let (d, _) = run_rules(
+        &one(PullbackKind::Dangerous, 1),
+        &none,
+        MomentumParams::default(),
+    );
+    assert_eq!(d.stats.rejected_dangerous, 0);
+    let base_d = run(
+        &one(PullbackKind::Dangerous, 1),
+        1,
+        MomentumParams::default(),
+    );
+    assert!(base_d.stats.rejected_dangerous >= 1);
+}
+
+#[test]
+fn every_entry_and_every_decline_carries_the_rules_that_decided_and_how_each_condition_read() {
+    let (o, (entries, _)) = run_rules(&healthy(1), MOMENTUM_RULES, MomentumParams::default());
+    assert_eq!(opens(&o).len(), 1);
+    let id = RuleSet::momentum().fingerprint();
+    let t = &entries[0];
+    assert_eq!(t.rules, id);
+    assert_eq!(t.evaluations.len(), 10);
+    let enter: Vec<_> = t
+        .evaluations
+        .iter()
+        .filter(|e| e.stage == StageKind::Enter)
+        .collect();
+    assert_eq!(enter.len(), 5);
+    assert!(
+        enter.iter().all(|e| e.pass),
+        "it entered because every entry condition held"
+    );
+    assert!(
+        t.evaluations
+            .iter()
+            .filter(|e| e.stage == StageKind::Dangerous)
+            .all(|e| !e.pass),
+        "and nothing dangerous held"
+    );
+    // The value recorded for a condition is the feature the decision saw.
+    let depth = t
+        .evaluations
+        .iter()
+        .find(|e| {
+            e.stage == StageKind::Enter && e.condition.feature == crate::rules::Feature::Depth
+        })
+        .unwrap();
+    assert_eq!(depth.value, Some(t.features.depth_permille));
+
+    let (_, (_, declines)) = run_rules(
+        &one(PullbackKind::Dangerous, 1),
+        MOMENTUM_RULES,
+        MomentumParams::default(),
+    );
+    let dec = declines
+        .iter()
+        .find(|x| x.reason == crate::DeclineReason::Dangerous)
+        .expect("a dangerous decline");
+    assert_eq!(dec.rules, id);
+    assert!(
+        dec.evaluations
+            .iter()
+            .any(|e| e.stage == StageKind::Dangerous && e.pass),
+        "the decline shows which dangerous condition held"
+    );
+}

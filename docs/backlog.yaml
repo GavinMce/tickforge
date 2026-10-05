@@ -72,7 +72,8 @@ epics:
       - id: E01-S06
         jira: TIC-21
         title: Persistent security master (stable instrument ids)
-        status: todo
+        status: done
+        evidence: crates/tf-secmaster/ (Builder, SecurityMaster, Session, text format); docs/adr/0005-security-master-identity.md
         deps: [E01-S02]
         ac:
           - Ids stable across days, ticker changes and corporate actions

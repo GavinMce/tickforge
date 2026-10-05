@@ -33,3 +33,4 @@ How:
 | [0014](0014-tier-1-state-is-bounded-and-features-are-read-on-demand.md) | Tier 1 state is bounded, and pullback features are read on demand | Accepted |
 | [0015](0015-strategy-1-long-side-waits-for-the-bounce.md) | Strategy 1, long side: classify on features, wait for the bounce, trail the high | Accepted |
 | [0016](0016-the-backtest-loop-puts-the-gateway-between-strategy-and-broker.md) | The backtest loop puts the gateway between the strategy and the broker | Accepted |
+| [0017](0017-multi-timeframe-bars-are-built-live-for-a-bounded-set.md) | Multi-timeframe bars are built live for a bounded set of symbols | Accepted |

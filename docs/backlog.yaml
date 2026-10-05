@@ -464,6 +464,26 @@ epics:
         status: todo
         ac:
           - Written recommendation, backed by E06-S01 numbers, on whether and how to shard
+      - id: E07-S09
+        jira: TIC-109
+        title: Indicator library (EMA, SMA, VWAP, RSI, ATR, opening range)
+        status: todo
+        deps: [E07-S10]
+        ac:
+          - Copy, integer-only, allocation-free indicators: EMA, SMA, rolling and anchored VWAP with bands, RSI (Wilder), ATR, opening range, rate of change, rolling min/max
+          - Each matches an independent brute-force reference in property tests; EMA and RSI match pinned vectors computed independently
+          - Warm-up, seeding, stale-timestamp and overflow behaviour documented and tested; golden hash pinned on both architectures
+      - id: E07-S10
+        jira: TIC-108
+        title: Streaming multi-timeframe bar aggregator
+        status: done
+        evidence: crates/tf-engine/src/mtf.rs (MtfBars, SymbolBars, Timeframe, TfBar) and Host/Ctx integration (ctx.bars, track_bars, Strategy::on_bar); hand-worked bars; every timeframe equals a brute-force grouping of raw trades over 80 random streams; stream vs encoded replay identical with a pinned digest; 14 mutations caught (one gap found and closed); ADR 0017. Corrections are ignored by live bars, so stored bars (E15-S01) must apply them
+        deps: [E07-S01]
+        ac:
+          - 1m, 5m, 15m, 1h and day bars (OHLC, volume, trades, VWAP) built live from trades for a bounded set of symbols; closed-bar series plus the forming bar, exposed to strategies through Ctx
+          - Hand-worked bars match exactly; aggregating a stream and a replay of its tape give identical bars; golden hash pinned on x86_64 and aarch64
+          - Late and out-of-order timestamps, corrections and empty intervals follow documented rules
+          - The same code backs E15-S01 so live and stored bars cannot drift
   - id: E08
     jira: TIC-9
     title: Strategy framework and Strategy 1 (low-float momentum)
@@ -535,6 +555,14 @@ epics:
           - Strategy intents pass through the risk gateway before the simulated broker; fills and closes flow back to the gateway and strategy
           - Gateway and report agree on positions and P&L; rejections are counted and visible in the result
           - tf backtest runs it on synthetic scenarios and stores the result by manifest hash
+      - id: E08-S09
+        jira: TIC-110
+        title: Example indicator strategy (EMA cross and VWAP reclaim long)
+        status: todo
+        deps: [E07-S09, E07-S10, E08-S08]
+        ac:
+          - A strategy built on the indicator and bar APIs runs through tf backtest with every threshold in a typed parameter set
+          - Demonstrates the pattern for new strategies; makes no claim of an edge
   # ---------------------------------------------------------------- Phase 4
   - id: E09
     jira: TIC-10
@@ -815,7 +843,7 @@ epics:
         jira: TIC-103
         title: Bar aggregation (1m, 5m, daily) and storage
         status: todo
-        deps: [E04-S02]
+        deps: [E04-S02, E07-S10]
         ac:
           - Bars reproducible from ticks; stored and queryable
       - id: E15-S02

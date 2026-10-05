@@ -594,3 +594,149 @@ fn the_clippy_ban_list_still_covers_the_clock_io_and_hash_maps() {
         assert!(cfg.contains(banned), "clippy.toml no longer bans {banned}");
     }
 }
+
+// ---- multi-timeframe bars ----
+
+mod bars {
+    use super::*;
+    use crate::strategy::BarsError;
+    use crate::{MtfBars, MtfConfig, TfBar, Timeframe};
+    use tf_core::InstrumentId;
+    use tf_engine::TrackError;
+
+    const T0: Nanos = 1_767_571_200 * SEC; // a day boundary
+
+    /// Tracks every instrument it sees on its first trade and records the order of
+    /// bar closes against events.
+    #[derive(Default)]
+    struct Watcher {
+        log: Vec<String>,
+        closed: Vec<(Nanos, InstrumentId, Timeframe, TfBar)>,
+        track_result: Vec<Result<(), BarsError>>,
+        forming_seen: Vec<Option<u64>>,
+    }
+
+    impl Strategy for Watcher {
+        fn id(&self) -> StrategyId {
+            StrategyId(5)
+        }
+        fn on_event(&mut self, ctx: &mut Ctx<'_>, ev: &Event) {
+            let i = ev.instrument();
+            if ctx.bars(i).is_none() {
+                self.track_result.push(ctx.track_bars(i));
+            }
+            self.forming_seen.push(
+                ctx.bars(i)
+                    .and_then(|b| b.forming(Timeframe::M1))
+                    .map(|f| f.start_sec),
+            );
+            self.log
+                .push(format!("event@{}", ev.ts_recv() / SEC - T0 / SEC));
+        }
+        fn on_timer(&mut self, _: &mut Ctx<'_>, _: TimerId) {}
+        fn on_bar(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, tf: Timeframe) {
+            let bar = *ctx.bars(i).unwrap().closed(tf, 0).unwrap();
+            self.closed.push((ctx.now(), i, tf, bar));
+            self.log.push(format!("bar {tf:?}"));
+        }
+    }
+
+    fn host(max: usize) -> Host<Watcher> {
+        Host::new(Watcher::default(), 3).with_bars(MtfBars::new(MtfConfig::default(), 3, max))
+    }
+
+    #[test]
+    fn a_closed_bar_is_delivered_before_the_event_that_closed_it() {
+        let mut h = host(3);
+        h.on_event(&trade(0, T0 + 10 * SEC, 1000, 5));
+        h.on_event(&trade(0, T0 + 30 * SEC, 1010, 7));
+        h.on_event(&trade(0, T0 + 61 * SEC, 1020, 1));
+        let w = h.strategy();
+        assert_eq!(w.log, ["event@10", "event@30", "bar M1", "event@61"]);
+        let (now, id, tf, bar) = w.closed[0];
+        assert_eq!(
+            (now, id, tf),
+            (T0 + 61 * SEC, 0, Timeframe::M1),
+            "now is the closing trade's time"
+        );
+        assert_eq!(
+            (bar.start_sec, bar.volume, bar.trades, bar.close),
+            (T0 / SEC, 7, 1, Px::from_cents(1010))
+        );
+        // The strategy asked for tracking in its first on_event, so the 10 s trade is not in the bar.
+        assert_eq!(w.track_result, [Ok(())]);
+    }
+
+    #[test]
+    fn tracking_starts_with_the_next_trade_and_forming_bars_are_visible() {
+        let mut h = host(3);
+        h.on_event(&trade(0, T0 + 10 * SEC, 1000, 5));
+        h.on_event(&trade(0, T0 + 20 * SEC, 1000, 5));
+        assert_eq!(h.strategy().forming_seen, [None, Some(T0 / SEC)]);
+    }
+
+    #[test]
+    fn advance_to_closes_a_quiet_symbols_bar_and_tells_the_strategy() {
+        let mut h = host(3);
+        h.on_event(&trade(0, T0 + 10 * SEC, 1000, 5));
+        h.on_event(&trade(0, T0 + 20 * SEC, 1000, 5));
+        h.advance_to(T0 + 60 * SEC);
+        let w = h.strategy();
+        assert_eq!(w.closed.len(), 1);
+        assert_eq!(w.closed[0].0, T0 + 60 * SEC);
+        h.advance_to(T0 + 61 * SEC);
+        assert_eq!(h.strategy().closed.len(), 1, "once");
+    }
+
+    #[test]
+    fn a_strategy_can_stop_tracking_and_gets_nothing_more() {
+        struct Once(Vec<bool>);
+        impl Strategy for Once {
+            fn id(&self) -> StrategyId {
+                StrategyId(6)
+            }
+            fn on_event(&mut self, ctx: &mut Ctx<'_>, ev: &Event) {
+                let i = ev.instrument();
+                if ctx.bars(i).is_none() {
+                    ctx.track_bars(i).unwrap();
+                } else {
+                    self.0.push(ctx.untrack_bars(i));
+                    self.0.push(ctx.untrack_bars(i));
+                    self.0.push(ctx.bars(i).is_some());
+                }
+            }
+            fn on_timer(&mut self, _: &mut Ctx<'_>, _: TimerId) {}
+            fn on_bar(&mut self, _: &mut Ctx<'_>, _: InstrumentId, _: Timeframe) {
+                self.0.push(true);
+            }
+        }
+        let mut h =
+            Host::new(Once(Vec::new()), 1).with_bars(MtfBars::new(MtfConfig::default(), 1, 1));
+        h.on_event(&trade(0, T0, 1000, 1));
+        h.on_event(&trade(0, T0 + SEC, 1000, 1));
+        h.on_event(&trade(0, T0 + 120 * SEC, 1000, 1));
+        assert_eq!(
+            h.strategy().0,
+            [true, false, false],
+            "untracked once, then nothing, and no bar close"
+        );
+    }
+
+    #[test]
+    fn asking_for_bars_without_an_aggregator_or_past_the_bound_is_an_error() {
+        let mut plain = Host::new(Watcher::default(), 3);
+        plain.on_event(&trade(0, T0, 1000, 1));
+        assert_eq!(
+            plain.strategy().track_result,
+            [Err(BarsError::NotConfigured)]
+        );
+
+        let mut tiny = host(1);
+        tiny.on_event(&trade(0, T0, 1000, 1));
+        tiny.on_event(&trade(1, T0 + SEC, 1000, 1));
+        assert_eq!(
+            tiny.strategy().track_result,
+            [Ok(()), Err(BarsError::Track(TrackError::Full))]
+        );
+    }
+}

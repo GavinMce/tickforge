@@ -26,7 +26,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tf_core::{Event, InstrumentId, Nanos};
-use tf_engine::{RollingBars, SymbolState, Tier0};
+use tf_engine::{
+    BarClose, MtfBars, RollingBars, SymbolBars, SymbolState, Tier0, Timeframe, TrackError,
+};
 
 use crate::intent::{
     Intent, IntentError, IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif,
@@ -93,6 +95,15 @@ pub struct Ctx<'a> {
     out: &'a mut Vec<Intent>,
     invalid: &'a mut u64,
     timers: &'a mut Timers,
+    bars: &'a mut Option<MtfBars>,
+}
+
+/// Why a request about multi-timeframe bars failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarsError {
+    /// The host was built without a bar aggregator ([`Host::with_bars`]).
+    NotConfigured,
+    Track(TrackError),
 }
 
 impl Ctx<'_> {
@@ -109,6 +120,27 @@ impl Ctx<'_> {
     /// Rolling windows and one-second bars for an instrument.
     pub fn windows(&self, id: InstrumentId) -> Option<&RollingBars> {
         self.tier0.windows(id)
+    }
+
+    /// Bars on 1m, 5m, 15m, 1h and day timeframes for a tracked instrument. `None`
+    /// if the host has no aggregator or the instrument is not tracked.
+    pub fn bars(&self, id: InstrumentId) -> Option<&SymbolBars> {
+        self.bars.as_ref()?.symbol(id)
+    }
+
+    /// Start building multi-timeframe bars for `id`. Bars begin with the next trade;
+    /// nothing is back-filled. The tracked set is bounded by the aggregator.
+    pub fn track_bars(&mut self, id: InstrumentId) -> Result<(), BarsError> {
+        self.bars
+            .as_mut()
+            .ok_or(BarsError::NotConfigured)?
+            .track(id)
+            .map_err(BarsError::Track)
+    }
+
+    /// Stop building bars for `id` and drop them. True if it was tracked.
+    pub fn untrack_bars(&mut self, id: InstrumentId) -> bool {
+        self.bars.as_mut().is_some_and(|b| b.untrack(id))
     }
 
     /// Submit an intent. It is validated here: a malformed one is refused with
@@ -172,6 +204,11 @@ pub trait Strategy: Send {
     /// A timer set with [`Ctx::set_timer`] has come due.
     fn on_timer(&mut self, ctx: &mut Ctx<'_>, timer: TimerId);
 
+    /// A multi-timeframe bar has just closed for a tracked instrument. Called before
+    /// [`Strategy::on_event`] for the trade (or the passing of time) that closed it,
+    /// in time order; the closed bar is `ctx.bars(id)?.closed(timeframe, 0)`.
+    fn on_bar(&mut self, _ctx: &mut Ctx<'_>, _instrument: InstrumentId, _timeframe: Timeframe) {}
+
     /// What became of one of its intents.
     fn on_order_update(&mut self, _ctx: &mut Ctx<'_>, _update: &OrderUpdate) {}
 }
@@ -191,6 +228,8 @@ pub struct Host<S: Strategy> {
     invalid: u64,
     storms: u64,
     now: Nanos,
+    bars: Option<MtfBars>,
+    closes: Vec<BarClose>,
 }
 
 impl<S: Strategy> Host<S> {
@@ -205,7 +244,15 @@ impl<S: Strategy> Host<S> {
             invalid: 0,
             storms: 0,
             now: 0,
+            bars: None,
+            closes: Vec::new(),
         }
+    }
+
+    /// Give the strategy multi-timeframe bars (see [`Ctx::track_bars`]).
+    pub fn with_bars(mut self, bars: MtfBars) -> Self {
+        self.bars = Some(bars);
+        self
     }
 
     fn call<R>(&mut self, now: Nanos, f: impl FnOnce(&mut S, &mut Ctx<'_>) -> R) -> R {
@@ -217,6 +264,7 @@ impl<S: Strategy> Host<S> {
             out: &mut self.out,
             invalid: &mut self.invalid,
             timers: &mut self.timers,
+            bars: &mut self.bars,
         };
         f(&mut self.strategy, &mut ctx)
     }
@@ -247,6 +295,10 @@ impl<S: Strategy> Host<S> {
         self.tier0.on_event(ev);
         self.now = self.now.max(ts);
         let now = self.now;
+        if let Some(b) = &mut self.bars {
+            b.on_event(ev, &mut self.closes);
+        }
+        self.deliver_bar_closes(now);
         self.call(now, |s, c| s.on_event(c, ev));
     }
 
@@ -255,6 +307,24 @@ impl<S: Strategy> Host<S> {
     pub fn advance_to(&mut self, ts: Nanos) {
         self.fire_timers(ts);
         self.now = self.now.max(ts);
+        if let Some(b) = &mut self.bars {
+            b.advance_to(ts, &mut self.closes);
+        }
+        let now = self.now;
+        self.deliver_bar_closes(now);
+    }
+
+    /// Tell the strategy about the bars that just closed, in order.
+    fn deliver_bar_closes(&mut self, now: Nanos) {
+        if self.closes.is_empty() {
+            return;
+        }
+        let closes = std::mem::take(&mut self.closes);
+        for c in &closes {
+            self.call(now, |s, ctx| s.on_bar(ctx, c.instrument, c.timeframe));
+        }
+        self.closes = closes;
+        self.closes.clear();
     }
 
     /// Tell the strategy what became of an order.

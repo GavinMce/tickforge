@@ -211,7 +211,8 @@ epics:
       - id: E03-S04
         jira: TIC-35
         title: Tape replay driver (1x to Nx) as a Provider
-        status: todo
+        status: done
+        evidence: crates/tf-tape/src/replay.rs (TapeProvider, Speed, Pacer); pacing, filtering, reconnect and damaged-tape tests in replay_tests.rs; docs/adr/0007-paced-replay-waits-inside-poll.md
         deps: [E04-S01]
         ac:
           - Reads a tape file through the same Provider trait

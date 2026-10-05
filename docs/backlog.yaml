@@ -153,7 +153,8 @@ epics:
       - id: E02-S06
         jira: TIC-29
         title: Synthetic news and sentiment events correlated with scenarios
-        status: todo
+        status: done
+        evidence: crates/tf-synth/src/{config,stream,scenario}.rs; lead/lag, clamp, determinism and golden_stream_hash_news tests in tests.rs
         deps: [E01-S07]
         ac:
           - Headline events precede or follow price scenarios with configurable lead and lag

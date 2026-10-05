@@ -22,6 +22,8 @@ earlier trade, and news with text; neither fits an event as is.
   decodes as is; changing it would move every golden hash.
 - **Schema v3 (ADR 0020)** adds tag 7, a parameter change. Nothing earlier changes;
   a v1 or v2 stream containing tag 7 is corrupt.
+- **Schema v4 (ADR 0024)** adds tag 8, a tier change. Nothing earlier changes; an older
+  stream containing tag 8 is corrupt.
 - **Old readers/new data.** A stream containing a tag newer than its version is corrupt, a
   header with version 0 or newer than the build is an error, never a guess.
 - **No trade id.** The canonical `Trade` has none, so a `Correction` or

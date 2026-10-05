@@ -112,7 +112,7 @@ impl Tier0 {
 
     pub fn on_event(&mut self, ev: &Event) {
         // A parameter change is not market data; its instrument field may mean nothing.
-        if matches!(ev, Event::ParamChange(_)) {
+        if matches!(ev, Event::ParamChange(_) | Event::TierChange(_)) {
             return;
         }
         let i = ev.instrument() as usize;
@@ -155,7 +155,7 @@ impl Tier0 {
                 s.notional = s.notional.saturating_sub(notional(c.px, c.size));
                 s.trades = s.trades.saturating_sub(1);
             }
-            Event::News(_) | Event::ParamChange(_) => {}
+            Event::News(_) | Event::ParamChange(_) | Event::TierChange(_) => {}
         }
     }
 }

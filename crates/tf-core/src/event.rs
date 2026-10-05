@@ -178,6 +178,39 @@ pub struct ParamChange {
     pub evidence: u64,
 }
 
+/// What happened to a symbol's tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TierAction {
+    /// Moved up to Tier 1: full ticks, quotes and features are now kept for it.
+    Promote = 0,
+    /// Moved back down: its Tier 1 history is dropped.
+    Demote = 1,
+}
+
+impl TierAction {
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(TierAction::Promote),
+            1 => Some(TierAction::Demote),
+            _ => None,
+        }
+    }
+}
+
+/// A symbol moved between tiers (see `tf-engine`'s `Promoter`). `hdr.instrument` is
+/// the symbol. `reason` is the promoter's code for why (see its constants) and
+/// `score` the number behind the decision (the volume z-score times 1000 for a
+/// promotion, the latest one for a demotion). It is an event so that a replay of the
+/// tape follows exactly the tier membership the session had.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TierChange {
+    pub hdr: Header,
+    pub action: TierAction,
+    pub reason: u8,
+    pub score: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Trade(Trade),
@@ -187,6 +220,7 @@ pub enum Event {
     CancelError(CancelError),
     News(News),
     ParamChange(ParamChange),
+    TierChange(TierChange),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +232,7 @@ pub enum EventKind {
     CancelError,
     News,
     ParamChange,
+    TierChange,
 }
 
 impl Event {
@@ -210,6 +245,7 @@ impl Event {
             Event::CancelError(c) => &c.hdr,
             Event::News(n) => &n.hdr,
             Event::ParamChange(p) => &p.hdr,
+            Event::TierChange(t) => &t.hdr,
         }
     }
 
@@ -222,6 +258,7 @@ impl Event {
             Event::CancelError(c) => &mut c.hdr,
             Event::News(n) => &mut n.hdr,
             Event::ParamChange(p) => &mut p.hdr,
+            Event::TierChange(t) => &mut t.hdr,
         }
     }
 
@@ -234,6 +271,7 @@ impl Event {
             Event::CancelError(_) => EventKind::CancelError,
             Event::News(_) => EventKind::News,
             Event::ParamChange(_) => EventKind::ParamChange,
+            Event::TierChange(_) => EventKind::TierChange,
         }
     }
 

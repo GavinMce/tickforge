@@ -439,7 +439,8 @@ epics:
       - id: E07-S05
         jira: TIC-59
         title: Promotion and demotion between tiers with hysteresis
-        status: todo
+        status: done
+        evidence: crates/tf-engine/src/promoter.rs (Promoter, follower mode), TierChange event in tf-core (encoding schema v4, tag 8), Host::with_promoter / ctx.tier1 / pinning; 15 integration tests: only runners promoted and none missed, bound never exceeded with refusals counted, hysteresis band, dwell, re-promote wait, confirm, pinning, silent symbols demoted, a follower reproduces membership and features at every step of a 900 s universe; 18 mutations caught (replay gaps found and closed; a real live-vs-replay ordering bug found and fixed); ADR 0024. The momentum strategy still has its own private Tier 1
         deps: [E07-S04]
         ac:
           - Promotion and demotion events logged to the tape; bounded Tier 1 size

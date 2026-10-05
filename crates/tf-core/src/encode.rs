@@ -18,6 +18,8 @@
 //! - **v3**: adds tag 7 (parameter change). Every earlier layout is unchanged, so
 //!   v1 and v2 data decode as they are; a stream older than v3 containing tag 7 is
 //!   corrupt.
+//! - **v4**: adds tag 8 (tier change: a symbol promoted to or demoted from Tier 1).
+//!   Nothing earlier changes; a stream older than v4 containing tag 8 is corrupt.
 //!
 //! Event tags stay below `b'T'`, the first byte of the header, so a headerless
 //! v1 stream is never mistaken for one with a header. [`Decoder`] does the
@@ -27,7 +29,7 @@ use std::fmt;
 
 use crate::event::{
     CancelError, CancelErrorKind, Correction, Event, Header, News, ParamChange, ParamScope, Quote,
-    Status, StatusKind, Trade, TradeFlags,
+    Status, StatusKind, TierAction, TierChange, Trade, TradeFlags,
 };
 use crate::ids::ProviderId;
 use crate::px::Px;
@@ -39,15 +41,16 @@ const TAG_CORRECTION: u8 = 4;
 const TAG_CANCEL_ERROR: u8 = 5;
 const TAG_NEWS: u8 = 6;
 const TAG_PARAM_CHANGE: u8 = 7;
+const TAG_TIER_CHANGE: u8 = 8;
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u16 = 3;
+pub const SCHEMA_VERSION: u16 = 4;
 /// The first four bytes of a stream that has a header.
 pub const STREAM_MAGIC: [u8; 4] = *b"TFEV";
 pub const STREAM_HEADER_LEN: usize = 8;
 
 // A headerless v1 stream opens with an event tag; no tag may look like the magic.
-const _: () = assert!(TAG_PARAM_CHANGE < STREAM_MAGIC[0]);
+const _: () = assert!(TAG_TIER_CHANGE < STREAM_MAGIC[0]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError {
@@ -57,6 +60,7 @@ pub enum DecodeError {
     BadStatusKind(u8),
     BadCancelKind(u8),
     BadParamScope(u8),
+    BadTierAction(u8),
     /// Starts like a stream header but is not one.
     BadMagic,
     /// A header with a version this build cannot read (zero, or newer).
@@ -72,6 +76,7 @@ impl fmt::Display for DecodeError {
             DecodeError::BadStatusKind(k) => write!(f, "unknown status kind {k}"),
             DecodeError::BadCancelKind(k) => write!(f, "unknown cancel/error kind {k}"),
             DecodeError::BadParamScope(k) => write!(f, "unknown parameter scope {k}"),
+            DecodeError::BadTierAction(k) => write!(f, "unknown tier action {k}"),
             DecodeError::BadMagic => write!(f, "bad stream header magic"),
             DecodeError::UnsupportedVersion(v) => write!(f, "unsupported schema version {v}"),
         }
@@ -172,6 +177,13 @@ impl Event {
                 out.extend_from_slice(&p.new_value.to_le_bytes());
                 out.extend_from_slice(&p.evidence.to_le_bytes());
             }
+            Event::TierChange(t) => {
+                out.push(TAG_TIER_CHANGE);
+                put_hdr(out, &t.hdr);
+                out.push(t.action as u8);
+                out.push(t.reason);
+                out.extend_from_slice(&t.score.to_le_bytes());
+            }
         }
     }
 
@@ -189,7 +201,10 @@ impl Event {
         }
         let mut r = Reader { buf, pos: 0 };
         let tag = r.u8()?;
-        if (version < 2 && tag >= TAG_CORRECTION) || (version < 3 && tag >= TAG_PARAM_CHANGE) {
+        if (version < 2 && tag >= TAG_CORRECTION)
+            || (version < 3 && tag >= TAG_PARAM_CHANGE)
+            || (version < 4 && tag >= TAG_TIER_CHANGE)
+        {
             return Err(DecodeError::BadTag(tag));
         }
         let hdr = Header {
@@ -245,6 +260,15 @@ impl Event {
                 hdr,
                 article_id: r.u64()?,
             }),
+            TAG_TIER_CHANGE => {
+                let a = r.u8()?;
+                Event::TierChange(TierChange {
+                    hdr,
+                    action: TierAction::from_u8(a).ok_or(DecodeError::BadTierAction(a))?,
+                    reason: r.u8()?,
+                    score: r.i64()?,
+                })
+            }
             TAG_PARAM_CHANGE => {
                 let param = r.u16()?;
                 let sc = r.u8()?;
@@ -402,6 +426,12 @@ mod tests {
                 new_value: -1_234_567_890_123,
                 evidence: 0xfedc_ba98_7654_3210,
             }),
+            Event::TierChange(TierChange {
+                hdr: hdr(8),
+                action: TierAction::Demote,
+                reason: 3,
+                score: -4_321,
+            }),
         ]
     }
 
@@ -479,8 +509,8 @@ mod tests {
                 b.len()
             })
             .collect();
-        // trade, quote, status, correction, cancel-error, news, param change
-        assert_eq!(sizes, vec![44, 54, 47, 54, 43, 38, 53]);
+        // trade, quote, status, correction, cancel-error, news, param change, tier change
+        assert_eq!(sizes, vec![44, 54, 47, 54, 43, 38, 53, 40]);
     }
 
     #[test]
@@ -526,6 +556,28 @@ mod tests {
     }
 
     #[test]
+    fn a_v3_stream_cannot_contain_the_v4_kind_and_a_tier_change_round_trips() {
+        let v3_header = [b'T', b'F', b'E', b'V', 3, 0, 0, 0];
+        let mut ok = v3_header.to_vec();
+        ok.extend(encode_all(&samples()[..7]));
+        let mut dec = Decoder::new(&ok).unwrap();
+        assert_eq!(dec.version(), 3);
+        let got: Vec<Event> = dec.by_ref().map(Result::unwrap).collect();
+        assert_eq!(got, samples()[..7]);
+
+        let mut bad = v3_header.to_vec();
+        bad.extend(encode_all(&samples()[7..]));
+        let mut dec = Decoder::new(&bad).unwrap();
+        assert_eq!(dec.next(), Some(Err(DecodeError::BadTag(8))));
+
+        // An unknown action byte is an error, not a guess.
+        let mut buf = Vec::new();
+        samples()[7].encode(&mut buf);
+        buf[1 + 29] = 7; // tag, header, then the action byte
+        assert_eq!(Event::decode(&buf), Err(DecodeError::BadTierAction(7)));
+    }
+
+    #[test]
     fn a_param_change_with_an_unknown_scope_is_an_error() {
         let mut buf = Vec::new();
         samples()[6].encode(&mut buf);
@@ -538,7 +590,7 @@ mod tests {
     fn a_stream_with_a_header_carries_its_version() {
         let mut buf = Vec::new();
         write_stream_header(&mut buf);
-        assert_eq!(buf, [b'T', b'F', b'E', b'V', 3, 0, 0, 0]);
+        assert_eq!(buf, [b'T', b'F', b'E', b'V', 4, 0, 0, 0]);
         assert_eq!(buf.len(), STREAM_HEADER_LEN);
         buf.extend(encode_all(&samples()));
 
@@ -557,8 +609,8 @@ mod tests {
             b
         };
         assert_eq!(
-            Decoder::new(&header(4)).unwrap_err(),
-            DecodeError::UnsupportedVersion(4)
+            Decoder::new(&header(5)).unwrap_err(),
+            DecodeError::UnsupportedVersion(5)
         );
         assert_eq!(
             Decoder::new(&header(0)).unwrap_err(),
@@ -574,8 +626,8 @@ mod tests {
             DecodeError::BadMagic
         );
         assert_eq!(
-            Event::decode_versioned(4, &[]).unwrap_err(),
-            DecodeError::UnsupportedVersion(4)
+            Event::decode_versioned(5, &[]).unwrap_err(),
+            DecodeError::UnsupportedVersion(5)
         );
     }
 

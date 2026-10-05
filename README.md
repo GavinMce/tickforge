@@ -29,6 +29,7 @@ the generator is a deliberate, reviewed change.
 | `tf-provider` | `Provider` trait, `Capabilities`, `Subscription`, `ProviderError`, `Poll` contract |
 | `tf-synth` | Deterministic synthetic provider: runner, halt-up, LULD, SSR, squeeze, gap-and-go and multi-spike scenarios, scripted news with a lead or lag, connection/symbol limits, drops, dups, reordering, replay |
 | `tf-secmaster` | Persistent security master: stable `InstrumentId`s, dated tickers and provider keys, dense per-date `Session` lookups |
+| `tf-tape` | Raw tape: zstd-compressed blocks of encoded events with a footer index; seek by `ts_recv` |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |
 | `tf-cli` | `tf` binary |
 

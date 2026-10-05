@@ -86,6 +86,12 @@ pub enum RejectReason {
     OutsideLuldBand,
     SpreadTooWide,
     RunUpTooLarge,
+    /// An open against an existing position the other way (close it first).
+    OpposingPosition,
+    /// A close for more than is held, or with nothing held.
+    NothingToClose,
+    /// An instrument the gateway does not know.
+    UnknownInstrument,
     /// The broker refused it.
     Broker,
 }

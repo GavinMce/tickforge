@@ -28,3 +28,4 @@ How:
 | [0009](0009-run-manifests-and-content-addressed-results.md) | Run manifests and results addressed by the manifest hash | Accepted |
 | [0010](0010-strategies-are-event-driven-and-cannot-touch-the-outside-world.md) | Strategies are event-driven and cannot reach the clock or the outside world | Accepted |
 | [0011](0011-simulated-broker-fills-against-recorded-quotes.md) | The simulated broker fills against recorded quotes, with latency | Accepted |
+| [0012](0012-risk-gateway-decides-and-limits-are-fixed.md) | The risk gateway decides every order, and its limits are fixed | Accepted |

@@ -1,0 +1,18 @@
+[package]
+name = "tf-risk"
+description = "Risk gateway: hard limits between strategies and the broker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+tf-strategy.workspace = true
+
+[dev-dependencies]
+tf-synth.workspace = true

@@ -131,6 +131,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-risk"
+version = "0.1.0"
+dependencies = [
+ "tf-core",
+ "tf-strategy",
+ "tf-synth",
+]
+
+[[package]]
 name = "tf-secmaster"
 version = "0.1.0"
 dependencies = [

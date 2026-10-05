@@ -404,7 +404,8 @@ epics:
       - id: E07-S01
         jira: TIC-55
         title: Tier 0 state arrays indexed by InstrumentId
-        status: todo
+        status: done
+        evidence: crates/tf-engine/src/tier0.rs; crates/tf-engine/tests/tier0.rs checks state against per-symbol recomputation; array capacity and base pointer unchanged across 50k events
         deps: [E01-S02]
         ac:
           - Last, bid/ask, day high/low, VWAP and cumulative volume per symbol

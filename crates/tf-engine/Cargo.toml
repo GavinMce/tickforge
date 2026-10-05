@@ -1,0 +1,17 @@
+[package]
+name = "tf-engine"
+description = "Hot-engine building blocks: allocation-free rolling windows, bars and EWMA baselines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+
+[dev-dependencies]
+tf-synth.workspace = true

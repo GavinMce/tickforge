@@ -16,6 +16,7 @@ tf-synth = { path = "crates/tf-synth" }
 tf-replay = { path = "crates/tf-replay" }
 tf-secmaster = { path = "crates/tf-secmaster" }
 tf-tape = { path = "crates/tf-tape" }
+tf-engine = { path = "crates/tf-engine" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

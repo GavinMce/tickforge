@@ -18,6 +18,7 @@ tf-secmaster = { path = "crates/tf-secmaster" }
 tf-tape = { path = "crates/tf-tape" }
 tf-engine = { path = "crates/tf-engine" }
 tf-bench = { path = "crates/tf-bench" }
+tf-manifest = { path = "crates/tf-manifest" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

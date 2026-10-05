@@ -2,6 +2,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use tf_core::{Event, NANOS_PER_SEC, SimClock};
+use tf_manifest::{DataRange, DirStore, Manifest, Put, RunResult};
 use tf_provider::{Channels, Subscription};
 use tf_replay::{HashSink, RunConfig, StatsSink, Tee, run};
 use tf_synth::{Account, SynthConfig, SynthOptions, SynthProvider, SynthStream};
@@ -21,6 +22,8 @@ USAGE:
     --secs N          simulated session length (default 600)
     --runners N       permille of symbols with a runner scenario (default 20)
     --dump N          also print the first N events
+    --store DIR       keep the result in DIR keyed by a manifest hash (seed, git sha,
+                      config, data range); a rerun of the same manifest is skipped
 
     tf bench [--symbols N] [--secs N] [--seed N] [--runs N] [--out FILE]
              [--compare FILE] [--commit SHA] [--flag-drop PCT] [--flag-rise PCT]
@@ -46,6 +49,7 @@ struct SynthArgs {
     secs: u64,
     runners: u32,
     dump: usize,
+    store: Option<String>,
 }
 
 fn parse_synth(args: &[String]) -> Result<SynthArgs, String> {
@@ -55,6 +59,7 @@ fn parse_synth(args: &[String]) -> Result<SynthArgs, String> {
         secs: 600,
         runners: 20,
         dump: 0,
+        store: None,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -70,16 +75,68 @@ fn parse_synth(args: &[String]) -> Result<SynthArgs, String> {
             "--secs" => a.secs = val("--secs")?,
             "--runners" => a.runners = val("--runners")? as u32,
             "--dump" => a.dump = val("--dump")? as usize,
+            "--store" => {
+                a.store = Some(it.next().cloned().ok_or("--store needs a value")?);
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
     Ok(a)
 }
 
+/// The commit being run, with `-dirty` if the working tree has changes, since
+/// results from uncommitted code should not share a key with the commit.
+fn git_sha() -> String {
+    let Some(head) = git_head() else {
+        return "unknown".to_owned();
+    };
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|o| !o.status.success() || !o.stdout.is_empty())
+        .unwrap_or(true);
+    if dirty { format!("{head}-dirty") } else { head }
+}
+
+fn synth_manifest(a: &SynthArgs, cfg: &SynthConfig) -> Result<Manifest, String> {
+    let data = DataRange {
+        source: "synth:universe".to_owned(),
+        from: cfg.session_start,
+        to: cfg.session_start + cfg.duration,
+    };
+    Manifest::new(&git_sha(), "synth", a.seed, data)
+        .and_then(|m| m.with_config("symbols", &a.symbols.to_string()))
+        .and_then(|m| m.with_config("secs", &a.secs.to_string()))
+        .and_then(|m| m.with_config("runners_permille", &a.runners.to_string()))
+        .map_err(|e| e.to_string())
+}
+
 fn synth(args: &[String]) -> Result<(), String> {
     let a = parse_synth(args)?;
     let cfg = SynthConfig::universe(a.seed, a.symbols, a.secs * NANOS_PER_SEC, a.runners);
     let table = cfg.symbol_table();
+
+    let stored = match &a.store {
+        Some(dir) => {
+            let manifest = synth_manifest(&a, &cfg)?;
+            let store = DirStore::new(dir);
+            if let Some(r) = store.get(&manifest).map_err(|e| e.to_string())? {
+                println!("cached   {}  (not rerun)", manifest.hash());
+                println!(
+                    "seed {} | {} symbols | {} s simulated",
+                    a.seed, a.symbols, a.secs
+                );
+                println!("events   {:>12}", r.events);
+                for (k, v) in r.metrics() {
+                    println!("{k:<8} {v:>12}");
+                }
+                println!("hash     {:>#18x}", r.event_hash);
+                return Ok(());
+            }
+            Some((store, manifest))
+        }
+        None => None,
+    };
 
     if a.dump > 0 {
         for ev in SynthStream::new(&cfg).take(a.dump) {
@@ -153,6 +210,22 @@ fn synth(args: &[String]) -> Result<(), String> {
     println!("busiest:");
     for (id, n) in busiest.iter().take(5) {
         println!("  {:<10} {n}", table.name(*id as u32).unwrap_or("?"));
+    }
+
+    if let Some((store, manifest)) = stored {
+        let key = manifest.hash();
+        let result = RunResult::new(manifest, report.events, hash.finish())
+            .with_metric("trades", stats.trades as i64)
+            .and_then(|r| r.with_metric("quotes", stats.quotes as i64))
+            .and_then(|r| r.with_metric("status", stats.status as i64))
+            .and_then(|r| r.with_metric("shares", stats.shares as i64))
+            .and_then(|r| r.with_metric("max_px_raw", stats.max_trade_px.map_or(0, |p| p.raw())))
+            .map_err(|e| e.to_string())?;
+        let what = match store.put(&result).map_err(|e| e.to_string())? {
+            Put::Written => "stored",
+            Put::Deduped => "already stored (identical)",
+        };
+        println!("{what} {key}");
     }
     Ok(())
 }

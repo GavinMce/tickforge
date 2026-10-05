@@ -20,3 +20,4 @@ tf-provider.workspace = true
 tf-synth.workspace = true
 tf-replay.workspace = true
 tf-bench.workspace = true
+tf-manifest.workspace = true

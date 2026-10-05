@@ -89,6 +89,7 @@ version = "0.1.0"
 dependencies = [
  "tf-bench",
  "tf-core",
+ "tf-manifest",
  "tf-provider",
  "tf-replay",
  "tf-synth",
@@ -104,6 +105,13 @@ version = "0.1.0"
 dependencies = [
  "tf-core",
  "tf-synth",
+]
+
+[[package]]
+name = "tf-manifest"
+version = "0.1.0"
+dependencies = [
+ "tf-core",
 ]
 
 [[package]]

@@ -29,6 +29,7 @@ use tf_core::{Event, InstrumentId, Nanos};
 use tf_engine::{
     BarClose, MtfBars, RollingBars, SymbolBars, SymbolState, TfBar, Tier0, Timeframe, TrackError,
 };
+use tf_params::ParamStore;
 
 use crate::intent::{
     Intent, IntentError, IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif,
@@ -96,6 +97,7 @@ pub struct Ctx<'a> {
     invalid: &'a mut u64,
     timers: &'a mut Timers,
     bars: &'a mut Option<MtfBars>,
+    params: &'a Option<ParamStore>,
 }
 
 /// Why a request about multi-timeframe bars failed.
@@ -120,6 +122,14 @@ impl Ctx<'_> {
     /// Rolling windows and one-second bars for an instrument.
     pub fn windows(&self, id: InstrumentId) -> Option<&RollingBars> {
         self.tier0.windows(id)
+    }
+
+    /// The parameter store, if the host has one ([`Host::with_params`]). Changes arrive as
+    /// events and take effect before the strategy sees the event that carried them; a
+    /// strategy should freeze what governs a position at entry (see
+    /// [`ParamStore::revision`]) so a change applies to new entries only.
+    pub fn params(&self) -> Option<&ParamStore> {
+        self.params.as_ref()
     }
 
     /// Bars on 1m, 5m, 15m, 1h and day timeframes for a tracked instrument. `None`
@@ -238,6 +248,8 @@ pub struct Host<S: Strategy> {
     now: Nanos,
     bars: Option<MtfBars>,
     closes: Vec<BarClose>,
+    params: Option<ParamStore>,
+    param_errors: u64,
 }
 
 impl<S: Strategy> Host<S> {
@@ -254,7 +266,27 @@ impl<S: Strategy> Host<S> {
             now: 0,
             bars: None,
             closes: Vec::new(),
+            params: None,
+            param_errors: 0,
         }
+    }
+
+    /// Give the strategy a parameter store. [`Event::ParamChange`] events in the stream are
+    /// applied to it, so a replay of a tape reproduces the session's parameters.
+    pub fn with_params(mut self, params: ParamStore) -> Self {
+        self.params = Some(params);
+        self
+    }
+
+    /// The parameter store, to check proposals against (see [`ParamStore::check`]).
+    pub fn params(&self) -> Option<&ParamStore> {
+        self.params.as_ref()
+    }
+
+    /// Parameter-change events the store refused when applying them. Zero in a faithful
+    /// replay; non-zero means the tape and the store's declarations disagree.
+    pub fn param_errors(&self) -> u64 {
+        self.param_errors
     }
 
     /// Give the strategy multi-timeframe bars (see [`Ctx::track_bars`]).
@@ -273,6 +305,7 @@ impl<S: Strategy> Host<S> {
             invalid: &mut self.invalid,
             timers: &mut self.timers,
             bars: &mut self.bars,
+            params: &self.params,
         };
         f(&mut self.strategy, &mut ctx)
     }
@@ -303,6 +336,11 @@ impl<S: Strategy> Host<S> {
         self.tier0.on_event(ev);
         self.now = self.now.max(ts);
         let now = self.now;
+        if let (Some(store), Event::ParamChange(c)) = (&mut self.params, ev) {
+            if store.apply(c).is_err() {
+                self.param_errors += 1;
+            }
+        }
         if let Some(b) = &mut self.bars {
             b.on_event(ev, &mut self.closes);
         }

@@ -1,0 +1,33 @@
+# Parameter-store code (like strategy code) gets time only from the event stream (ADR 0003) and can do no I/O.
+# CI runs clippy with -D warnings, so using any of these fails the build. A new
+# strategy crate copies this file. Do not add exceptions here: if a strategy seems
+# to need one of these, the need belongs in the host, not in the strategy.
+
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "strategies take time from the event stream (Ctx::now), never the wall clock" },
+    { path = "std::time::Instant::now", reason = "strategies take time from the event stream (Ctx::now), never the wall clock" },
+    { path = "std::thread::sleep", reason = "strategies do not wait; set a timer" },
+    { path = "std::thread::spawn", reason = "strategies are single-threaded state machines" },
+    { path = "std::fs::read", reason = "strategies do no I/O" },
+    { path = "std::fs::read_to_string", reason = "strategies do no I/O" },
+    { path = "std::fs::write", reason = "strategies do no I/O" },
+    { path = "std::fs::read_dir", reason = "strategies do no I/O" },
+    { path = "std::fs::remove_file", reason = "strategies do no I/O" },
+    { path = "std::fs::create_dir_all", reason = "strategies do no I/O" },
+    { path = "std::env::var", reason = "strategies take configuration as typed parameters, not from the environment" },
+    { path = "std::env::args", reason = "strategies take configuration as typed parameters, not from the command line" },
+    { path = "std::io::stdin", reason = "strategies do no I/O" },
+]
+
+disallowed-types = [
+    { path = "std::time::SystemTime", reason = "strategies take time from the event stream (Ctx::now)" },
+    { path = "std::time::Instant", reason = "strategies take time from the event stream (Ctx::now)" },
+    { path = "tf_core::clock::SystemClock", reason = "strategies take time from the event stream (Ctx::now)" },
+    { path = "std::fs::File", reason = "strategies do no I/O" },
+    { path = "std::net::TcpStream", reason = "strategies do no I/O" },
+    { path = "std::net::TcpListener", reason = "strategies do no I/O" },
+    { path = "std::net::UdpSocket", reason = "strategies do no I/O" },
+    { path = "std::process::Command", reason = "strategies do no I/O" },
+    { path = "std::collections::HashMap", reason = "iteration order is not deterministic (ADR 0003); index by InstrumentId or use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order is not deterministic (ADR 0003); use a Vec or BTreeSet" },
+]

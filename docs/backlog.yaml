@@ -710,7 +710,8 @@ epics:
       - id: E12-S01
         jira: TIC-86
         title: ParamStore with typed bounds and param-change events
-        status: todo
+        status: done
+        evidence: crates/tf-params (ParamStore, ParamSpec, check/apply, revision and value_at); ParamChange event in tf-core (encoding schema v3, tag 7); Host::with_params applies change events; MomentumLong tunable_specs (17 bounded parameters) with entry-time freezing of trail, collar and maximum hold; 11 store tests incl. a 30-seed replay-equals-live property, 9 integration tests; 16 + 10 mutations caught (three gaps found and closed); ADR 0020
         deps: [E08-S03]
         ac:
           - Each parameter has min, max, max_step, cooldown and scope; out-of-bounds proposals rejected

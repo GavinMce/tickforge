@@ -21,6 +21,7 @@ tf-bench = { path = "crates/tf-bench" }
 tf-manifest = { path = "crates/tf-manifest" }
 tf-strategy = { path = "crates/tf-strategy" }
 tf-risk = { path = "crates/tf-risk" }
+tf-params = { path = "crates/tf-params" }
 tf-backtest = { path = "crates/tf-backtest" }
 
 [workspace.lints.rust]

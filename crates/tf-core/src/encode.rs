@@ -15,6 +15,9 @@
 //! - **v1**: bare events, no header; tags 1-3 (trade, quote, status).
 //! - **v2**: adds tags 4-6 (correction, cancel-error, news) and the header. The
 //!   layout of every v1 event is unchanged, so v1 data decodes as it is.
+//! - **v3**: adds tag 7 (parameter change). Every earlier layout is unchanged, so
+//!   v1 and v2 data decode as they are; a stream older than v3 containing tag 7 is
+//!   corrupt.
 //!
 //! Event tags stay below `b'T'`, the first byte of the header, so a headerless
 //! v1 stream is never mistaken for one with a header. [`Decoder`] does the
@@ -23,8 +26,8 @@
 use std::fmt;
 
 use crate::event::{
-    CancelError, CancelErrorKind, Correction, Event, Header, News, Quote, Status, StatusKind,
-    Trade, TradeFlags,
+    CancelError, CancelErrorKind, Correction, Event, Header, News, ParamChange, ParamScope, Quote,
+    Status, StatusKind, Trade, TradeFlags,
 };
 use crate::ids::ProviderId;
 use crate::px::Px;
@@ -35,15 +38,16 @@ const TAG_STATUS: u8 = 3;
 const TAG_CORRECTION: u8 = 4;
 const TAG_CANCEL_ERROR: u8 = 5;
 const TAG_NEWS: u8 = 6;
+const TAG_PARAM_CHANGE: u8 = 7;
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u16 = 2;
+pub const SCHEMA_VERSION: u16 = 3;
 /// The first four bytes of a stream that has a header.
 pub const STREAM_MAGIC: [u8; 4] = *b"TFEV";
 pub const STREAM_HEADER_LEN: usize = 8;
 
 // A headerless v1 stream opens with an event tag; no tag may look like the magic.
-const _: () = assert!(TAG_NEWS < STREAM_MAGIC[0]);
+const _: () = assert!(TAG_PARAM_CHANGE < STREAM_MAGIC[0]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError {
@@ -52,6 +56,7 @@ pub enum DecodeError {
     BadProvider(u8),
     BadStatusKind(u8),
     BadCancelKind(u8),
+    BadParamScope(u8),
     /// Starts like a stream header but is not one.
     BadMagic,
     /// A header with a version this build cannot read (zero, or newer).
@@ -66,6 +71,7 @@ impl fmt::Display for DecodeError {
             DecodeError::BadProvider(p) => write!(f, "unknown provider id {p}"),
             DecodeError::BadStatusKind(k) => write!(f, "unknown status kind {k}"),
             DecodeError::BadCancelKind(k) => write!(f, "unknown cancel/error kind {k}"),
+            DecodeError::BadParamScope(k) => write!(f, "unknown parameter scope {k}"),
             DecodeError::BadMagic => write!(f, "bad stream header magic"),
             DecodeError::UnsupportedVersion(v) => write!(f, "unsupported schema version {v}"),
         }
@@ -156,6 +162,16 @@ impl Event {
                 put_hdr(out, &n.hdr);
                 out.extend_from_slice(&n.article_id.to_le_bytes());
             }
+            Event::ParamChange(p) => {
+                out.push(TAG_PARAM_CHANGE);
+                put_hdr(out, &p.hdr);
+                out.extend_from_slice(&p.param.to_le_bytes());
+                out.push(p.scope as u8);
+                out.extend_from_slice(&p.proposer.to_le_bytes());
+                out.extend_from_slice(&p.reason.to_le_bytes());
+                out.extend_from_slice(&p.new_value.to_le_bytes());
+                out.extend_from_slice(&p.evidence.to_le_bytes());
+            }
         }
     }
 
@@ -173,7 +189,7 @@ impl Event {
         }
         let mut r = Reader { buf, pos: 0 };
         let tag = r.u8()?;
-        if version < 2 && tag >= TAG_CORRECTION {
+        if (version < 2 && tag >= TAG_CORRECTION) || (version < 3 && tag >= TAG_PARAM_CHANGE) {
             return Err(DecodeError::BadTag(tag));
         }
         let hdr = Header {
@@ -229,6 +245,19 @@ impl Event {
                 hdr,
                 article_id: r.u64()?,
             }),
+            TAG_PARAM_CHANGE => {
+                let param = r.u16()?;
+                let sc = r.u8()?;
+                Event::ParamChange(ParamChange {
+                    hdr,
+                    param,
+                    scope: ParamScope::from_u8(sc).ok_or(DecodeError::BadParamScope(sc))?,
+                    proposer: r.u16()?,
+                    reason: r.u16()?,
+                    new_value: r.i64()?,
+                    evidence: r.u64()?,
+                })
+            }
             other => return Err(DecodeError::BadTag(other)),
         };
         Ok((ev, r.pos))
@@ -364,6 +393,15 @@ mod tests {
                 hdr: hdr(6),
                 article_id: 0x0123_4567_89ab_cdef,
             }),
+            Event::ParamChange(ParamChange {
+                hdr: hdr(7),
+                param: 513,
+                scope: ParamScope::Instrument,
+                proposer: 9,
+                reason: 77,
+                new_value: -1_234_567_890_123,
+                evidence: 0xfedc_ba98_7654_3210,
+            }),
         ]
     }
 
@@ -441,8 +479,8 @@ mod tests {
                 b.len()
             })
             .collect();
-        // trade, quote, status, correction, cancel-error, news
-        assert_eq!(sizes, vec![44, 54, 47, 54, 43, 38]);
+        // trade, quote, status, correction, cancel-error, news, param change
+        assert_eq!(sizes, vec![44, 54, 47, 54, 43, 38, 53]);
     }
 
     #[test]
@@ -471,10 +509,36 @@ mod tests {
     }
 
     #[test]
+    fn a_v2_stream_still_decodes_and_cannot_contain_the_v3_kind() {
+        let v2_header = [b'T', b'F', b'E', b'V', 2, 0, 0, 0];
+        let mut ok = v2_header.to_vec();
+        ok.extend(encode_all(&samples()[..6]));
+        let mut dec = Decoder::new(&ok).unwrap();
+        assert_eq!(dec.version(), 2);
+        let got: Vec<Event> = dec.by_ref().map(Result::unwrap).collect();
+        assert_eq!(got, samples()[..6]);
+
+        let mut bad = v2_header.to_vec();
+        bad.extend(encode_all(&samples()[6..]));
+        let mut dec = Decoder::new(&bad).unwrap();
+        assert_eq!(dec.next(), Some(Err(DecodeError::BadTag(7))));
+        assert_eq!(dec.next(), None);
+    }
+
+    #[test]
+    fn a_param_change_with_an_unknown_scope_is_an_error() {
+        let mut buf = Vec::new();
+        samples()[6].encode(&mut buf);
+        // tag, then the 29-byte header, then param (2 bytes), then the scope byte.
+        buf[1 + 29 + 2] = 9;
+        assert_eq!(Event::decode(&buf), Err(DecodeError::BadParamScope(9)));
+    }
+
+    #[test]
     fn a_stream_with_a_header_carries_its_version() {
         let mut buf = Vec::new();
         write_stream_header(&mut buf);
-        assert_eq!(buf, [b'T', b'F', b'E', b'V', 2, 0, 0, 0]);
+        assert_eq!(buf, [b'T', b'F', b'E', b'V', 3, 0, 0, 0]);
         assert_eq!(buf.len(), STREAM_HEADER_LEN);
         buf.extend(encode_all(&samples()));
 
@@ -493,8 +557,8 @@ mod tests {
             b
         };
         assert_eq!(
-            Decoder::new(&header(3)).unwrap_err(),
-            DecodeError::UnsupportedVersion(3)
+            Decoder::new(&header(4)).unwrap_err(),
+            DecodeError::UnsupportedVersion(4)
         );
         assert_eq!(
             Decoder::new(&header(0)).unwrap_err(),
@@ -510,8 +574,8 @@ mod tests {
             DecodeError::BadMagic
         );
         assert_eq!(
-            Event::decode_versioned(3, &[]).unwrap_err(),
-            DecodeError::UnsupportedVersion(3)
+            Event::decode_versioned(4, &[]).unwrap_err(),
+            DecodeError::UnsupportedVersion(4)
         );
     }
 

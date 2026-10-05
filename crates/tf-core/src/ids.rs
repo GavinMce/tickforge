@@ -12,6 +12,8 @@ pub enum ProviderId {
     Synthetic = 0,
     Databento = 1,
     Alpaca = 2,
+    /// Generated inside the system (for example parameter changes), not by a vendor.
+    Internal = 3,
 }
 
 impl ProviderId {
@@ -24,6 +26,7 @@ impl ProviderId {
             0 => Some(ProviderId::Synthetic),
             1 => Some(ProviderId::Databento),
             2 => Some(ProviderId::Alpaca),
+            3 => Some(ProviderId::Internal),
             _ => None,
         }
     }
@@ -33,6 +36,7 @@ impl ProviderId {
             ProviderId::Synthetic => "synthetic",
             ProviderId::Databento => "databento",
             ProviderId::Alpaca => "alpaca",
+            ProviderId::Internal => "internal",
         }
     }
 }
@@ -100,6 +104,7 @@ mod tests {
             ProviderId::Synthetic,
             ProviderId::Databento,
             ProviderId::Alpaca,
+            ProviderId::Internal,
         ] {
             assert_eq!(ProviderId::from_u8(p.as_u8()), Some(p));
         }

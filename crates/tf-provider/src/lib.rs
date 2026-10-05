@@ -36,6 +36,8 @@ impl Channels {
             EventKind::Quote => self.contains(Channels::QUOTES),
             EventKind::Status => self.contains(Channels::STATUS),
             EventKind::News => self.contains(Channels::NEWS),
+            // Generated inside the system, not by a vendor: never filtered out.
+            EventKind::ParamChange => true,
         }
     }
 }

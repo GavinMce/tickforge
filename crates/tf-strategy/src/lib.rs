@@ -27,15 +27,18 @@ pub use intent::{
 pub use lifecycle::{
     Decision, LifecycleError, Order, OrderId, OrderState, OrderUpdate, RejectReason,
 };
-pub use momentum::{MomentumLong, MomentumParams, MomentumStats};
+pub use momentum::{MomentumLong, MomentumParams, MomentumStats, tunable_specs};
 pub use report::{Report, ReportBuilder, Stats};
 pub use sim::{Fill, SimBroker, SimConfig, run_backtest, run_backtest_observed};
 pub use strategy::{BarsError, Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};
 pub use tf_engine::{MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe};
+pub use tf_params::{ParamStore, Proposal, Target};
 pub use trend::{TrendLong, TrendParams, TrendStats};
 
 #[cfg(test)]
 mod momentum_tests;
+#[cfg(test)]
+mod params_tests;
 #[cfg(test)]
 mod report_tests;
 #[cfg(test)]

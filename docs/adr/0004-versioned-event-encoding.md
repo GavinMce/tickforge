@@ -20,7 +20,9 @@ earlier trade, and news with text; neither fits an event as is.
   tags stay below `b'T'` (checked at compile time) so the two cannot be
   confused. The per-event layout of existing kinds never changes, so older data
   decodes as is; changing it would move every golden hash.
-- **Old readers/new data.** A v1 stream containing a v2-only tag is corrupt, a
+- **Schema v3 (ADR 0020)** adds tag 7, a parameter change. Nothing earlier changes;
+  a v1 or v2 stream containing tag 7 is corrupt.
+- **Old readers/new data.** A stream containing a tag newer than its version is corrupt, a
   header with version 0 or newer than the build is an error, never a guess.
 - **No trade id.** The canonical `Trade` has none, so a `Correction` or
   `CancelError` identifies its original by (instrument, original `ts_event`,

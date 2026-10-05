@@ -29,6 +29,7 @@
 
 use tf_core::{Event, InstrumentId, NANOS_PER_SEC, Nanos, Px};
 use tf_engine::{PromoteError, Quote1, Tier1};
+use tf_params::{ParamId, ParamSpec, Scope};
 
 use crate::intent::{IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif};
 use crate::lifecycle::OrderUpdate;
@@ -39,6 +40,83 @@ pub mod reason {
     pub const ENTRY_HEALTHY_PULLBACK: u16 = 1;
     pub const EXIT_TRAILING_STOP: u16 = 2;
     pub const EXIT_MAX_HOLD: u16 = 3;
+}
+
+/// One parameter an agent may tune through a [`tf_params::ParamStore`]: how to read and
+/// write it, and the bounds it may move within. The bounds of related parameters do not
+/// overlap (a minimum depth never exceeds the lowest maximum depth), so no combination of
+/// allowed values is an invalid parameter set.
+pub(crate) struct Tunable {
+    pub(crate) name: &'static str,
+    pub(crate) get: fn(&MomentumParams) -> i64,
+    pub(crate) set: fn(&mut MomentumParams, i64),
+    pub(crate) min: i64,
+    pub(crate) max: i64,
+    pub(crate) max_step: i64,
+    pub(crate) cooldown_secs: u64,
+}
+
+macro_rules! tunable {
+    ($field:ident, $min:expr, $max:expr, $step:expr, $cooldown:expr) => {
+        Tunable {
+            name: stringify!($field),
+            get: |p| p.$field as i64,
+            set: |p, v| p.$field = v.max(0) as _,
+            min: $min,
+            max: $max,
+            max_step: $step,
+            cooldown_secs: $cooldown,
+        }
+    };
+}
+
+const BILLION: i64 = 1_000_000_000;
+
+/// What an agent may tune, and within what. Everything else (the price filter, caps
+/// on positions and watched names, the cooldown) is fixed for the run, and the risk
+/// limits are not here at all.
+pub(crate) const TUNABLES: [Tunable; 17] = [
+    tunable!(spike_permille, 10, 100, 10, 60),
+    tunable!(spike_min_volume, 500, 20_000, 1_000, 60),
+    tunable!(min_impulse_permille, 100, 1_000, 100, 60),
+    tunable!(min_pullback_secs, 5, 30, 5, 60),
+    tunable!(max_pullback_secs, 30, 120, 15, 60),
+    tunable!(min_depth_permille, 0, 200, 30, 60),
+    tunable!(max_depth_permille, 200, 500, 50, 60),
+    tunable!(max_volume_ratio_permille, 100, 500, 50, 60),
+    tunable!(max_retrace_now_permille, 100, 500, 50, 60),
+    tunable!(min_higher_lows, 0, 3, 1, 60),
+    tunable!(min_bid_support_permille, 0, 500, 50, 60),
+    tunable!(
+        entry_notional,
+        100 * BILLION,
+        2_000 * BILLION,
+        250 * BILLION,
+        300
+    ),
+    tunable!(max_qty, 100, 2_000, 250, 300),
+    tunable!(collar_permille, 5, 50, 5, 60),
+    tunable!(stop_buffer_permille, 5, 100, 15, 60),
+    tunable!(trail_permille, 10, 100, 10, 60),
+    tunable!(max_hold_secs, 30, 600, 60, 60),
+];
+
+/// The declarations of the parameters an agent may tune, with `base`'s values as their
+/// baselines. Build a [`tf_params::ParamStore`] from them and give it to the host.
+/// Fails (when the store is built) if a base value lies outside its bounds.
+pub fn tunable_specs(base: &MomentumParams) -> Vec<ParamSpec> {
+    TUNABLES
+        .iter()
+        .map(|t| ParamSpec {
+            name: t.name,
+            baseline: (t.get)(base),
+            min: t.min,
+            max: t.max,
+            max_step: t.max_step as u64,
+            cooldown: t.cooldown_secs * NANOS_PER_SEC,
+            scope: Scope::PerInstrument,
+        })
+        .collect()
 }
 
 /// Every tunable of the strategy.
@@ -243,17 +321,29 @@ enum Phase {
     },
     Entering {
         intent: IntentId,
+        riding: Riding,
     },
     Holding {
         qty: u32,
         high: i64,
+        riding: Riding,
     },
     Exiting {
         intent: IntentId,
         qty: u32,
         high: i64,
+        riding: Riding,
     },
     Cooldown,
+}
+
+/// The parameters that govern a position after it is entered, frozen when the entry
+/// is decided: a later parameter change applies to new entries only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Riding {
+    trail_permille: u32,
+    max_hold_secs: u32,
+    collar_permille: u32,
 }
 
 /// Counters for what the strategy decided and why not.
@@ -275,6 +365,13 @@ pub struct MomentumLong {
     phase: Vec<Phase>,
     positions: u32,
     stats: MomentumStats,
+    /// The store's ids for [`TUNABLES`], found the first time a store is seen.
+    bound: Option<Vec<Option<ParamId>>>,
+    /// Per instrument: the effective parameters and the store revision (plus one) they
+    /// were built at, so they are rebuilt only when something changed.
+    effective: Vec<(u64, MomentumParams)>,
+    /// Effective parameter sets that failed validation and were replaced by the base.
+    conflicts: u64,
 }
 
 impl MomentumLong {
@@ -291,7 +388,43 @@ impl MomentumLong {
             phase: vec![Phase::Idle; id_space],
             positions: 0,
             stats: MomentumStats::default(),
+            bound: None,
+            effective: vec![(0, params); id_space],
+            conflicts: 0,
         })
+    }
+
+    /// Times a store's overrides, combined, made an invalid parameter set and the base
+    /// parameters were used instead. Should stay zero with [`tunable_specs`] bounds.
+    pub fn parameter_conflicts(&self) -> u64 {
+        self.conflicts
+    }
+
+    /// The parameters in force for `i` now: the base, with the store's values for the
+    /// tunable ones. Rebuilt only when the store's revision changes.
+    fn effective(&mut self, ctx: &Ctx<'_>, i: InstrumentId) -> MomentumParams {
+        let Some(store) = ctx.params() else {
+            return self.p;
+        };
+        let rev = store.revision() + 1;
+        if self.effective[i as usize].0 == rev {
+            return self.effective[i as usize].1;
+        }
+        let ids = self
+            .bound
+            .get_or_insert_with(|| TUNABLES.iter().map(|t| store.id_of(t.name)).collect());
+        let mut p = self.p;
+        for (t, id) in TUNABLES.iter().zip(ids.iter()) {
+            if let Some(id) = id {
+                (t.set)(&mut p, store.value_for(*id, i));
+            }
+        }
+        if p.validate().is_err() {
+            self.conflicts += 1;
+            p = self.p;
+        }
+        self.effective[i as usize] = (rev, p);
+        p
     }
 
     pub fn stats(&self) -> MomentumStats {
@@ -322,26 +455,24 @@ impl MomentumLong {
     }
 
     fn scan(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, now_sec: u64) {
+        let p = self.effective(ctx, i);
         let Some(w) = ctx.windows(i) else { return };
-        let Some(change) = w.price_change_permille(self.p.spike_secs as usize) else {
+        let Some(change) = w.price_change_permille(p.spike_secs as usize) else {
             return;
         };
-        if change < self.p.spike_permille
-            || w.volume(self.p.spike_secs as usize) < self.p.spike_min_volume
-        {
+        if change < p.spike_permille || w.volume(p.spike_secs as usize) < p.spike_min_volume {
             return;
         }
         let Some(st) = ctx.state(i) else { return };
         let (Some(last), Some((ask, _))) = (st.last_px, st.ask) else {
             return;
         };
-        if last < self.p.min_price || last > self.p.max_price {
+        if last < p.min_price || last > p.max_price {
             return;
         }
         let spread = st.spread().unwrap_or(i64::MAX);
         if ask.raw() <= 0
-            || i128::from(spread) * 1000
-                > i128::from(ask.raw()) * i128::from(self.p.max_spread_permille)
+            || i128::from(spread) * 1000 > i128::from(ask.raw()) * i128::from(p.max_spread_permille)
         {
             return;
         }
@@ -356,6 +487,7 @@ impl MomentumLong {
     }
 
     fn watch(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, now_sec: u64) {
+        let p = self.effective(ctx, i);
         let Phase::Watching { last_eval } = self.phase[i as usize] else {
             return;
         };
@@ -369,35 +501,33 @@ impl MomentumLong {
         let Some(f) = sym.features() else { return };
         let low = f.impulse_low.raw();
         let impulse = i128::from(f.impulse_high.raw() - low) * 1000 / i128::from(low.max(1));
-        if impulse < i128::from(self.p.min_impulse_permille)
-            || f.secs_since_high < self.p.min_pullback_secs
-        {
-            if f.secs_since_high > self.p.max_pullback_secs {
+        if impulse < i128::from(p.min_impulse_permille) || f.secs_since_high < p.min_pullback_secs {
+            if f.secs_since_high > p.max_pullback_secs {
                 self.stats.rejected_too_old += 1;
                 self.stop_watching(ctx, i);
             }
             return;
         }
-        if f.secs_since_high > self.p.max_pullback_secs {
+        if f.secs_since_high > p.max_pullback_secs {
             self.stats.rejected_too_old += 1;
             self.stop_watching(ctx, i);
             return;
         }
-        let dangerous = f.depth_permille > self.p.max_depth_permille
+        let dangerous = f.depth_permille > p.max_depth_permille
             || f.volume_ratio_permille
-                .is_some_and(|r| r > self.p.max_volume_ratio_permille);
+                .is_some_and(|r| r > p.max_volume_ratio_permille);
         if dangerous {
             self.stats.rejected_dangerous += 1;
             self.stop_watching(ctx, i);
             return;
         }
-        let healthy = f.depth_permille >= self.p.min_depth_permille
-            && f.retrace_now_permille <= self.p.max_retrace_now_permille
+        let healthy = f.depth_permille >= p.min_depth_permille
+            && f.retrace_now_permille <= p.max_retrace_now_permille
             && f.volume_ratio_permille.is_some()
-            && f.higher_lows >= self.p.min_higher_lows
+            && f.higher_lows >= p.min_higher_lows
             && f.bid_support_permille
-                .is_some_and(|b| b >= self.p.min_bid_support_permille);
-        if !healthy || self.positions >= self.p.max_positions {
+                .is_some_and(|b| b >= p.min_bid_support_permille);
+        if !healthy || self.positions >= p.max_positions {
             return;
         }
         let Some(Quote1 { ask, .. }) = sym.quote_ago(0) else {
@@ -406,12 +536,12 @@ impl MomentumLong {
         if ask.raw() <= 0 {
             return;
         }
-        let qty = u32::try_from(self.p.entry_notional / ask.raw() as u128)
+        let qty = u32::try_from(p.entry_notional / ask.raw() as u128)
             .unwrap_or(u32::MAX)
-            .min(self.p.max_qty);
+            .min(p.max_qty);
         let stop = Px::from_raw(
-            (i128::from(f.pullback_low.raw()) * i128::from(1000 - self.p.stop_buffer_permille)
-                / 1000) as i64,
+            (i128::from(f.pullback_low.raw()) * i128::from(1000 - p.stop_buffer_permille) / 1000)
+                as i64,
         );
         if qty == 0 {
             return;
@@ -422,7 +552,7 @@ impl MomentumLong {
             purpose: Purpose::Open,
             pricing: Pricing::Collar {
                 reference: ask,
-                collar_permille: self.p.collar_permille,
+                collar_permille: p.collar_permille,
             },
             protect: Some(Protective {
                 stop_trigger: stop,
@@ -436,26 +566,33 @@ impl MomentumLong {
             Ok(intent) => {
                 self.stats.entries += 1;
                 self.positions += 1;
-                self.phase[i as usize] = Phase::Entering { intent };
+                self.phase[i as usize] = Phase::Entering {
+                    intent,
+                    riding: Riding {
+                        trail_permille: p.trail_permille,
+                        max_hold_secs: p.max_hold_secs,
+                        collar_permille: p.collar_permille,
+                    },
+                };
             }
             Err(_) => self.stats.entries_failed += 1,
         }
     }
 
     fn ride(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, px: Px) {
-        let Phase::Holding { qty, high } = self.phase[i as usize] else {
+        let Phase::Holding { qty, high, riding } = self.phase[i as usize] else {
             return;
         };
         let high = high.max(px.raw());
-        self.phase[i as usize] = Phase::Holding { qty, high };
-        let floor = i128::from(high) * i128::from(1000 - self.p.trail_permille) / 1000;
+        self.phase[i as usize] = Phase::Holding { qty, high, riding };
+        let floor = i128::from(high) * i128::from(1000 - riding.trail_permille) / 1000;
         if i128::from(px.raw()) <= floor {
             self.exit(ctx, i, px, reason::EXIT_TRAILING_STOP);
         }
     }
 
     fn exit(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, last: Px, why: u16) {
-        let Phase::Holding { qty, high } = self.phase[i as usize] else {
+        let Phase::Holding { qty, high, riding } = self.phase[i as usize] else {
             return;
         };
         let req = Request {
@@ -464,7 +601,7 @@ impl MomentumLong {
             purpose: Purpose::Close,
             pricing: Pricing::Collar {
                 reference: last,
-                collar_permille: self.p.collar_permille,
+                collar_permille: riding.collar_permille,
             },
             protect: None,
             tif: Tif::Ioc,
@@ -472,7 +609,12 @@ impl MomentumLong {
         };
         if let Ok(intent) = ctx.submit(i, req) {
             self.stats.exits += 1;
-            self.phase[i as usize] = Phase::Exiting { intent, qty, high };
+            self.phase[i as usize] = Phase::Exiting {
+                intent,
+                qty,
+                high,
+                riding,
+            };
         }
     }
 }
@@ -519,16 +661,17 @@ impl Strategy for MomentumLong {
         }
         for i in 0..self.phase.len() as u32 {
             match self.phase[i as usize] {
-                Phase::Entering { intent } if intent == u.intent => {
+                Phase::Entering { intent, riding } if intent == u.intent => {
                     if u.filled_qty > 0 {
                         let high = u.avg_px.map_or(0, |p| p.raw());
                         self.phase[i as usize] = Phase::Holding {
                             qty: u.filled_qty,
                             high,
+                            riding,
                         };
                         ctx.set_timer_in(
                             TimerId(i),
-                            Nanos::from(self.p.max_hold_secs) * NANOS_PER_SEC,
+                            Nanos::from(riding.max_hold_secs) * NANOS_PER_SEC,
                         );
                     } else {
                         self.stats.entries_failed += 1;
@@ -537,7 +680,12 @@ impl Strategy for MomentumLong {
                     }
                     return;
                 }
-                Phase::Exiting { intent, qty, high } if intent == u.intent => {
+                Phase::Exiting {
+                    intent,
+                    qty,
+                    high,
+                    riding,
+                } if intent == u.intent => {
                     let left = qty - u.filled_qty.min(qty);
                     if left == 0 {
                         self.positions -= 1;
@@ -545,7 +693,11 @@ impl Strategy for MomentumLong {
                         self.stop_watching(ctx, i);
                     } else {
                         // Not all sold: hold the rest and try again shortly.
-                        self.phase[i as usize] = Phase::Holding { qty: left, high };
+                        self.phase[i as usize] = Phase::Holding {
+                            qty: left,
+                            high,
+                            riding,
+                        };
                         ctx.set_timer_in(TimerId(i), NANOS_PER_SEC);
                     }
                     return;

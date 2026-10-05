@@ -37,9 +37,9 @@ impl ProviderId {
     }
 }
 
-/// Minimal symbol <-> id table. The persistent security master (stable ids
-/// across days, ticker changes, corporate actions) is a backlog item; ids
-/// here are only stable within one table.
+/// Minimal symbol <-> id table. Ids here are only stable within one table; it
+/// serves the synthetic provider. Real instruments get persistent ids from the
+/// security master (`tf-secmaster`).
 #[derive(Clone, Debug, Default)]
 pub struct SymbolTable {
     names: Vec<String>,

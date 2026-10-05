@@ -25,6 +25,10 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use tf_core::{DecodeError, Event, SCHEMA_VERSION};
 
+pub mod replay;
+
+#[cfg(test)]
+mod replay_tests;
 #[cfg(test)]
 mod tests;
 

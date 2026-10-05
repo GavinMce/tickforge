@@ -12,7 +12,9 @@ workspace = true
 
 [dependencies]
 tf-core.workspace = true
+tf-provider.workspace = true
 zstd = "0.13"
 
 [dev-dependencies]
 tf-synth.workspace = true
+tf-replay.workspace = true

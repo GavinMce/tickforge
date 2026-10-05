@@ -18,6 +18,7 @@ task bench                                   # events/s and p50/p99/p99.9 throug
 task backtest                                # Strategy 1 through the risk gateway and simulated broker, with the report
 task backtest ARGS="--higher-lows 0 --daily-loss 20"  # see the gateway refuse entries after a loss
 task backtest ARGS="--strategy trend --healthy 2 --dangerous 2"  # the indicator example; it buys a fading runner too
+task backtest ARGS="--propose min_higher_lows=2@1 --propose min_higher_lows=3@62"  # tuned vs fixed-parameter shadow, same feed
 task synth ARGS="--store results"            # keep the result keyed by its manifest; a rerun is skipped
 ```
 
@@ -41,7 +42,7 @@ the generator is a deliberate, reviewed change.
 | `tf-strategy` | Strategy framework: `Intent` (side, size, limit/collar, protective orders, with validation) the order lifecycle (`OrderState`, `Order`, `Decision`, `RejectReason`), and the `Strategy` trait with its `Host` (timers, event-time `Ctx`; a clippy ban list keeps wall clocks and I/O out), `SimBroker` (backtest fills against recorded quotes with latency, slippage and borrow cost) `Report` (P&L, drawdown, slippage, hit rate, per-scenario breakdown) `MomentumLong` (Strategy 1, long side) and `TrendLong` (an example on the indicator and bar APIs) |
 | `tf-risk` | Risk gateway: caps, daily loss, order rate, kill switch; explicit audited rejections; limits fixed at construction |
 | `tf-params` | Bounded, rate-limited strategy parameters whose changes are tape events and apply to new entries only |
-| `tf-backtest` | The backtest loop: strategy -> risk gateway -> simulated broker -> report, plus a synthetic demo session |
+| `tf-backtest` | The backtest loop: strategy -> risk gateway -> simulated broker -> report, a synthetic demo session, and A/B runs of a tuned strategy against a fixed-parameter shadow |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |
 | `tf-cli` | `tf` binary |
 

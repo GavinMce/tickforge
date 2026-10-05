@@ -720,7 +720,8 @@ epics:
       - id: E12-S02
         jira: TIC-87
         title: Shadow fixed-parameter baseline and A/B metrics
-        status: todo
+        status: done
+        evidence: crates/tf-backtest/src/ab.rs (run_ab, momentum_ab, AbResult::metrics) and `tf backtest --propose`; shadow equals an ordinary run whatever is proposed, tape replays the tuned side exactly, per-event equity snapshots for E12-S03; 9 tests, 12 mutations caught (one gap found and closed); ADR 0021. Built on run_gated rather than waiting for E09-S08
         deps: [E12-S01, E09-S08]
         ac:
           - Baseline runs on the same feed with virtual fills; comparison metrics exported

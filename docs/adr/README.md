@@ -37,3 +37,4 @@ How:
 | [0018](0018-indicators-are-small-copy-integer-types-checked-against-exact-references.md) | Indicators are small, Copy, integer types checked against exact references | Accepted |
 | [0019](0019-the-example-indicator-strategy-and-what-it-shows.md) | The example indicator strategy, and what it shows | Accepted |
 | [0020](0020-parameter-changes-are-bounded-events-that-apply-to-new-entries-only.md) | Parameter changes are bounded events that apply to new entries only | Accepted |
+| [0021](0021-a-fixed-parameter-shadow-runs-beside-every-tuned-strategy.md) | A fixed-parameter shadow runs beside every tuned strategy | Accepted |

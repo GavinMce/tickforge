@@ -22,6 +22,8 @@
 //!
 //! Event time throughout; nothing here reads a clock or does I/O.
 
+pub mod ab;
+
 use std::collections::BTreeMap;
 
 use tf_core::{Event, NANOS_PER_SEC, Nanos};
@@ -132,9 +134,90 @@ struct Loop<'a, S: Strategy> {
     intents: u64,
     accepted: u64,
     errors: u64,
+    n: usize,
+    last_ts: Nanos,
 }
 
-impl<S: Strategy> Loop<'_, S> {
+impl<'a, S: Strategy> Loop<'a, S> {
+    fn new(
+        host: &'a mut Host<S>,
+        broker: &'a mut SimBroker,
+        gateway: &'a mut Gateway,
+        labels: Vec<String>,
+    ) -> Result<Self, ReportError> {
+        let n = labels.len();
+        Ok(Loop {
+            host,
+            broker,
+            gateway,
+            report: ReportBuilder::new(labels)?,
+            orders: BTreeMap::new(),
+            seen_fills: 0,
+            hash: Fnv::new(),
+            intents: 0,
+            accepted: 0,
+            errors: 0,
+            n,
+            last_ts: 0,
+        })
+    }
+
+    /// One event, in the order described in the module docs. A parameter change is not
+    /// market data: it goes to the host (which applies it) and nowhere else.
+    fn step(&mut self, ev: &Event) {
+        if matches!(ev, Event::ParamChange(_)) {
+            self.host.on_event(ev);
+            self.submit_pending();
+            return;
+        }
+        self.last_ts = ev.ts_recv();
+        self.broker.on_event(ev);
+        self.settle();
+        self.report.on_event(ev);
+        if let Event::Trade(t) = ev {
+            self.gateway.mark(t.hdr.instrument, t.px);
+        }
+        self.host.on_event(ev);
+        self.submit_pending();
+    }
+
+    /// Profit and loss so far (realised plus marked), before borrow fees.
+    fn equity(&self) -> i128 {
+        self.report.equity()
+    }
+
+    /// The end of the session: orders still at the venue expire, borrow is charged.
+    fn finish(mut self) -> BacktestResult {
+        self.broker.end_of_day(self.last_ts);
+        self.settle();
+        let n = self.n;
+        let borrow: Vec<u128> = (0..n as u32).map(|i| self.broker.borrow_fee(i)).collect();
+        let Loop {
+            broker,
+            gateway,
+            report,
+            hash,
+            intents,
+            accepted,
+            errors,
+            ..
+        } = self;
+        BacktestResult {
+            report: report.finish(&borrow),
+            intents,
+            accepted,
+            rejections: gateway.rejection_counts().clone(),
+            fills: broker.fills().len() as u64,
+            bookkeeping_errors: errors,
+            gateway_positions: (0..n as u32).map(|i| gateway.position(i)).collect(),
+            broker_positions: (0..n as u32).map(|i| broker.position(i)).collect(),
+            gateway_working: gateway.working_orders(),
+            gateway_pnl: gateway.daily_pnl(),
+            outcome_hash: hash.0,
+            audit: gateway.drain_audit(),
+        }
+    }
+
     /// Everything the broker did since the last call goes to the gateway, the
     /// report and the strategy.
     fn settle(&mut self) {
@@ -206,60 +289,12 @@ pub fn run_gated<S: Strategy>(
     events: impl IntoIterator<Item = Event>,
     mut before_event: impl FnMut(&Event, &mut Gateway),
 ) -> Result<BacktestResult, ReportError> {
-    let n = labels.len();
-    let mut l = Loop {
-        host,
-        broker,
-        gateway,
-        report: ReportBuilder::new(labels)?,
-        orders: BTreeMap::new(),
-        seen_fills: 0,
-        hash: Fnv::new(),
-        intents: 0,
-        accepted: 0,
-        errors: 0,
-    };
-    let mut last_ts: Nanos = 0;
+    let mut l = Loop::new(host, broker, gateway, labels)?;
     for ev in events {
-        last_ts = ev.ts_recv();
         before_event(&ev, l.gateway);
-        l.broker.on_event(&ev);
-        l.settle();
-        l.report.on_event(&ev);
-        if let Event::Trade(t) = &ev {
-            l.gateway.mark(t.hdr.instrument, t.px);
-        }
-        l.host.on_event(&ev);
-        l.submit_pending();
+        l.step(&ev);
     }
-    l.broker.end_of_day(last_ts);
-    l.settle();
-
-    let borrow: Vec<u128> = (0..n as u32).map(|i| l.broker.borrow_fee(i)).collect();
-    let Loop {
-        broker,
-        gateway,
-        report,
-        hash,
-        intents,
-        accepted,
-        errors,
-        ..
-    } = l;
-    Ok(BacktestResult {
-        report: report.finish(&borrow),
-        intents,
-        accepted,
-        rejections: gateway.rejection_counts().clone(),
-        fills: broker.fills().len() as u64,
-        bookkeeping_errors: errors,
-        gateway_positions: (0..n as u32).map(|i| gateway.position(i)).collect(),
-        broker_positions: (0..n as u32).map(|i| broker.position(i)).collect(),
-        gateway_working: gateway.working_orders(),
-        gateway_pnl: gateway.daily_pnl(),
-        outcome_hash: hash.0,
-        audit: gateway.drain_audit(),
-    })
+    Ok(l.finish())
 }
 
 /// Strategy 1 (long side) over `events`, gated by the configured limits.
@@ -365,5 +400,7 @@ pub fn dollars(d: u64) -> u128 {
     u128::from(d) * DOLLAR
 }
 
+#[cfg(test)]
+mod ab_tests;
 #[cfg(test)]
 mod tests;

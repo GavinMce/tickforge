@@ -467,7 +467,8 @@ epics:
       - id: E07-S09
         jira: TIC-109
         title: Indicator library (EMA, SMA, VWAP, RSI, ATR, opening range)
-        status: todo
+        status: done
+        evidence: crates/tf-engine/src/indicators.rs (Sma, Ema, Extremes, RateOfChange, Vwap, RollingVwap, Rsi, Atr, OpeningRange); EMA/RSI/ATR match exact-fraction Python vectors (tests/gen_indicator_vectors.py); others match brute-force references; saturation test; pinned digest over a synthetic session; 21 mutations caught (two gaps found and closed); ADR 0018
         deps: [E07-S10]
         ac:
           - Copy, integer-only, allocation-free indicators: EMA, SMA, rolling and anchored VWAP with bands, RSI (Wilder), ATR, opening range, rate of change, rolling min/max

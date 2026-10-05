@@ -27,3 +27,4 @@ How:
 | [0008](0008-benchmarks-are-informational-and-tracked-per-commit.md) | Benchmarks are informational and tracked per commit | Accepted |
 | [0009](0009-run-manifests-and-content-addressed-results.md) | Run manifests and results addressed by the manifest hash | Accepted |
 | [0010](0010-strategies-are-event-driven-and-cannot-touch-the-outside-world.md) | Strategies are event-driven and cannot reach the clock or the outside world | Accepted |
+| [0011](0011-simulated-broker-fills-against-recorded-quotes.md) | The simulated broker fills against recorded quotes, with latency | Accepted |

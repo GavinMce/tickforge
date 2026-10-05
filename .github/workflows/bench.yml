@@ -4,6 +4,10 @@ name: Bench
 # shared runners are too noisy to gate a merge on, so this is not a required check.
 # Each run uploads its results as an artifact and shows the change against the
 # last successful run on main in the job summary (see docs/adr/0008).
+#
+# The same commit measured 24M to 50M events/s on different runners, so the
+# flag thresholds below are set beyond that spread: only a change of about
+# 2.5x or more (a drop over 60%, a p99 rise over 150%) is flagged here. Use `task bench` on a quiet machine for finer ones.
 
 on:
   push:
@@ -56,7 +60,7 @@ jobs:
           set -o pipefail
           args=(--out bench-results/bench.jsonl --commit "${{ github.event.pull_request.head.sha || github.sha }}")
           if [ -f baseline/bench.jsonl ]; then
-            args+=(--compare baseline/bench.jsonl)
+            args+=(--compare baseline/bench.jsonl --flag-drop 60 --flag-rise 150)
           fi
           ./target/release/tf bench "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 

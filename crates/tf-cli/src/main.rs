@@ -23,7 +23,7 @@ USAGE:
     --dump N          also print the first N events
 
     tf bench [--symbols N] [--secs N] [--seed N] [--runs N] [--out FILE]
-             [--compare FILE] [--commit SHA]
+             [--compare FILE] [--commit SHA] [--flag-drop PCT] [--flag-rise PCT]
 
     Measure events/s and per-event p50/p99/p99.9 latency through the run loop
     for four scenarios, and print a markdown table. Use a release build.
@@ -35,6 +35,9 @@ USAGE:
     --out FILE        append the results as JSON lines (a per-commit history)
     --compare FILE    show the change against the results in FILE
     --commit SHA      label for the results (default: $GITHUB_SHA, else git HEAD)
+    --flag-drop PCT   flag a throughput drop over PCT% against --compare (default 10)
+    --flag-rise PCT   flag a p99 rise over PCT% against --compare (default 25)
+                      The defaults suit a quiet machine; CI runners vary by 2x.
 ";
 
 struct SynthArgs {
@@ -162,6 +165,8 @@ struct BenchArgs {
     out: Option<String>,
     compare: Option<String>,
     commit: Option<String>,
+    flag_drop: u64,
+    flag_rise: u64,
 }
 
 fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
@@ -173,6 +178,8 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
         out: None,
         compare: None,
         commit: None,
+        flag_drop: 10,
+        flag_rise: 25,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -190,6 +197,8 @@ fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
             "--out" => a.out = Some(text("--out")?),
             "--compare" => a.compare = Some(text("--compare")?),
             "--commit" => a.commit = Some(text("--commit")?),
+            "--flag-drop" => a.flag_drop = num("--flag-drop", text("--flag-drop")?)?,
+            "--flag-rise" => a.flag_rise = num("--flag-rise", text("--flag-rise")?)?,
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -230,7 +239,14 @@ fn bench(args: &[String]) -> Result<(), String> {
         }
         None => None,
     };
-    print!("{}", tf_bench::markdown(&rows, base.as_deref()));
+    let thresholds = tf_bench::Thresholds {
+        drop_permille: (a.flag_drop * 10) as i64,
+        rise_permille: (a.flag_rise * 10) as i64,
+    };
+    print!(
+        "{}",
+        tf_bench::markdown(&rows, base.as_deref(), &thresholds)
+    );
 
     if let Some(path) = &a.out {
         use std::io::Write as _;

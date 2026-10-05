@@ -1,7 +1,7 @@
 //! The harness runs end to end and measures the right thing. No timing is
 //! asserted (CI machines are noisy); only structure and agreement.
 
-use tf_bench::{Env, Workload, from_jsonl, markdown, run_all, to_jsonl};
+use tf_bench::{Env, Thresholds, Workload, from_jsonl, markdown, run_all, to_jsonl};
 
 fn env() -> Env {
     Env::detect("testcommit".into())
@@ -55,7 +55,7 @@ fn results_round_trip_and_render() {
     };
     let rows = run_all(&w, 2, &env()).unwrap();
     assert_eq!(from_jsonl(&to_jsonl(&rows)).unwrap(), rows);
-    let table = markdown(&rows, Some(&rows));
+    let table = markdown(&rows, Some(&rows), &Thresholds::LOCAL);
     for r in &rows {
         assert!(table.contains(&r.scenario), "{table}");
     }

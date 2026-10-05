@@ -25,7 +25,7 @@ fn stream(seed: u64, symbols: Vec<SymbolSpec>) -> Vec<Event> {
     let cfg = SynthConfig {
         seed,
         session_start: tf_synth::DEFAULT_SESSION_START,
-        duration: 260 * SEC,
+        duration: 420 * SEC,
         symbols,
     };
     SynthStream::new(&cfg).collect()
@@ -34,7 +34,7 @@ fn stream(seed: u64, symbols: Vec<SymbolSpec>) -> Vec<Event> {
 fn one(kind: PullbackKind, seed: u64) -> Vec<Event> {
     stream(
         seed,
-        vec![spec("RUN", 500, Scenario::runner(kind, 20 * SEC))],
+        vec![spec("RUN", 500, Scenario::runner(kind, 70 * SEC))],
     )
 }
 
@@ -46,7 +46,7 @@ struct Outcome {
 
 fn run(events: &[Event], n: usize, p: MomentumParams) -> Outcome {
     let strat = MomentumLong::new(StrategyId(1), p, n).unwrap();
-    let mut host = Host::new(strat, n);
+    let mut host = strat.host(n);
     let mut broker = SimBroker::new(
         SimConfig {
             latency_ns: 50_000_000,
@@ -130,7 +130,11 @@ fn defaults_are_valid_and_each_bad_parameter_is_refused() {
 
 #[test]
 fn it_enters_the_healthy_pullback_and_never_the_dangerous_one() {
-    for seed in 0..20 {
+    // Healthy runners whose pullback never reads healthy (here seed 10: a 1.3% dip against a
+    // 15-dollar impulse is under the 3% minimum depth). Measured on seeds 0..60: 10, 28 and 53,
+    // the same three before and after the strategy moved onto the shared promoter.
+    const NEVER_HEALTHY: [u64; 1] = [10];
+    for seed in (0..20).filter(|s| !NEVER_HEALTHY.contains(s)) {
         let h = run(&healthy(seed), 1, MomentumParams::default());
         assert_eq!(opens(&h).len(), 1, "healthy, seed {seed}: {:?}", h.stats);
         assert_eq!(h.stats.rejected_dangerous, 0, "seed {seed}");
@@ -179,7 +183,7 @@ fn entering_early_in_the_pullback_loses_and_waiting_for_the_bounce_wins_on_these
         for seed in 0..10 {
             let p = with(|p| p.min_higher_lows = hl);
             let strat = MomentumLong::new(StrategyId(1), p, 1).unwrap();
-            let mut host = Host::new(strat, 1);
+            let mut host = strat.host(1);
             let mut broker = SimBroker::new(
                 SimConfig {
                     latency_ns: 50_000_000,
@@ -268,7 +272,7 @@ fn a_filled_entry_is_ridden_to_an_exit_that_closes_exactly_what_was_bought() {
     let events = healthy(1);
     let n = 1;
     let strat = MomentumLong::new(StrategyId(1), MomentumParams::default(), n).unwrap();
-    let mut host = Host::new(strat, n);
+    let mut host = strat.host(n);
     let mut broker = SimBroker::new(
         SimConfig {
             latency_ns: 50_000_000,
@@ -445,14 +449,19 @@ fn watched_and_open_positions_are_limited() {
     let two = stream(
         2,
         vec![
-            spec("A", 500, Scenario::runner(PullbackKind::Healthy, 20 * SEC)),
-            spec("B", 600, Scenario::runner(PullbackKind::Healthy, 20 * SEC)),
+            spec("A", 500, Scenario::runner(PullbackKind::Healthy, 70 * SEC)),
+            spec("B", 600, Scenario::runner(PullbackKind::Healthy, 70 * SEC)),
         ],
     );
     let both = run(&two, 2, MomentumParams::default());
     assert_eq!(opens(&both).len(), 2);
     let watch1 = run(&two, 2, with(|p| p.max_watched = 1));
-    assert!(watch1.stats.promotions_refused >= 1, "{:?}", watch1.stats);
+    assert_eq!(
+        watch1.stats.promotions_refused, 1,
+        "the second runner is refused once, not on every trade: {:?}",
+        watch1.stats
+    );
+    assert_eq!(opens(&watch1).len(), 1);
     let pos1 = run(&two, 2, with(|p| p.max_positions = 1));
     let (os, cs) = (opens(&pos1), closes(&pos1));
     assert!(!os.is_empty() && os.len() <= 2);
@@ -466,7 +475,7 @@ fn watched_and_open_positions_are_limited() {
 
 #[test]
 fn a_symbol_re_arms_only_after_its_cooldown() {
-    let events = stream(4, vec![spec("M", 500, Scenario::multi_spike(3, 20 * SEC))]);
+    let events = stream(4, vec![spec("M", 500, Scenario::multi_spike(3, 70 * SEC))]);
     let long = run(&events, 1, with(|p| p.cooldown_secs = 100_000));
     let short = run(&events, 1, with(|p| p.cooldown_secs = 1));
     assert_eq!(long.stats.promoted, 1, "one look, then it stays out");
@@ -482,7 +491,7 @@ fn a_symbol_re_arms_only_after_its_cooldown() {
 fn drive_to_entry(p: MomentumParams) -> (Host<MomentumLong>, Vec<Event>, Intent, usize) {
     let events = healthy(1);
     let strat = MomentumLong::new(StrategyId(1), p, 1).unwrap();
-    let mut host = Host::new(strat, 1);
+    let mut host = strat.host(1);
     for (k, ev) in events.iter().enumerate() {
         host.on_event(ev);
         if let Some(i) = host.drain_intents().into_iter().next() {
@@ -639,7 +648,7 @@ fn run_rules(events: &[Event], rules: &str, p: MomentumParams) -> (Outcome, Evid
     let strat = MomentumLong::new(StrategyId(1), p, 1)
         .unwrap()
         .with_rules(RuleSet::parse(rules).unwrap());
-    let mut host = Host::new(strat, 1);
+    let mut host = strat.host(1);
     let mut broker = SimBroker::new(
         SimConfig {
             latency_ns: 50_000_000,
@@ -773,4 +782,133 @@ fn every_entry_and_every_decline_carries_the_rules_that_decided_and_how_each_con
             .any(|e| e.stage == StageKind::Dangerous && e.pass),
         "the decline shows which dangerous condition held"
     );
+}
+
+// ---- on the shared promoter ----
+
+use tf_core::TierAction;
+use tf_engine::Promoter;
+
+/// The events with each tier decision the promoter makes put on the tape just before the
+/// event that caused it, and the strategy's decisions from running them live.
+fn live_with_tape(events: &[Event]) -> (Vec<Event>, Host<MomentumLong>, Vec<Intent>) {
+    let mut host = MomentumLong::new(StrategyId(1), MomentumParams::default(), 1)
+        .unwrap()
+        .host(1);
+    let (mut tape, mut intents) = (Vec::new(), Vec::new());
+    for ev in events {
+        host.on_event(ev);
+        tape.extend(host.drain_tier_events().into_iter().map(Event::TierChange));
+        tape.push(*ev);
+        intents.extend(host.drain_intents());
+    }
+    (tape, host, intents)
+}
+
+#[test]
+fn without_a_promoter_the_strategy_watches_nothing_and_says_so() {
+    let mut host = Host::new(
+        MomentumLong::new(StrategyId(1), MomentumParams::default(), 1).unwrap(),
+        1,
+    );
+    for ev in &healthy(1) {
+        host.on_event(ev);
+    }
+    let st = host.strategy().stats();
+    assert!(host.drain_intents().is_empty());
+    assert_eq!((st.promoted, st.entries), (0, 0));
+    assert!(
+        st.no_promoter > 100,
+        "every trade it could not act on is counted: {st:?}"
+    );
+    // With one, the same stream is traded and nothing is counted.
+    let (_, live, intents) = live_with_tape(&healthy(1));
+    assert_eq!(live.strategy().stats().no_promoter, 0);
+    assert_eq!(intents.len(), 1);
+}
+
+#[test]
+fn a_replay_from_the_tape_decides_exactly_as_the_live_run_did() {
+    for seed in [1, 2, 3, 7] {
+        let events = healthy(seed);
+        let (tape, live, live_intents) = live_with_tape(&events);
+        assert!(
+            tape.iter().any(|e| matches!(e, Event::TierChange(_))),
+            "the promoter wrote its decisions on the tape"
+        );
+        let mut follower = Host::new(
+            MomentumLong::new(StrategyId(1), MomentumParams::default(), 1).unwrap(),
+            1,
+        )
+        .with_promoter(Promoter::follower(50, 1));
+        let mut replay_intents = Vec::new();
+        for e in &tape {
+            follower.on_event(e);
+            replay_intents.extend(follower.drain_intents());
+        }
+        assert_eq!(replay_intents, live_intents, "seed {seed}");
+        assert_eq!(
+            follower.strategy().entry_traces(),
+            live.strategy().entry_traces(),
+            "the same evidence, seed {seed}"
+        );
+        assert_eq!(follower.strategy().declines(), live.strategy().declines());
+        assert_eq!(follower.strategy().stats(), live.strategy().stats());
+    }
+}
+
+#[test]
+fn an_engaged_symbol_is_pinned_in_tier_one_until_the_strategy_lets_go() {
+    let (mut host, _events, entry, _) = drive_to_entry(MomentumParams::default());
+    assert!(
+        host.promoter().unwrap().is_pinned(0),
+        "pinned from the moment it was taken up"
+    );
+    assert_eq!(host.strategy().watched(), 1);
+    // The entry does not fill: the strategy gives the symbol up and releases it.
+    host.on_order_update(&update(&entry, OrderState::Expired, 0));
+    assert!(!host.promoter().unwrap().is_pinned(0));
+    assert_eq!(host.strategy().watched(), 0);
+    assert!(
+        host.promoter().unwrap().is_promoted(0),
+        "and the promoter, not the strategy, decides when it goes"
+    );
+}
+
+#[test]
+fn a_symbol_demoted_while_it_is_being_watched_is_dropped_cleanly() {
+    let events = healthy(1);
+    let (tape, _, _) = live_with_tape(&events);
+    let promote_at = tape
+        .iter()
+        .position(|e| matches!(e, Event::TierChange(c) if c.action == TierAction::Promote))
+        .unwrap();
+    let Event::TierChange(promote) = tape[promote_at] else {
+        unreachable!()
+    };
+    // Take the symbol out of Tier 1 twenty events into its watch, before any entry (and drop the
+    // demotion the live run made later).
+    let mut cut = tape.clone();
+    cut.retain(|e| !matches!(e, Event::TierChange(c) if c.action == TierAction::Demote));
+    let demote = tf_core::TierChange {
+        action: TierAction::Demote,
+        ..promote
+    };
+    cut.insert(promote_at + 20, Event::TierChange(demote));
+    let mut follower = Host::new(
+        MomentumLong::new(StrategyId(1), MomentumParams::default(), 1).unwrap(),
+        1,
+    )
+    .with_promoter(Promoter::follower(50, 1));
+    for e in &cut {
+        follower.on_event(e);
+    }
+    let st = follower.strategy().stats();
+    assert_eq!(
+        st.promoted, 1,
+        "it was taken up and being watched when it went: {st:?}"
+    );
+    assert_eq!(st.entries, 0, "nothing left to judge: {st:?}");
+    assert_eq!(follower.strategy().watched(), 0, "the slot is free again");
+    assert!(!follower.promoter().unwrap().is_pinned(0));
 }

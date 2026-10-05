@@ -576,6 +576,16 @@ epics:
         ac:
           - Each entry and each give-up carries the evidence behind it
           - A run exports to one deterministic JSON file that a static page replays by tick, event and time
+      - id: E08-S11
+        jira: TIC-116
+        title: Momentum strategy on the shared Promoter (one universe-wide Tier 1, on the tape)
+        status: done
+        evidence: MomentumLong::host attaches the default Promoter; the strategy watches only promoted symbols, pins what it is engaged with, drops a symbol demoted under it, and counts events seen without a promoter; a follower host replaying the tape's TierChange events reproduces the live run's intents, evidence, declines and counters on four seeds; 12 mutations caught. Measured against the old private scan on 72 runs (24 seeds x 3 configurations, lead-in 70 s or more) - never fewer trades in any run, healthy trades 160 to 191, dangerous 0 to 0; cause of the increase not isolated. The shared scanner needs about 60 s of baseline (0 of 18 healthy runners found at a 20 s lead-in, 18 of 18 from 60 s), so demo sessions default to a 70 s lead-in (DEMO_LEAD_SECS) and unit scenarios were lengthened. Runs stored before this do not reproduce (refused by tf explore); ADR 0028
+        deps: [E07-S10, E08-S08]
+        ac:
+          - The momentum strategy takes Tier 1 membership from the host's promoter, not a private one
+          - A replay from the tape reproduces the live run's decisions
+          - Entries on healthy runners and absence of entries on dangerous ones hold against the previous baseline, with any change disclosed
   # ---------------------------------------------------------------- Phase 4
   - id: E09
     jira: TIC-10

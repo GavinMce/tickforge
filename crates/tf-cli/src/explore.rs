@@ -213,7 +213,7 @@ pub(crate) fn replay(stored: &RunResult, rules_files: &[String]) -> Result<Repla
         a.healthy,
         a.dangerous,
         a.quiet,
-        a.lead.unwrap_or(20),
+        a.lead.unwrap_or(tf_backtest::DEMO_LEAD_SECS),
     );
     let t0 = events.first().map_or(0, |e| e.ts_recv());
     // The rebuilt setup must be the stored one, key by key, or the replay is of something else.
@@ -376,7 +376,7 @@ pub(crate) mod tests {
             a.healthy,
             a.dangerous,
             a.quiet,
-            a.lead.unwrap_or(20),
+            a.lead.unwrap_or(tf_backtest::DEMO_LEAD_SECS),
         );
         let start = events.first().map_or(0, |e| e.ts_recv());
         let m = backtest_manifest(&a, &cfg, start).unwrap();

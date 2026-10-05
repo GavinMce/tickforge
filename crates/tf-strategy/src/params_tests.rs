@@ -13,13 +13,13 @@ fn healthy(seed: u64) -> Vec<Event> {
     let cfg = SynthConfig {
         seed,
         session_start: tf_synth::DEFAULT_SESSION_START,
-        duration: 400 * SEC,
+        duration: 470 * SEC,
         symbols: vec![SymbolSpec {
             symbol: "RUN".into(),
             base_px_cents: 500,
             base_interval_ns: 300_000_000,
             quote_every: 2,
-            scenario: Scenario::runner(PullbackKind::Healthy, 20 * SEC),
+            scenario: Scenario::runner(PullbackKind::Healthy, 70 * SEC),
             news: Vec::new(),
         }],
     };
@@ -31,7 +31,10 @@ fn store() -> ParamStore {
 }
 
 fn host(p: MomentumParams) -> Host<MomentumLong> {
-    Host::new(MomentumLong::new(StrategyId(1), p, 1).unwrap(), 1).with_params(store())
+    MomentumLong::new(StrategyId(1), p, 1)
+        .unwrap()
+        .host(1)
+        .with_params(store())
 }
 
 fn proposal(name: &str, value: i64) -> Proposal {
@@ -267,10 +270,9 @@ fn a_tape_that_disagrees_with_the_store_is_counted_not_obeyed() {
     run_events(&mut h, &stream);
     assert_eq!((h.param_errors(), h.params().unwrap().revision()), (1, 0));
     // A host without a store ignores change events.
-    let mut plain = Host::new(
-        MomentumLong::new(StrategyId(1), MomentumParams::default(), 1).unwrap(),
-        1,
-    );
+    let mut plain = MomentumLong::new(StrategyId(1), MomentumParams::default(), 1)
+        .unwrap()
+        .host(1);
     run_events(&mut plain, &stream);
     assert_eq!(plain.param_errors(), 0);
 }
@@ -432,11 +434,10 @@ fn a_per_instrument_value_applies_to_that_instrument_only() {
     // 2% under the pullback low by default.
     let events = healthy(1);
     let stop_with = |target: Option<Target>| {
-        let mut h = Host::new(
-            MomentumLong::new(StrategyId(1), MomentumParams::default(), 2).unwrap(),
-            2,
-        )
-        .with_params(store());
+        let mut h = MomentumLong::new(StrategyId(1), MomentumParams::default(), 2)
+            .unwrap()
+            .host(2)
+            .with_params(store());
         if let Some(target) = target {
             let mut p = proposal("stop_buffer_permille", 35); // 2% -> 3.5%
             p.target = target;
@@ -483,7 +484,7 @@ fn a_rule_threshold_that_names_a_parameter_follows_the_store_and_a_literal_does_
         let strat = MomentumLong::new(StrategyId(1), MomentumParams::default(), 1)
             .unwrap()
             .with_rules(RuleSet::parse(text).unwrap());
-        let mut h = Host::new(strat, 1).with_params(store());
+        let mut h = strat.host(1).with_params(store());
         let out = run_events(&mut h, &stream);
         (out, h.param_errors())
     };

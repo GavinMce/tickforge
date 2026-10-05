@@ -132,6 +132,11 @@ impl Ctx<'_> {
         self.promoter.as_ref()?.symbol(id)
     }
 
+    /// Whether the host has a promoter at all ([`Host::with_promoter`]).
+    pub fn has_promoter(&self) -> bool {
+        self.promoter.is_some()
+    }
+
     /// Whether `id` is in Tier 1.
     pub fn is_promoted(&self, id: InstrumentId) -> bool {
         self.promoter.as_ref().is_some_and(|p| p.is_promoted(id))

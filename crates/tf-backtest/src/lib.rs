@@ -40,6 +40,12 @@ use tf_synth::{PullbackKind, Scenario, SymbolSpec, SynthConfig, SynthStream};
 
 const DOLLAR: u128 = 1_000_000_000;
 
+/// Quiet seconds before the first runner in a demo session. The shared scanner scores a symbol
+/// against its own baseline, one sample per 10 s and six needed, so a runner that starts sooner
+/// than about a minute in is not seen (measured: 0 of 18 healthy runners found at a 20 s
+/// lead-in, 18 of 18 from 60 s).
+pub const DEMO_LEAD_SECS: u64 = 70;
+
 #[derive(Clone, Debug)]
 pub struct BacktestConfig {
     pub sim: SimConfig,
@@ -344,7 +350,7 @@ pub fn momentum_backtest_traced(
         Some(r) => strat.with_rules(r.clone()),
         None => strat,
     };
-    let mut host = Host::new(strat, n);
+    let mut host = strat.host(n);
     let mut broker = SimBroker::new(cfg.sim, n);
     let mut gateway = Gateway::new(cfg.limits, n);
     let result = run_gated(
@@ -399,7 +405,7 @@ pub fn demo_session(
     dangerous: u32,
     quiet: u32,
 ) -> (Vec<Event>, Vec<String>) {
-    demo_session_with_lead(seed, secs, healthy, dangerous, quiet, 20)
+    demo_session_with_lead(seed, secs, healthy, dangerous, quiet, DEMO_LEAD_SECS)
 }
 
 /// [`demo_session`] with the first runner's quiet lead-in set to `base_lead_secs`

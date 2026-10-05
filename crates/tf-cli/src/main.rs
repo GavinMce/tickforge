@@ -55,7 +55,7 @@ USAGE:
                       indicator strategy: EMA cross / VWAP reclaim / volume surge on
                       one-minute bars; it needs minutes to warm up, so its defaults are
                       a 1800 s session and a 420 s quiet lead-in)
-    --lead SECS       quiet lead-in before the first runner (default 20; 420 for trend)
+    --lead SECS       quiet lead-in before the first runner (default 70, which the scanner's baseline needs; 420 for trend)
     --fast N          trend: fast EMA period in bars (default 3)
     --slow N          trend: slow EMA period in bars (default 6)
     --propose P       momentum: an agent's parameter proposal, NAME=VALUE@SECS after the
@@ -435,7 +435,11 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
     if a.secs == 0 {
         a.secs = if trend { 1800 } else { 400 };
     }
-    a.lead.get_or_insert(if trend { 420 } else { 20 });
+    a.lead.get_or_insert(if trend {
+        420
+    } else {
+        tf_backtest::DEMO_LEAD_SECS
+    });
     Ok(a)
 }
 
@@ -509,7 +513,10 @@ fn backtest_manifest(
     let session = [
         ("strategy", a.strategy.clone()),
         ("secs", a.secs.to_string()),
-        ("lead_secs", a.lead.unwrap_or(20).to_string()),
+        (
+            "lead_secs",
+            a.lead.unwrap_or(tf_backtest::DEMO_LEAD_SECS).to_string(),
+        ),
         ("ab", u8::from(!a.propose.is_empty()).to_string()),
         ("healthy", a.healthy.to_string()),
         ("dangerous", a.dangerous.to_string()),
@@ -747,7 +754,7 @@ fn backtest(args: &[String]) -> Result<(), String> {
         a.healthy,
         a.dangerous,
         a.quiet,
-        a.lead.unwrap_or(20),
+        a.lead.unwrap_or(tf_backtest::DEMO_LEAD_SECS),
     );
     let mut hash = HashSink::new();
     for ev in &events {

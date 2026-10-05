@@ -314,6 +314,7 @@ pub(crate) fn explore(args: &[String]) -> Result<(), String> {
         );
     }
     let out = out.unwrap_or_else(|| "explorer.html".to_owned());
+    rules.extend(crate::rules_cmd::store_rules(Path::new(&store)));
     let mut stored = Vec::new();
     for h in &hashes {
         stored.push(load_run(Path::new(&store), h)?);

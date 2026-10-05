@@ -17,8 +17,9 @@ task synth ARGS="--seed 7 --symbols 20 --secs 60 --dump 10"
 ```
 
 `tf synth` prints event counts and a hash; identical inputs give an identical
-hash on every platform. `crates/tf-synth/src/tests.rs` pins a golden hash, so any
-change to the generator is a deliberate, reviewed change.
+hash on every platform (CI checks x86_64 and aarch64). `crates/tf-synth/src/tests.rs`
+pins a golden hash for the mixed universe and one per scenario, so any change to
+the generator is a deliberate, reviewed change.
 
 ## Layout
 
@@ -26,7 +27,7 @@ change to the generator is a deliberate, reviewed change.
 |---|---|
 | `tf-core` | Canonical `Event` (Trade/Quote/Status), fixed-point `Px`, `Clock`/`SimClock`, stable binary encoding, FNV hash |
 | `tf-provider` | `Provider` trait, `Capabilities`, `Subscription`, `ProviderError`, `Poll` contract |
-| `tf-synth` | Deterministic synthetic provider: runner scenarios, connection/symbol limits, drops, dups, reordering, replay |
+| `tf-synth` | Deterministic synthetic provider: runner, halt-up, LULD, SSR, squeeze, gap-and-go and multi-spike scenarios, connection/symbol limits, drops, dups, reordering, replay |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |
 | `tf-cli` | `tf` binary |
 

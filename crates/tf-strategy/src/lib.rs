@@ -28,7 +28,8 @@ pub use lifecycle::{
 pub use momentum::{MomentumLong, MomentumParams, MomentumStats};
 pub use report::{Report, ReportBuilder, Stats};
 pub use sim::{Fill, SimBroker, SimConfig, run_backtest, run_backtest_observed};
-pub use strategy::{Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};
+pub use strategy::{BarsError, Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};
+pub use tf_engine::{MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe};
 
 #[cfg(test)]
 mod momentum_tests;

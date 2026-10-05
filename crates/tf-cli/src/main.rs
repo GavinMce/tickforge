@@ -61,6 +61,7 @@ USAGE:
                       with fixed parameters on the same feed, each with its own simulated
                       broker and gateway. Prints both reports, the difference, the
                       changes applied and the proposals refused (with why).
+    --rules FILE      momentum only: decide with the entry rules in FILE (see `tf_strategy::rules`)
     --export FILE     momentum only: also write a JSON document for the trade explorer
                       (bars, ticks, scanner hits, tier moves, orders with the gateway's
                       answer, fills, stop paths, and the strategy's own record of why it
@@ -300,6 +301,7 @@ struct BacktestArgs {
     higher_lows: u32,
     propose: Vec<(String, i64, u64)>,
     export: Option<String>,
+    rules: Option<String>,
     revert_drawdown: Option<u64>,
     lockout: u64,
     strategy: String,
@@ -324,6 +326,7 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
         higher_lows: 1,
         propose: Vec::new(),
         export: None,
+        rules: None,
         revert_drawdown: None,
         lockout: 300,
         strategy: "momentum".to_owned(),
@@ -353,6 +356,7 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
             "--max-orders" => a.max_orders = val("--max-orders")? as u32,
             "--higher-lows" => a.higher_lows = val("--higher-lows")? as u32,
             "--lead" => a.lead = Some(val("--lead")?),
+            "--rules" => a.rules = Some(it.next().cloned().ok_or("--rules needs a file")?),
             "--export" => a.export = Some(it.next().cloned().ok_or("--export needs a file")?),
             "--revert-drawdown" => a.revert_drawdown = Some(val("--revert-drawdown")?),
             "--lockout" => a.lockout = val("--lockout")?,
@@ -381,6 +385,9 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
     }
     if a.revert_drawdown == Some(0) {
         return Err("--revert-drawdown must be positive".to_owned());
+    }
+    if a.rules.is_some() && trend {
+        return Err("--rules is for the momentum strategy".to_owned());
     }
     if a.export.is_some() && (trend || !a.propose.is_empty()) {
         return Err(
@@ -430,7 +437,15 @@ fn backtest_config(a: &BacktestArgs) -> Result<tf_backtest::BacktestConfig, Stri
     )
     .map_err(|e| format!("{e:?}"))?
     .with_gap_rule(GapRule::new(dollars(100_000), 20_000, 1000).map_err(|e| format!("{e:?}"))?);
+    let rules = match &a.rules {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+            Some(tf_strategy::RuleSet::parse(&text).map_err(|e| format!("{path}: {e}"))?)
+        }
+        None => None,
+    };
     Ok(tf_backtest::BacktestConfig {
+        rules,
         sim: tf_strategy::SimConfig {
             latency_ns: a.latency_ms * 1_000_000,
             borrow_bps_per_year: a.borrow_bps,
@@ -472,6 +487,11 @@ fn backtest_manifest(
     ];
     for (k, v) in session {
         m = m.with_config(k, &v).map_err(|e| e.to_string())?;
+    }
+    if let Some(r) = &cfg.rules {
+        m = m
+            .with_config("rules", &format!("{:016x}", r.fingerprint()))
+            .map_err(|e| e.to_string())?;
     }
     for (k, v) in cfg.limits.pairs() {
         m = m

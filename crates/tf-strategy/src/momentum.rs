@@ -17,8 +17,9 @@
 //!   maximum hold, whichever comes first.
 //! - **Cool down**, then wait for a fresh spike.
 //!
-//! Every threshold is a field of [`MomentumParams`]; there are no numeric
-//! constants in the logic. Defaults were chosen on the synthetic runner
+//! The decision itself (when to give up, when it is ready to judge, what is dangerous,
+//! what is healthy) is a [`RuleSet`], by default [`RuleSet::momentum`]; every threshold in
+//! it is a literal or a field of [`MomentumParams`]. There are no numeric constants in the logic. Defaults were chosen on the synthetic runner
 //! scenarios and are a starting point for real data, not a result. In
 //! particular `min_higher_lows` matters: with 0 the strategy buys in the middle of
 //! the pullback and is stopped out; with 1 it waits for the bounce.
@@ -33,6 +34,7 @@ use tf_params::{ParamId, ParamSpec, Scope};
 
 use crate::intent::{IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif};
 use crate::lifecycle::OrderUpdate;
+use crate::rules::{Evaluation, RuleSet};
 use crate::strategy::{Ctx, Request, Strategy, TimerId};
 
 /// Reasons recorded on intents, for the audit trail.
@@ -349,7 +351,7 @@ struct Riding {
 /// Why an entry happened: what the strategy saw when it decided, and the thresholds in force.
 /// One is recorded per entry intent, so a person (or a viewer) can see the evidence without
 /// recomputing it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryTrace {
     pub intent: IntentId,
     pub instrument: InstrumentId,
@@ -360,6 +362,10 @@ pub struct EntryTrace {
     pub impulse_permille: i64,
     /// The effective parameters used for this decision.
     pub params: MomentumParams,
+    /// Every condition of the rule set as it evaluated.
+    pub evaluations: Vec<Evaluation>,
+    /// [`RuleSet::fingerprint`] of the rules that decided.
+    pub rules: u64,
 }
 
 /// Why a watched symbol was given up on without an entry.
@@ -372,7 +378,7 @@ pub enum DeclineReason {
 }
 
 /// A symbol the strategy watched and decided not to enter, with what it saw.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decline {
     pub instrument: InstrumentId,
     pub ts: Nanos,
@@ -380,6 +386,8 @@ pub struct Decline {
     pub features: PullbackFeatures,
     pub impulse_permille: i64,
     pub params: MomentumParams,
+    pub evaluations: Vec<Evaluation>,
+    pub rules: u64,
 }
 
 /// Counters for what the strategy decided and why not.
@@ -410,6 +418,8 @@ pub struct MomentumLong {
     conflicts: u64,
     traces: Vec<EntryTrace>,
     declines: Vec<Decline>,
+    rules: RuleSet,
+    rules_id: u64,
 }
 
 impl MomentumLong {
@@ -419,7 +429,10 @@ impl MomentumLong {
         id_space: usize,
     ) -> Result<MomentumLong, ParamError> {
         params.validate()?;
+        let rules = RuleSet::momentum();
         Ok(MomentumLong {
+            rules_id: rules.fingerprint(),
+            rules,
             id,
             p: params,
             tier1: Tier1::new(id_space, params.max_watched as usize),
@@ -432,6 +445,17 @@ impl MomentumLong {
             traces: Vec::new(),
             declines: Vec::new(),
         })
+    }
+
+    /// Decide with `rules` instead of [`RuleSet::momentum`].
+    pub fn with_rules(mut self, rules: RuleSet) -> MomentumLong {
+        self.rules_id = rules.fingerprint();
+        self.rules = rules;
+        self
+    }
+
+    pub fn rules(&self) -> &RuleSet {
+        &self.rules
     }
 
     /// The symbols it watched and declined, in order.
@@ -513,6 +537,8 @@ impl MomentumLong {
             features: *f,
             impulse_permille,
             params: *p,
+            evaluations: self.rules.evaluate(f, impulse_permille, p),
+            rules: self.rules_id,
         });
     }
 
@@ -570,36 +596,23 @@ impl MomentumLong {
         let Some(f) = sym.features() else { return };
         let low = f.impulse_low.raw();
         let impulse = i128::from(f.impulse_high.raw() - low) * 1000 / i128::from(low.max(1));
-        if impulse < i128::from(p.min_impulse_permille) || f.secs_since_high < p.min_pullback_secs {
-            if f.secs_since_high > p.max_pullback_secs {
-                self.stats.rejected_too_old += 1;
-                self.decline(ctx, i, DeclineReason::TooOld, &f, impulse as i64, &p);
-                self.stop_watching(ctx, i);
-            }
-            return;
-        }
-        if f.secs_since_high > p.max_pullback_secs {
+        let impulse = impulse.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+        if self.rules.too_old.holds(&f, impulse, &p) {
             self.stats.rejected_too_old += 1;
-            self.decline(ctx, i, DeclineReason::TooOld, &f, impulse as i64, &p);
+            self.decline(ctx, i, DeclineReason::TooOld, &f, impulse, &p);
             self.stop_watching(ctx, i);
             return;
         }
-        let dangerous = f.depth_permille > p.max_depth_permille
-            || f.volume_ratio_permille
-                .is_some_and(|r| r > p.max_volume_ratio_permille);
-        if dangerous {
+        if !self.rules.armed.holds(&f, impulse, &p) {
+            return;
+        }
+        if self.rules.dangerous.holds(&f, impulse, &p) {
             self.stats.rejected_dangerous += 1;
-            self.decline(ctx, i, DeclineReason::Dangerous, &f, impulse as i64, &p);
+            self.decline(ctx, i, DeclineReason::Dangerous, &f, impulse, &p);
             self.stop_watching(ctx, i);
             return;
         }
-        let healthy = f.depth_permille >= p.min_depth_permille
-            && f.retrace_now_permille <= p.max_retrace_now_permille
-            && f.volume_ratio_permille.is_some()
-            && f.higher_lows >= p.min_higher_lows
-            && f.bid_support_permille
-                .is_some_and(|b| b >= p.min_bid_support_permille);
-        if !healthy || self.positions >= p.max_positions {
+        if !self.rules.enter.holds(&f, impulse, &p) || self.positions >= p.max_positions {
             return;
         }
         let Some(Quote1 { ask, .. }) = sym.quote_ago(0) else {
@@ -641,8 +654,10 @@ impl MomentumLong {
                     instrument: i,
                     ts: ctx.now(),
                     features: f,
-                    impulse_permille: impulse as i64,
+                    impulse_permille: impulse,
                     params: p,
+                    evaluations: self.rules.evaluate(&f, impulse, &p),
+                    rules: self.rules_id,
                 });
                 self.stats.entries += 1;
                 self.positions += 1;

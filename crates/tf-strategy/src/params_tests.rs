@@ -463,3 +463,42 @@ fn a_per_instrument_value_applies_to_that_instrument_only() {
     );
     assert!(stop_with(Some(Target::Global)) < base);
 }
+
+// ---- rules and the store ----
+
+#[test]
+fn a_rule_threshold_that_names_a_parameter_follows_the_store_and_a_literal_does_not() {
+    use crate::rules::{MOMENTUM_RULES, RuleSet};
+    let events = healthy(1);
+    let t0 = events[0].ts_recv();
+    let (stream, refused) = with_changes(
+        &events,
+        &[
+            (t0 + SEC, proposal("min_higher_lows", 2)),
+            (t0 + 62 * SEC, proposal("min_higher_lows", 3)),
+        ],
+    );
+    assert!(refused.is_empty());
+    let with_rules = |text: &str| {
+        let strat = MomentumLong::new(StrategyId(1), MomentumParams::default(), 1)
+            .unwrap()
+            .with_rules(RuleSet::parse(text).unwrap());
+        let mut h = Host::new(strat, 1).with_params(store());
+        let out = run_events(&mut h, &stream);
+        (out, h.param_errors())
+    };
+    let base = run_events(&mut host(MomentumParams::default()), &events);
+    // Naming the parameter: the same stricter entry as the built-in, to the intent.
+    let (followed, e1) = with_rules(MOMENTUM_RULES);
+    assert_eq!(e1, 0);
+    assert_ne!(followed, base, "the change reached the rule");
+    assert_eq!(
+        followed,
+        run_events(&mut host(MomentumParams::default()), &stream)
+    );
+    // Writing the same number as a literal: the store's change is ignored.
+    let literal = MOMENTUM_RULES.replace("higher_lows >= @min_higher_lows", "higher_lows >= 1");
+    let (fixed, e2) = with_rules(&literal);
+    assert_eq!(e2, 0);
+    assert_eq!(fixed, base, "a literal threshold is not tuned");
+}

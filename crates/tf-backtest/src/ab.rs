@@ -315,7 +315,13 @@ pub fn momentum_ab_with(
         store = store.with_lockout(r.lockout);
         policy = Some(RevertPolicy::new(r.max_drawdown).map_err(|e| format!("{e:?}"))?);
     }
-    let strategy = || MomentumLong::new(StrategyId(1), cfg.params, n).map_err(|e| e.0.to_owned());
+    let strategy = || {
+        let s = MomentumLong::new(StrategyId(1), cfg.params, n).map_err(|e| e.0.to_owned())?;
+        Ok::<_, String>(match &cfg.rules {
+            Some(r) => s.with_rules(r.clone()),
+            None => s,
+        })
+    };
     let mut tuned_host = Host::new(strategy()?, n).with_params(store);
     let mut shadow_host = Host::new(strategy()?, n);
     let (mut tb, mut sb) = (SimBroker::new(cfg.sim, n), SimBroker::new(cfg.sim, n));

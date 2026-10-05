@@ -21,6 +21,7 @@ use std::fmt::Write;
 
 use tf_core::{Event, InstrumentId, NANOS_PER_SEC, Nanos};
 use tf_engine::{Promoter, PromoterConfig, Quote1, Scanner, ScannerConfig, Tier0, Tier1Symbol};
+use tf_strategy::rules::{Evaluation, Mode, RuleSet};
 use tf_strategy::{Decision, Decline, DeclineReason, EntryTrace, Intent, Purpose, Side};
 
 use crate::{BacktestConfig, BacktestResult};
@@ -54,6 +55,7 @@ fn esc(s: &str) -> String {
         .flat_map(|c| match c {
             '"' => vec!['\\', '"'],
             '\\' => vec!['\\', '\\'],
+            '\n' => vec!['\\', 'n'],
             c if (c as u32) < 0x20 => vec![' '],
             c => vec![c],
         })
@@ -73,78 +75,6 @@ impl W {
 
 fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map_or("null".to_owned(), |x| x.to_string())
-}
-
-#[derive(Clone, Copy)]
-struct Cond {
-    name: &'static str,
-    value: Option<i64>,
-    op: &'static str,
-    threshold: i64,
-    pass: bool,
-}
-
-fn conditions(
-    f: &tf_engine::PullbackFeatures,
-    impulse: i64,
-    p: &tf_strategy::MomentumParams,
-) -> Vec<Cond> {
-    let ge = |name, v: Option<i64>, t: i64| Cond {
-        name,
-        value: v,
-        op: ">=",
-        threshold: t,
-        pass: v.is_some_and(|v| v >= t),
-    };
-    let le = |name, v: Option<i64>, t: i64| Cond {
-        name,
-        value: v,
-        op: "<=",
-        threshold: t,
-        pass: v.is_some_and(|v| v <= t),
-    };
-    vec![
-        ge(
-            "impulse (permille of the low)",
-            Some(impulse),
-            p.min_impulse_permille,
-        ),
-        ge(
-            "seconds since the high",
-            Some(i64::from(f.secs_since_high)),
-            i64::from(p.min_pullback_secs),
-        ),
-        le(
-            "pullback depth (permille)",
-            Some(f.depth_permille),
-            p.max_depth_permille,
-        ),
-        le(
-            "pullback volume rate vs impulse (permille)",
-            f.volume_ratio_permille.map(|v| v as i64),
-            p.max_volume_ratio_permille as i64,
-        ),
-        ge(
-            "pullback depth, at least (permille)",
-            Some(f.depth_permille),
-            p.min_depth_permille,
-        ),
-        le(
-            "retrace from the high now (permille)",
-            Some(f.retrace_now_permille),
-            p.max_retrace_now_permille,
-        ),
-        ge(
-            "higher lows",
-            Some(i64::from(f.higher_lows)),
-            i64::from(p.min_higher_lows),
-        ),
-        ge(
-            "bid support (permille)",
-            f.bid_support_permille.map(i64::from),
-            i64::from(p.min_bid_support_permille),
-        ),
-    ]
 }
 
 fn write_features(w: &mut W, f: &tf_engine::PullbackFeatures) {
@@ -167,19 +97,27 @@ fn write_features(w: &mut W, f: &tf_engine::PullbackFeatures) {
     ));
 }
 
-fn write_conditions(w: &mut W, conds: &[Cond]) {
+fn write_evaluations(w: &mut W, evals: &[Evaluation]) {
     w.raw("[");
-    for (k, c) in conds.iter().enumerate() {
+    for (k, e) in evals.iter().enumerate() {
         if k > 0 {
             w.raw(",");
         }
+        let param = e
+            .condition
+            .threshold
+            .param_name()
+            .map_or("null".to_owned(), |n| format!("\"{}\"", esc(n)));
         w.f(format_args!(
-            "{{\"name\":\"{}\",\"value\":{},\"op\":\"{}\",\"threshold\":{},\"pass\":{}}}",
-            esc(c.name),
-            opt(c.value),
-            c.op,
-            c.threshold,
-            c.pass
+            "{{\"stage\":\"{}\",\"mode\":\"{}\",\"feature\":\"{}\",\"value\":{},\"op\":\"{}\",\"threshold\":{},\"param\":{},\"pass\":{}}}",
+            e.stage.name(),
+            if e.mode == Mode::All { "all" } else { "any" },
+            e.condition.feature.name(),
+            opt(e.value),
+            e.condition.cmp.symbol(),
+            e.limit,
+            param,
+            e.pass
         ));
     }
     w.raw("]");
@@ -297,6 +235,13 @@ pub fn export_json(
         px((p.entry_notional.min(i64::MAX as u128)) as i64),
     ));
 
+    let rules = cfg.rules.clone().unwrap_or_else(RuleSet::momentum);
+    w.f(format_args!(
+        "\"rules\":{{\"id\":\"{:016x}\",\"text\":\"{}\"}},",
+        rules.fingerprint(),
+        esc(&rules.render()),
+    ));
+
     // Instruments.
     w.raw("\"instruments\":[");
     for (k, &id) in shown.iter().enumerate() {
@@ -407,10 +352,7 @@ pub fn export_json(
             ));
             write_features(&mut w, &d.features);
             w.raw(",\"conditions\":");
-            write_conditions(
-                &mut w,
-                &conditions(&d.features, d.impulse_permille, &d.params),
-            );
+            write_evaluations(&mut w, &d.evaluations);
             w.raw("}");
         }
         w.raw("]}");
@@ -531,10 +473,7 @@ pub fn export_json(
                 ));
                 write_features(&mut w, &e.features);
                 w.raw(",\"conditions\":");
-                write_conditions(
-                    &mut w,
-                    &conditions(&e.features, e.impulse_permille, &e.params),
-                );
+                write_evaluations(&mut w, &e.evaluations);
                 w.raw("}");
             }
             None => w.raw("null"),

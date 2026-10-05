@@ -39,3 +39,4 @@ How:
 | [0020](0020-parameter-changes-are-bounded-events-that-apply-to-new-entries-only.md) | Parameter changes are bounded events that apply to new entries only | Accepted |
 | [0021](0021-a-fixed-parameter-shadow-runs-beside-every-tuned-strategy.md) | A fixed-parameter shadow runs beside every tuned strategy | Accepted |
 | [0022](0022-the-safety-policy-returns-a-losing-tuned-side-to-baseline.md) | The safety policy returns a losing tuned side to baseline | Accepted |
+| [0023](0023-the-scanner-scores-volume-against-each-symbols-own-baseline.md) | The scanner scores volume against each symbol's own baseline | Accepted |

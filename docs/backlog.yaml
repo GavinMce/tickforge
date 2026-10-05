@@ -430,7 +430,8 @@ epics:
       - id: E07-S04
         jira: TIC-58
         title: Scanner (volume z-score and price spike with universe filters)
-        status: todo
+        status: done
+        evidence: crates/tf-engine/src/scanner.rs (Scanner, ScannerConfig, Hit); 12 integration tests in tests/scanner.rs: every runner/halt-up/squeeze/multi-spike scenario detected within 3 s of its catalyst and never early, 400-symbol universes with no hit on a quiet name and no missed runner, zero hits in 200 quiet symbol-hours (and dozens with the gates relaxed); 12 mutations caught; ADR 0023. Float comes from a caller-filled table until E14-S01 supplies a source
         deps: [E07-S01, E07-S02, E14-S01]
         ac:
           - Detects every synthetic runner scenario with zero false negatives and a measured false-positive rate on quiet symbols

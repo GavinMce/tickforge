@@ -161,6 +161,17 @@ impl RollingBars {
         self.slot(self.cur.checked_sub(n as u64)?)
     }
 
+    /// Shares traded in the `secs` seconds ending at second `now_sec`, which may be later
+    /// than this symbol's last trade: a symbol that has stopped trading shows the quiet it
+    /// has had, not the busy second it last saw.
+    pub fn volume_asof(&self, now_sec: u64, secs: usize) -> u64 {
+        let k = secs.min(WINDOW_SECS) as u64;
+        (now_sec.saturating_add(1).saturating_sub(k)..=now_sec)
+            .filter_map(|s| self.slot(s))
+            .map(|b| b.volume)
+            .sum()
+    }
+
     /// Shares traded in the last `secs` seconds.
     pub fn volume(&self, secs: usize) -> u64 {
         self.window(secs).map(|b| b.volume).sum()

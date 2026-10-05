@@ -11,6 +11,7 @@ mod bars;
 mod ewma;
 mod indicators;
 mod mtf;
+mod promoter;
 mod scanner;
 mod tier0;
 mod tier1;
@@ -21,6 +22,7 @@ pub use indicators::{
     Atr, Ema, Extremes, OpeningRange, RateOfChange, RollingVwap, Rsi, Seed, Sma, Vwap,
 };
 pub use mtf::{BAR_DEPTH, BarClose, MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe, TrackError};
+pub use promoter::{Promoter, PromoterConfig, PromoterError, TierError, reason as tier_reason};
 pub use scanner::{BASE_SECS, Hit, Scanner, ScannerConfig, ScannerError};
 pub use tier0::{Level, SymbolState, Tier0};
 pub use tier1::{

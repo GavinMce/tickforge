@@ -17,7 +17,7 @@ pub use clock::{Clock, SimClock, SystemClock};
 pub use encode::{DecodeError, Decoder, SCHEMA_VERSION};
 pub use event::{
     CancelError, CancelErrorKind, Correction, Event, EventKind, Header, News, ParamChange,
-    ParamScope, Quote, Status, StatusKind, Trade, TradeFlags,
+    ParamScope, Quote, Status, StatusKind, TierAction, TierChange, Trade, TradeFlags,
 };
 pub use hash::Fnv1a64;
 pub use ids::{InstrumentId, Nanos, ProviderId, SymbolTable};

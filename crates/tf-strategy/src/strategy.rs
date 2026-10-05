@@ -27,7 +27,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tf_core::{Event, InstrumentId, Nanos};
 use tf_engine::{
-    BarClose, MtfBars, RollingBars, SymbolBars, SymbolState, TfBar, Tier0, Timeframe, TrackError,
+    BarClose, MtfBars, Promoter, RollingBars, SymbolBars, SymbolState, TfBar, Tier0, Tier1Symbol,
+    Timeframe, TrackError,
 };
 use tf_params::ParamStore;
 
@@ -98,6 +99,7 @@ pub struct Ctx<'a> {
     timers: &'a mut Timers,
     bars: &'a mut Option<MtfBars>,
     params: &'a Option<ParamStore>,
+    promoter: &'a mut Option<Promoter>,
 }
 
 /// Why a request about multi-timeframe bars failed.
@@ -122,6 +124,31 @@ impl Ctx<'_> {
     /// Rolling windows and one-second bars for an instrument.
     pub fn windows(&self, id: InstrumentId) -> Option<&RollingBars> {
         self.tier0.windows(id)
+    }
+
+    /// Tier 1 state (rings and pullback features) of `id`, if the host has a promoter and
+    /// the symbol is promoted ([`Host::with_promoter`]).
+    pub fn tier1(&self, id: InstrumentId) -> Option<&Tier1Symbol> {
+        self.promoter.as_ref()?.symbol(id)
+    }
+
+    /// Whether `id` is in Tier 1.
+    pub fn is_promoted(&self, id: InstrumentId) -> bool {
+        self.promoter.as_ref().is_some_and(|p| p.is_promoted(id))
+    }
+
+    /// Keep `id` in Tier 1 while the strategy holds a position in it: a pinned symbol is
+    /// never demoted. Release it with [`Ctx::unpin_tier1`] when the position is closed.
+    pub fn pin_tier1(&mut self, id: InstrumentId) {
+        if let Some(p) = self.promoter.as_mut() {
+            p.pin(id);
+        }
+    }
+
+    pub fn unpin_tier1(&mut self, id: InstrumentId) {
+        if let Some(p) = self.promoter.as_mut() {
+            p.unpin(id);
+        }
     }
 
     /// The parameter store, if the host has one ([`Host::with_params`]). Changes arrive as
@@ -250,6 +277,8 @@ pub struct Host<S: Strategy> {
     closes: Vec<BarClose>,
     params: Option<ParamStore>,
     param_errors: u64,
+    promoter: Option<Promoter>,
+    tier_events: Vec<tf_core::TierChange>,
 }
 
 impl<S: Strategy> Host<S> {
@@ -268,7 +297,27 @@ impl<S: Strategy> Host<S> {
             closes: Vec::new(),
             params: None,
             param_errors: 0,
+            promoter: None,
+            tier_events: Vec::new(),
         }
+    }
+
+    /// Give the host a promoter: the scanner's hits move symbols into Tier 1 (and back),
+    /// strategies read promoted symbols through [`Ctx::tier1`], and every move is a
+    /// `TierChange` event to collect with [`Host::drain_tier_events`]. A promoter built with
+    /// [`Promoter::follower`] instead applies `TierChange` events found in the stream.
+    pub fn with_promoter(mut self, promoter: Promoter) -> Self {
+        self.promoter = Some(promoter);
+        self
+    }
+
+    pub fn promoter(&self) -> Option<&Promoter> {
+        self.promoter.as_ref()
+    }
+
+    /// The tier changes made since the last call, in order: what to write to the tape.
+    pub fn drain_tier_events(&mut self) -> Vec<tf_core::TierChange> {
+        std::mem::take(&mut self.tier_events)
     }
 
     /// Give the strategy a parameter store. [`Event::ParamChange`] events in the stream are
@@ -306,6 +355,7 @@ impl<S: Strategy> Host<S> {
             timers: &mut self.timers,
             bars: &mut self.bars,
             params: &self.params,
+            promoter: &mut self.promoter,
         };
         f(&mut self.strategy, &mut ctx)
     }
@@ -334,6 +384,9 @@ impl<S: Strategy> Host<S> {
         let ts = ev.ts_recv();
         self.fire_timers(ts);
         self.tier0.on_event(ev);
+        if let Some(p) = &mut self.promoter {
+            p.on_event(&self.tier0, ev, &mut self.tier_events);
+        }
         self.now = self.now.max(ts);
         let now = self.now;
         if let (Some(store), Event::ParamChange(c)) = (&mut self.params, ev) {

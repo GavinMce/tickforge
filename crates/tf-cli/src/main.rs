@@ -210,6 +210,10 @@ fn synth(args: &[String]) -> Result<(), String> {
                     "{:>16} param #{} -> {} ({:?}, proposer {}, reason {}, evidence {:#x})",
                     p.hdr.ts_recv, p.param, p.new_value, p.scope, p.proposer, p.reason, p.evidence
                 ),
+                Event::TierChange(t) => println!(
+                    "{:>16} {name} tier {:?} (reason {}, score {})",
+                    t.hdr.ts_recv, t.action, t.reason, t.score
+                ),
             }
         }
         println!();

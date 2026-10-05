@@ -748,3 +748,190 @@ mod bars {
         );
     }
 }
+
+// ---- tier promotion ----
+
+mod tiers {
+    use super::*;
+    use tf_core::{InstrumentId, Quote, TierAction};
+    use tf_engine::{Promoter, PromoterConfig, ScannerConfig};
+
+    const T0: Nanos = 1_767_571_200 * SEC;
+
+    fn quote(inst: u32, ts: Nanos, cents: i64) -> Event {
+        Event::Quote(Quote {
+            hdr: Header {
+                ts_event: ts,
+                ts_recv: ts,
+                seq: ts,
+                instrument: inst,
+                provider: ProviderId::Synthetic,
+            },
+            bid_px: Px::from_cents(cents - 1),
+            ask_px: Px::from_cents(cents + 1),
+            bid_sz: 100,
+            ask_sz: 100,
+        })
+    }
+
+    /// 120 s steady, a 10 s burst (20x volume, +8%), then `quiet` s steady.
+    fn session(quiet: u64) -> Vec<Event> {
+        let mut v = Vec::new();
+        for s in 0..(130 + quiet) {
+            let (size, cents) = match s {
+                0..=119 => (1_000, 500),
+                120..=129 => (20_000, 540),
+                _ => (1_000, 540),
+            };
+            v.push(quote(0, T0 + s * SEC, cents));
+            v.push(trade(0, T0 + s * SEC + SEC / 2, cents, size));
+        }
+        v
+    }
+
+    fn promoter() -> Promoter {
+        Promoter::new(
+            PromoterConfig::default(),
+            ScannerConfig {
+                min_volume: 1_000,
+                ..ScannerConfig::default()
+            },
+            1,
+        )
+        .unwrap()
+    }
+
+    #[derive(Default)]
+    struct Tierwatch {
+        /// (seconds in, promoted, has tier 1 state) at each trade
+        seen: Vec<(u64, bool, bool)>,
+        tier_events_seen: u32,
+        pin_when_promoted: bool,
+        unpin_after: Option<u64>,
+    }
+
+    impl Strategy for Tierwatch {
+        fn id(&self) -> StrategyId {
+            StrategyId(8)
+        }
+        fn on_event(&mut self, ctx: &mut Ctx<'_>, ev: &Event) {
+            if matches!(ev, Event::TierChange(_)) {
+                self.tier_events_seen += 1;
+            }
+            let Event::Trade(_) = ev else { return };
+            let i: InstrumentId = ev.instrument();
+            let secs = (ev.ts_recv() - T0) / SEC;
+            self.seen
+                .push((secs, ctx.is_promoted(i), ctx.tier1(i).is_some()));
+            if self.pin_when_promoted && ctx.is_promoted(i) {
+                ctx.pin_tier1(i);
+            }
+            if self.unpin_after.is_some_and(|t| secs >= t) {
+                ctx.unpin_tier1(i);
+            }
+        }
+        fn on_timer(&mut self, _: &mut Ctx<'_>, _: TimerId) {}
+    }
+
+    fn host(w: Tierwatch) -> Host<Tierwatch> {
+        Host::new(w, 1).with_promoter(promoter())
+    }
+
+    #[test]
+    fn strategies_see_a_symbol_enter_and_leave_tier_one_and_the_changes_are_collected() {
+        let mut h = host(Tierwatch::default());
+        for e in session(300) {
+            h.on_event(&e);
+        }
+        let seen = &h.strategy().seen;
+        assert!(
+            seen.iter().take_while(|s| s.0 < 120).all(|s| !s.1 && !s.2),
+            "nothing before the burst"
+        );
+        assert!(
+            seen.iter().any(|s| s.0 >= 123 && s.0 < 200 && s.1 && s.2),
+            "promoted, with Tier 1 state"
+        );
+        assert!(
+            seen.iter().rev().take(10).all(|s| !s.1 && !s.2),
+            "gone again by the end"
+        );
+        let events = h.drain_tier_events();
+        assert_eq!(
+            events.iter().map(|c| c.action).collect::<Vec<_>>(),
+            [TierAction::Promote, TierAction::Demote]
+        );
+        assert!(events[0].hdr.ts_recv < events[1].hdr.ts_recv && events[0].hdr.instrument == 0);
+        assert!(h.drain_tier_events().is_empty(), "drained");
+        assert_eq!(
+            h.strategy().tier_events_seen,
+            0,
+            "decisions are for the tape; the strategy sees them only when they are in its input"
+        );
+    }
+
+    #[test]
+    fn a_strategy_can_pin_a_symbol_it_holds_and_release_it() {
+        let mut h = host(Tierwatch {
+            pin_when_promoted: true,
+            unpin_after: Some(300),
+            ..Tierwatch::default()
+        });
+        for e in session(400) {
+            h.on_event(&e);
+        }
+        let events = h.drain_tier_events();
+        let demote = events
+            .iter()
+            .find(|c| c.action == TierAction::Demote)
+            .expect("released, so demoted");
+        let at = (demote.hdr.ts_recv - T0) / SEC;
+        // Unpinned at 300 s; left alone it would have gone at about 258 s.
+        assert!((300..=302).contains(&at), "demoted at {at} s");
+    }
+
+    #[test]
+    fn a_following_host_is_driven_by_the_tier_changes_in_its_stream() {
+        let mut live = host(Tierwatch::default());
+        let mut tape = Vec::new();
+        for e in session(300) {
+            live.on_event(&e);
+            // A decision goes on the tape just before the event that caused it.
+            tape.extend(live.drain_tier_events().into_iter().map(Event::TierChange));
+            tape.push(e);
+        }
+        let mut follower =
+            Host::new(Tierwatch::default(), 1).with_promoter(Promoter::follower(50, 1));
+        for e in &tape {
+            follower.on_event(e);
+        }
+        assert_eq!(
+            follower.strategy().seen,
+            live.strategy().seen,
+            "it sees the same tiers at the same moments"
+        );
+        assert_eq!(
+            follower.strategy().tier_events_seen,
+            2,
+            "and sees the events themselves"
+        );
+        assert!(follower.drain_tier_events().is_empty());
+    }
+
+    #[test]
+    fn without_a_promoter_nothing_is_promoted_and_pins_are_harmless() {
+        let mut h = Host::new(
+            Tierwatch {
+                pin_when_promoted: true,
+                unpin_after: Some(0),
+                ..Tierwatch::default()
+            },
+            1,
+        );
+        for e in session(10) {
+            h.on_event(&e);
+        }
+        assert!(h.strategy().seen.iter().all(|s| !s.1 && !s.2));
+        assert!(h.promoter().is_none() && h.drain_tier_events().is_empty());
+    }
+}

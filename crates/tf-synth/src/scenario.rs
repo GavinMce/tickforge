@@ -19,6 +19,19 @@ pub struct Phase {
     pub size_permille: u32,
     /// Quoted spread, in cents.
     pub spread_cents: u32,
+    /// Trading halt. `TradingHalt` is emitted when the phase starts, nothing
+    /// trades or quotes until it ends, and `TradingResume` is emitted when the
+    /// next phase starts. The rate, direction, size and spread fields are
+    /// ignored.
+    pub halted: bool,
+    /// On entering the phase the price jumps by this many permille of the
+    /// current price (negative is down), with no trades in between. After a
+    /// halt this is the reopening gap.
+    pub gap_permille: i32,
+    /// LULD band half-width as permille of the price when the phase is
+    /// entered (0 is no band). A `LuldBand` status is emitted on entry and
+    /// trades are held inside the band, so a hot impulse pins at the limit.
+    pub luld_permille: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,19 +46,33 @@ pub enum PullbackKind {
 pub struct Scenario {
     pub name: &'static str,
     pub phases: Vec<Phase>,
+    /// Emit `ShortSaleRestriction` the first time the price trades 10% or more
+    /// below its starting price (the prior close), as the SSR rule does.
+    pub ssr: bool,
 }
 
 const FOREVER: Nanos = Nanos::MAX;
+
+/// An unbiased random walk with every special behaviour off. Phases fill in
+/// what differs with `..BASE`, so a new knob defaults to off everywhere.
+const BASE: Phase = Phase {
+    name: "",
+    duration: 0,
+    rate_permille: 1000,
+    up_permille: 500,
+    max_step_cents: 1,
+    size_permille: 1000,
+    spread_cents: 2,
+    halted: false,
+    gap_permille: 0,
+    luld_permille: 0,
+};
 
 fn quiet_phase(name: &'static str, duration: Nanos) -> Phase {
     Phase {
         name,
         duration,
-        rate_permille: 1000,
-        up_permille: 500,
-        max_step_cents: 1,
-        size_permille: 1000,
-        spread_cents: 2,
+        ..BASE
     }
 }
 
@@ -55,6 +82,7 @@ impl Scenario {
         Scenario {
             name: "quiet",
             phases: vec![quiet_phase("quiet", FOREVER)],
+            ssr: false,
         }
     }
 
@@ -70,6 +98,7 @@ impl Scenario {
             max_step_cents: 3,
             size_permille: 4000,
             spread_cents: 2,
+            ..BASE
         };
         let phases = match kind {
             PullbackKind::Healthy => vec![
@@ -83,6 +112,7 @@ impl Scenario {
                     max_step_cents: 2,
                     size_permille: 1000,
                     spread_cents: 2,
+                    ..BASE
                 },
                 Phase {
                     name: "continuation",
@@ -92,6 +122,7 @@ impl Scenario {
                     max_step_cents: 2,
                     size_permille: 3000,
                     spread_cents: 2,
+                    ..BASE
                 },
                 quiet_phase("after", FOREVER),
             ],
@@ -106,6 +137,7 @@ impl Scenario {
                     max_step_cents: 3,
                     size_permille: 3000,
                     spread_cents: 4,
+                    ..BASE
                 },
                 Phase {
                     name: "fade",
@@ -115,6 +147,7 @@ impl Scenario {
                     max_step_cents: 2,
                     size_permille: 2000,
                     spread_cents: 3,
+                    ..BASE
                 },
                 quiet_phase("after", FOREVER),
             ],
@@ -125,6 +158,7 @@ impl Scenario {
                 PullbackKind::Dangerous => "runner_dangerous_pullback",
             },
             phases,
+            ssr: false,
         }
     }
 }

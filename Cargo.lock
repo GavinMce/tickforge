@@ -138,6 +138,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-strategy"
+version = "0.1.0"
+dependencies = [
+ "tf-core",
+ "tf-synth",
+]
+
+[[package]]
 name = "tf-synth"
 version = "0.1.0"
 dependencies = [

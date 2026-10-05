@@ -1,0 +1,17 @@
+[package]
+name = "tf-strategy"
+description = "Strategy framework: intents, the order lifecycle and (next) the strategy trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+
+[dev-dependencies]
+tf-synth.workspace = true

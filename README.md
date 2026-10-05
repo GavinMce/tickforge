@@ -35,6 +35,7 @@ the generator is a deliberate, reviewed change.
 | `tf-engine` | Hot-engine building blocks: `Tier0` per-symbol state arrays, allocation-free one-second bars and 1s/5s/60s rolling windows, EWMA baselines |
 | `tf-bench` | Throughput and p50/p99/p99.9 latency benchmarks for the run loop (`tf bench`), results as JSON lines per commit |
 | `tf-manifest` | Run manifests (git sha, seed, config, params hash, data range) and results stored under the manifest's SHA-256, so reruns are skipped |
+| `tf-strategy` | Strategy framework: `Intent` (side, size, limit/collar, protective orders, with validation) and the order lifecycle (`OrderState`, `Order`, `Decision`, `RejectReason`) |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |
 | `tf-cli` | `tf` binary |
 

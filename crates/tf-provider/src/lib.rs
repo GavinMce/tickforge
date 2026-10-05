@@ -123,6 +123,9 @@ pub enum ProviderError {
     },
     NotConnected,
     Unsupported(&'static str),
+    /// The underlying source failed in a way retrying will not fix (for example
+    /// a damaged tape). Not transient: a run should stop and report it.
+    Source(String),
 }
 
 impl fmt::Display for ProviderError {
@@ -139,6 +142,7 @@ impl fmt::Display for ProviderError {
             }
             ProviderError::NotConnected => write!(f, "not connected"),
             ProviderError::Unsupported(what) => write!(f, "unsupported: {what}"),
+            ProviderError::Source(what) => write!(f, "source failed: {what}"),
         }
     }
 }

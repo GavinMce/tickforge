@@ -23,3 +23,4 @@ How:
 | [0004](0004-versioned-event-encoding.md) | Versioned event encoding and event identity | Accepted |
 | [0005](0005-security-master-identity.md) | Security master: stable ids, dated tickers, dated provider keys | Accepted |
 | [0006](0006-raw-tape-format.md) | Raw tape format and the zstd dependency | Accepted |
+| [0007](0007-paced-replay-waits-inside-poll.md) | Paced replay waits inside `poll`, on an injected pacer | Accepted |

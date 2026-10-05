@@ -121,6 +121,8 @@ name = "tf-tape"
 version = "0.1.0"
 dependencies = [
  "tf-core",
+ "tf-provider",
+ "tf-replay",
  "tf-synth",
  "zstd",
 ]

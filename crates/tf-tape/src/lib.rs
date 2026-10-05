@@ -25,6 +25,10 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use tf_core::{DecodeError, Event, SCHEMA_VERSION};
 
+pub mod replay;
+
+#[cfg(test)]
+mod replay_tests;
 #[cfg(test)]
 mod tests;
 
@@ -364,18 +368,63 @@ impl<R: Read + Seek> TapeReader<R> {
         self.blocks_loaded
     }
 
-    /// Iterate events with `ts_recv >= from`, in order. Finding the start is a
-    /// binary search over the index; only blocks that are reached are read.
-    pub fn scan(&mut self, from: u64) -> Scan<'_, R> {
-        let next_block = self.index.partition_point(|b| b.last_recv < from);
-        Scan {
-            reader: self,
-            next_block,
+    /// A position at the first event with `ts_recv >= from`. Finding it is a
+    /// binary search over the index; no block is read until an event is asked for.
+    pub fn cursor(&self, from: u64) -> Cursor {
+        Cursor {
+            next_block: self.index.partition_point(|b| b.last_recv < from),
             raw: Vec::new(),
             pos: 0,
             left: 0,
             from,
+        }
+    }
+
+    /// Iterate events with `ts_recv >= from`, in order. Only blocks that are
+    /// reached are read.
+    pub fn scan(&mut self, from: u64) -> Scan<'_, R> {
+        let cursor = self.cursor(from);
+        Scan {
+            reader: self,
+            cursor,
             done: false,
+        }
+    }
+
+    /// The next event at the cursor, or `None` at the end of the tape. After an
+    /// error the cursor is not usable.
+    pub fn next_event(&mut self, cur: &mut Cursor) -> Result<Option<Event>, Error> {
+        loop {
+            if cur.left == 0 {
+                if cur.next_block >= self.index.len() {
+                    return Ok(None);
+                }
+                let (raw, n) = self.load_block(cur.next_block)?;
+                cur.next_block += 1;
+                (cur.raw, cur.pos, cur.left) = (raw, 0, n);
+            }
+            let rest = &cur.raw[cur.pos..];
+            if rest.len() < 2 {
+                return Err(Error::Corrupt("block ends inside a length prefix"));
+            }
+            let len = usize::from(le_u16(&rest[..2]));
+            let body = rest
+                .get(2..2 + len)
+                .ok_or(Error::Corrupt("event runs past its block"))?;
+            let (ev, used) = Event::decode_versioned(self.schema, body)?;
+            if used != len {
+                return Err(Error::Corrupt(
+                    "event length prefix disagrees with its encoding",
+                ));
+            }
+            cur.pos += 2 + len;
+            cur.left -= 1;
+            if cur.left == 0 && cur.pos != cur.raw.len() {
+                return Err(Error::Corrupt("block has bytes after its last event"));
+            }
+            if ev.ts_recv() >= cur.from {
+                return Ok(Some(ev));
+            }
         }
     }
 
@@ -411,53 +460,23 @@ impl<R: Read + Seek> TapeReader<R> {
     }
 }
 
-/// Iterator over a tape's events from a point in time; see [`TapeReader::scan`].
-/// After an error it yields nothing more.
-pub struct Scan<'a, R> {
-    reader: &'a mut TapeReader<R>,
+/// A position in a tape, separate from the reader so it can be kept alongside
+/// it (an iterator that borrows the reader cannot be). See [`TapeReader::cursor`].
+#[derive(Debug)]
+pub struct Cursor {
     next_block: usize,
     raw: Vec<u8>,
     pos: usize,
     left: u32,
     from: u64,
-    done: bool,
 }
 
-impl<R: Read + Seek> Scan<'_, R> {
-    fn step(&mut self) -> Result<Option<Event>, Error> {
-        loop {
-            if self.left == 0 {
-                if self.next_block >= self.reader.index.len() {
-                    return Ok(None);
-                }
-                let (raw, n) = self.reader.load_block(self.next_block)?;
-                self.next_block += 1;
-                (self.raw, self.pos, self.left) = (raw, 0, n);
-            }
-            let rest = &self.raw[self.pos..];
-            if rest.len() < 2 {
-                return Err(Error::Corrupt("block ends inside a length prefix"));
-            }
-            let len = usize::from(le_u16(&rest[..2]));
-            let body = rest
-                .get(2..2 + len)
-                .ok_or(Error::Corrupt("event runs past its block"))?;
-            let (ev, used) = Event::decode_versioned(self.reader.schema, body)?;
-            if used != len {
-                return Err(Error::Corrupt(
-                    "event length prefix disagrees with its encoding",
-                ));
-            }
-            self.pos += 2 + len;
-            self.left -= 1;
-            if self.left == 0 && self.pos != self.raw.len() {
-                return Err(Error::Corrupt("block has bytes after its last event"));
-            }
-            if ev.ts_recv() >= self.from {
-                return Ok(Some(ev));
-            }
-        }
-    }
+/// Iterator over a tape's events from a point in time; see [`TapeReader::scan`].
+/// After an error it yields nothing more.
+pub struct Scan<'a, R> {
+    reader: &'a mut TapeReader<R>,
+    cursor: Cursor,
+    done: bool,
 }
 
 impl<R: Read + Seek> Iterator for Scan<'_, R> {
@@ -467,7 +486,7 @@ impl<R: Read + Seek> Iterator for Scan<'_, R> {
         if self.done {
             return None;
         }
-        match self.step() {
+        match self.reader.next_event(&mut self.cursor) {
             Ok(Some(ev)) => Some(Ok(ev)),
             Ok(None) => {
                 self.done = true;

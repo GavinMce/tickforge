@@ -221,7 +221,8 @@ epics:
       - id: E03-S06
         jira: TIC-37
         title: Cross-platform determinism gate
-        status: todo
+        status: done
+        evidence: .github/workflows/ci.yml (job `determinism`, x86_64 + aarch64); `determinism (x86_64)` and `determinism (aarch64)` are required statuses on main
         deps: [E01-S05]
         ac:
           - CI runs the golden-hash tests on x86_64 and aarch64 Linux

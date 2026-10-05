@@ -445,7 +445,8 @@ epics:
       - id: E07-S06
         jira: TIC-60
         title: Tier 1 rings and pullback features
-        status: todo
+        status: done
+        evidence: crates/tf-engine/src/tier1.rs (Tier1Symbol rings and 1 s bars, PullbackFeatures, bounded Tier1); worked example to the figure, healthy vs dangerous synthetic runner, pinned features hash, 16 mutations caught (two test gaps found and closed); ADR 0014. Promotion policy is E07-S05, so nothing promotes symbols automatically yet
         deps: [E07-S05]
         ac:
           - Tick/quote rings plus pullback depth, higher-low structure, tape speed and spread features

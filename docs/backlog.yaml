@@ -473,7 +473,8 @@ epics:
       - id: E08-S01
         jira: TIC-63
         title: Strategy trait (events and timers in, intents out)
-        status: todo
+        status: done
+        evidence: crates/tf-strategy/src/strategy.rs (Strategy, Ctx, Host), clippy.toml ban list (verified by injecting SystemTime, Instant, fs and HashMap), 27 tests in strategy_tests.rs; ADR 0010
         deps: [E07-S01]
         ac:
           - No wall clock and no I/O available to strategy code

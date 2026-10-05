@@ -33,6 +33,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-secmaster"
+version = "0.1.0"
+dependencies = [
+ "tf-core",
+]
+
+[[package]]
 name = "tf-synth"
 version = "0.1.0"
 dependencies = [

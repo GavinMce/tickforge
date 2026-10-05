@@ -21,3 +21,4 @@ How:
 | [0002](0002-no-redis-on-the-hot-path.md) | No Redis on the hot path | Accepted |
 | [0003](0003-determinism-rules.md) | Determinism rules | Accepted |
 | [0004](0004-versioned-event-encoding.md) | Versioned event encoding and event identity | Accepted |
+| [0005](0005-security-master-identity.md) | Security master: stable ids, dated tickers, dated provider keys | Accepted |

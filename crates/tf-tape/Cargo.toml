@@ -1,0 +1,18 @@
+[package]
+name = "tf-tape"
+description = "Raw tape: compressed, indexed, seekable storage of canonical events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+zstd = "0.13"
+
+[dev-dependencies]
+tf-synth.workspace = true

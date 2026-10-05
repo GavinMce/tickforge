@@ -22,3 +22,4 @@ How:
 | [0003](0003-determinism-rules.md) | Determinism rules | Accepted |
 | [0004](0004-versioned-event-encoding.md) | Versioned event encoding and event identity | Accepted |
 | [0005](0005-security-master-identity.md) | Security master: stable ids, dated tickers, dated provider keys | Accepted |
+| [0006](0006-raw-tape-format.md) | Raw tape format and the zstd dependency | Accepted |

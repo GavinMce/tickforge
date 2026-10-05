@@ -132,7 +132,8 @@ epics:
       - id: E02-S04
         jira: TIC-27
         title: Scenario library v2 (halt-up, LULD, SSR, squeeze, gap-and-go, multi-spike)
-        status: todo
+        status: done
+        evidence: crates/tf-synth/src/{scenario,symbol_gen}.rs; a behavior test and a golden_stream_hash_<name> test per scenario in tests.rs (goldens also run on aarch64)
         deps: [E01-S02]
         ac:
           - Each scenario emits the matching Status events and price/volume behaviour

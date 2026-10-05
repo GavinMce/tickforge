@@ -27,7 +27,7 @@ the generator is a deliberate, reviewed change.
 |---|---|
 | `tf-core` | Canonical `Event` (Trade/Quote/Status, plus Correction/CancelError/News), fixed-point `Px`, `Clock`/`SimClock`, stable versioned binary encoding, FNV hash |
 | `tf-provider` | `Provider` trait, `Capabilities`, `Subscription`, `ProviderError`, `Poll` contract |
-| `tf-synth` | Deterministic synthetic provider: runner, halt-up, LULD, SSR, squeeze, gap-and-go and multi-spike scenarios, connection/symbol limits, drops, dups, reordering, replay |
+| `tf-synth` | Deterministic synthetic provider: runner, halt-up, LULD, SSR, squeeze, gap-and-go and multi-spike scenarios, scripted news with a lead or lag, connection/symbol limits, drops, dups, reordering, replay |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |
 | `tf-cli` | `tf` binary |
 

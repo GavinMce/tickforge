@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 
 use tf_core::{Event, InstrumentId, Nanos};
 
@@ -14,6 +14,8 @@ use crate::symbol_gen::SymbolGen;
 pub struct SynthStream {
     gens: Vec<SymbolGen>,
     heap: BinaryHeap<Reverse<(Nanos, InstrumentId)>>,
+    /// Scripted news in arrival order, merged in with the symbols' events.
+    news: VecDeque<Event>,
     seq: u64,
 }
 
@@ -31,16 +33,33 @@ impl SynthStream {
             }
             gens.push(g);
         }
-        SynthStream { gens, heap, seq: 0 }
+        let news = cfg.news_schedule().into_iter().map(|s| s.event).collect();
+        SynthStream {
+            gens,
+            heap,
+            news,
+            seq: 0,
+        }
     }
 
     pub fn next_event(&mut self) -> Option<Event> {
-        let Reverse((_, id)) = self.heap.pop()?;
-        let g = &mut self.gens[id as usize];
-        let mut ev = g.pop()?;
-        if let Some(t) = g.peek_recv() {
-            self.heap.push(Reverse((t, id)));
-        }
+        // News goes first only if it strictly beats every symbol's next event.
+        let news_first = match (self.heap.peek(), self.news.front()) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(Reverse((t, _))), Some(n)) => n.ts_recv() < *t,
+        };
+        let mut ev = if news_first {
+            self.news.pop_front()?
+        } else {
+            let Reverse((_, id)) = self.heap.pop()?;
+            let g = &mut self.gens[id as usize];
+            let ev = g.pop()?;
+            if let Some(t) = g.peek_recv() {
+                self.heap.push(Reverse((t, id)));
+            }
+            ev
+        };
         ev.hdr_mut().seq = self.seq;
         self.seq += 1;
         Some(ev)

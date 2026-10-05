@@ -480,7 +480,8 @@ epics:
       - id: E08-S02
         jira: TIC-64
         title: Intent and order-lifecycle types
-        status: todo
+        status: done
+        evidence: crates/tf-strategy/src/{intent,lifecycle}.rs; validation matrix, stop/target geometry, collar rounding and order-invariant property tests in src/tests.rs
         ac:
           - Intents carry strategy, symbol, side, size, limit/collar and protective-order parameters
       - id: E08-S03

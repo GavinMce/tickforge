@@ -610,3 +610,21 @@ fn updates_that_are_not_final_or_not_ours_change_nothing() {
     });
     assert_eq!(host.strategy().positions(), 1);
 }
+
+#[test]
+fn every_parameter_is_recorded_once_and_a_change_shows() {
+    let base = MomentumParams::default().pairs();
+    let mut names: Vec<_> = base.iter().map(|(n, _)| *n).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), base.len(), "names are unique");
+    assert_eq!(base.len(), 24);
+    let changed = with(|p| p.min_higher_lows = 0).pairs();
+    let diff: Vec<_> = base
+        .iter()
+        .zip(&changed)
+        .filter(|(a, b)| a != b)
+        .map(|(a, _)| a.0)
+        .collect();
+    assert_eq!(diff, ["min_higher_lows"]);
+}

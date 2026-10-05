@@ -15,6 +15,8 @@ task check                                   # fmt + clippy -D warnings + tests
 task synth ARGS="--symbols 5000 --secs 600"  # run a synthetic session through the run loop
 task synth ARGS="--seed 7 --symbols 20 --secs 60 --dump 10"
 task bench                                   # events/s and p50/p99/p99.9 through the run loop
+task backtest                                # Strategy 1 through the risk gateway and simulated broker, with the report
+task backtest ARGS="--higher-lows 0 --daily-loss 20"  # see the gateway refuse entries after a loss
 task synth ARGS="--store results"            # keep the result keyed by its manifest; a rerun is skipped
 ```
 
@@ -37,6 +39,7 @@ the generator is a deliberate, reviewed change.
 | `tf-manifest` | Run manifests (git sha, seed, config, params hash, data range) and results stored under the manifest's SHA-256, so reruns are skipped |
 | `tf-strategy` | Strategy framework: `Intent` (side, size, limit/collar, protective orders, with validation) the order lifecycle (`OrderState`, `Order`, `Decision`, `RejectReason`), and the `Strategy` trait with its `Host` (timers, event-time `Ctx`; a clippy ban list keeps wall clocks and I/O out), `SimBroker` (backtest fills against recorded quotes with latency, slippage and borrow cost) `Report` (P&L, drawdown, slippage, hit rate, per-scenario breakdown) and `MomentumLong` (Strategy 1, long side) |
 | `tf-risk` | Risk gateway: caps, daily loss, order rate, kill switch; explicit audited rejections; limits fixed at construction |
+| `tf-backtest` | The backtest loop: strategy -> risk gateway -> simulated broker -> report, plus a synthetic demo session |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |
 | `tf-cli` | `tf` binary |
 

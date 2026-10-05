@@ -38,6 +38,11 @@ tasks:
     cmds:
       - '{{.CARGO}} run --release --quiet --bin tf -- synth {{.ARGS}}'
 
+  backtest:
+    desc: "Strategy 1 over a synthetic session through the risk gateway and simulated broker (ARGS='--seed 1 --secs 400 --store results')"
+    cmds:
+      - '{{.CARGO}} run --release --quiet --bin tf -- backtest {{.ARGS}}'
+
   bench:
     desc: "Throughput and tail-latency benchmark (ARGS='--symbols 5000 --out bench/results.jsonl')"
     cmds:

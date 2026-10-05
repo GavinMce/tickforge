@@ -72,6 +72,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "tf-backtest"
+version = "0.1.0"
+dependencies = [
+ "tf-core",
+ "tf-risk",
+ "tf-strategy",
+ "tf-synth",
+]
+
+[[package]]
 name = "tf-bench"
 version = "0.1.0"
 dependencies = [
@@ -87,11 +97,14 @@ dependencies = [
 name = "tf-cli"
 version = "0.1.0"
 dependencies = [
+ "tf-backtest",
  "tf-bench",
  "tf-core",
  "tf-manifest",
  "tf-provider",
  "tf-replay",
+ "tf-risk",
+ "tf-strategy",
  "tf-synth",
 ]
 

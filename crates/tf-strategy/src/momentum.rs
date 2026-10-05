@@ -125,6 +125,73 @@ impl Default for MomentumParams {
 }
 
 impl MomentumParams {
+    /// Every parameter as a name and a value, for recording in a run manifest. It
+    /// destructures the struct, so adding a field without recording it is a
+    /// compile error: a result must never be reused across different parameters.
+    pub fn pairs(&self) -> Vec<(&'static str, String)> {
+        let MomentumParams {
+            spike_secs,
+            spike_permille,
+            spike_min_volume,
+            min_price,
+            max_price,
+            max_spread_permille,
+            max_watched,
+            min_impulse_permille,
+            min_pullback_secs,
+            max_pullback_secs,
+            min_depth_permille,
+            max_depth_permille,
+            max_volume_ratio_permille,
+            max_retrace_now_permille,
+            min_higher_lows,
+            min_bid_support_permille,
+            entry_notional,
+            max_qty,
+            collar_permille,
+            stop_buffer_permille,
+            trail_permille,
+            max_hold_secs,
+            cooldown_secs,
+            max_positions,
+        } = *self;
+        vec![
+            ("spike_secs", spike_secs.to_string()),
+            ("spike_permille", spike_permille.to_string()),
+            ("spike_min_volume", spike_min_volume.to_string()),
+            ("min_price_raw", min_price.raw().to_string()),
+            ("max_price_raw", max_price.raw().to_string()),
+            ("max_spread_permille", max_spread_permille.to_string()),
+            ("max_watched", max_watched.to_string()),
+            ("min_impulse_permille", min_impulse_permille.to_string()),
+            ("min_pullback_secs", min_pullback_secs.to_string()),
+            ("max_pullback_secs", max_pullback_secs.to_string()),
+            ("min_depth_permille", min_depth_permille.to_string()),
+            ("max_depth_permille", max_depth_permille.to_string()),
+            (
+                "max_volume_ratio_permille",
+                max_volume_ratio_permille.to_string(),
+            ),
+            (
+                "max_retrace_now_permille",
+                max_retrace_now_permille.to_string(),
+            ),
+            ("min_higher_lows", min_higher_lows.to_string()),
+            (
+                "min_bid_support_permille",
+                min_bid_support_permille.to_string(),
+            ),
+            ("entry_notional_raw", entry_notional.to_string()),
+            ("max_qty", max_qty.to_string()),
+            ("collar_permille", collar_permille.to_string()),
+            ("stop_buffer_permille", stop_buffer_permille.to_string()),
+            ("trail_permille", trail_permille.to_string()),
+            ("max_hold_secs", max_hold_secs.to_string()),
+            ("cooldown_secs", cooldown_secs.to_string()),
+            ("max_positions", max_positions.to_string()),
+        ]
+    }
+
     pub fn validate(&self) -> Result<(), ParamError> {
         let bad = |m| Err(ParamError(m));
         if self.spike_secs == 0 || self.spike_secs > 60 {

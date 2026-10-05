@@ -30,3 +30,4 @@ How:
 | [0011](0011-simulated-broker-fills-against-recorded-quotes.md) | The simulated broker fills against recorded quotes, with latency | Accepted |
 | [0012](0012-risk-gateway-decides-and-limits-are-fixed.md) | The risk gateway decides every order, and its limits are fixed | Accepted |
 | [0013](0013-backtest-reports-are-integer-and-state-their-blind-spots.md) | Backtest reports are integer, comparable, and state their blind spots | Accepted |
+| [0014](0014-tier-1-state-is-bounded-and-features-are-read-on-demand.md) | Tier 1 state is bounded, and pullback features are read on demand | Accepted |

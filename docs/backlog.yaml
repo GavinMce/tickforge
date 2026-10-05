@@ -204,7 +204,8 @@ epics:
       - id: E03-S03
         jira: TIC-34
         title: Run manifest and results schema
-        status: todo
+        status: done
+        evidence: crates/tf-manifest/ (Manifest, RunResult, DirStore, in-crate SHA-256); canonical encoding pinned and cross-checked in Python; `tf synth --store`; docs/adr/0009
         ac:
           - Manifest records git sha, config, seed, params hash and data range
           - Results written as a stable schema, keyed by the manifest hash for dedupe of reruns

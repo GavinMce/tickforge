@@ -1,6 +1,6 @@
 use tf_core::Event;
 use tf_risk::{Gateway, Limits};
-use tf_strategy::{Host, MomentumLong, MomentumParams, SimBroker, StrategyId};
+use tf_strategy::{Host, MomentumLong, MomentumParams, SimBroker, StrategyId, TrendParams};
 
 use super::*;
 
@@ -307,5 +307,59 @@ fn every_strategy_parameter_error_is_reported_not_run() {
             &BacktestConfig::default()
         )
         .is_err()
+    );
+}
+
+// ---- the indicator example strategy through the same loop ----
+
+#[test]
+fn the_trend_example_runs_through_the_gateway_and_the_books_agree() {
+    let (events, labels) = demo_session_with_lead(1, 1800, 1, 0, 1, 420);
+    let r = trend_backtest(events, labels, &BacktestConfig::default()).unwrap();
+    assert_eq!(
+        (r.intents, r.accepted, r.fills),
+        (2, 2, 2),
+        "an entry and an exit"
+    );
+    assert!(r.rejections.is_empty(), "{:?}", r.rejections);
+    assert!(r.books_agree() && r.bookkeeping_errors == 0);
+    assert_eq!(r.report.by_label["healthy"].trades, 1);
+    assert_eq!(
+        r.report.by_label.get("quiet").map_or(0, |s| s.trades),
+        0,
+        "the quiet name is left alone"
+    );
+    let diff = r.gateway_pnl - r.report.total.net_pnl();
+    assert!(diff.abs() <= i128::from(r.report.total.shares));
+    assert_eq!(r.audit.len() as u64, r.intents);
+}
+
+#[test]
+fn the_trend_example_obeys_the_gateway_too() {
+    let (events, labels) = demo_session_with_lead(1, 1800, 1, 0, 0, 420);
+    let capped = trend_backtest(
+        events.clone(),
+        labels.clone(),
+        &with_limits(limits(100, 1_000, 20, 10)),
+    )
+    .unwrap();
+    assert_eq!((capped.accepted, capped.fills), (0, 0));
+    assert!(capped.rejections["max_notional"] >= 1);
+    let same = |c: &BacktestConfig| trend_backtest(events.clone(), labels.clone(), c).unwrap();
+    assert_eq!(
+        same(&BacktestConfig::default()),
+        same(&BacktestConfig::default()),
+        "reproducible"
+    );
+    let bad = BacktestConfig {
+        trend: TrendParams {
+            fast_period: 9,
+            ..TrendParams::default()
+        },
+        ..BacktestConfig::default()
+    };
+    assert!(
+        trend_backtest(events, labels, &bad).is_err(),
+        "fast >= slow is refused, not run"
     );
 }

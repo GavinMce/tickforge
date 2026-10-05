@@ -5,6 +5,7 @@
 //!
 //! - [`intent`]: what a strategy asks for, and the rules a request must satisfy.
 //! - [`lifecycle`]: the gateway's decisions and the state of an order.
+//! - [`trend`]: an example strategy on the indicator and bar APIs (EMA cross, VWAP reclaim).
 //! - [`momentum`]: Strategy 1, long side.
 //! - [`report`]: what a backtest earned, risked and paid, overall and per scenario.
 //! - [`sim`]: a simulated broker (fills against recorded quotes, latency, slippage, borrow cost).
@@ -18,6 +19,7 @@ pub mod momentum;
 pub mod report;
 pub mod sim;
 pub mod strategy;
+pub mod trend;
 
 pub use intent::{
     Intent, IntentError, IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif,
@@ -30,6 +32,7 @@ pub use report::{Report, ReportBuilder, Stats};
 pub use sim::{Fill, SimBroker, SimConfig, run_backtest, run_backtest_observed};
 pub use strategy::{BarsError, Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};
 pub use tf_engine::{MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe};
+pub use trend::{TrendLong, TrendParams, TrendStats};
 
 #[cfg(test)]
 mod momentum_tests;
@@ -41,3 +44,5 @@ mod sim_tests;
 mod strategy_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trend_tests;

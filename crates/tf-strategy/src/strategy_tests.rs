@@ -8,6 +8,10 @@ use crate::{Intent, IntentId};
 
 const SEC: Nanos = NANOS_PER_SEC;
 
+pub(crate) fn trade_for_tests(instrument: u32, ts: Nanos, cents: i64, size: u32) -> Event {
+    trade(instrument, ts, cents, size)
+}
+
 fn trade(instrument: u32, ts: Nanos, cents: i64, size: u32) -> Event {
     Event::Trade(Trade {
         hdr: Header {
@@ -634,9 +638,13 @@ mod bars {
                 .push(format!("event@{}", ev.ts_recv() / SEC - T0 / SEC));
         }
         fn on_timer(&mut self, _: &mut Ctx<'_>, _: TimerId) {}
-        fn on_bar(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, tf: Timeframe) {
-            let bar = *ctx.bars(i).unwrap().closed(tf, 0).unwrap();
-            self.closed.push((ctx.now(), i, tf, bar));
+        fn on_bar(&mut self, ctx: &mut Ctx<'_>, i: InstrumentId, tf: Timeframe, bar: &TfBar) {
+            assert_eq!(
+                ctx.bars(i).unwrap().closed(tf, 0),
+                Some(bar),
+                "no gap here: the newest closed bar is this one"
+            );
+            self.closed.push((ctx.now(), i, tf, *bar));
             self.log.push(format!("bar {tf:?}"));
         }
     }
@@ -706,7 +714,7 @@ mod bars {
                 }
             }
             fn on_timer(&mut self, _: &mut Ctx<'_>, _: TimerId) {}
-            fn on_bar(&mut self, _: &mut Ctx<'_>, _: InstrumentId, _: Timeframe) {
+            fn on_bar(&mut self, _: &mut Ctx<'_>, _: InstrumentId, _: Timeframe, _: &TfBar) {
                 self.0.push(true);
             }
         }

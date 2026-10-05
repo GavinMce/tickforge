@@ -17,6 +17,7 @@ task synth ARGS="--seed 7 --symbols 20 --secs 60 --dump 10"
 task bench                                   # events/s and p50/p99/p99.9 through the run loop
 task backtest                                # Strategy 1 through the risk gateway and simulated broker, with the report
 task backtest ARGS="--higher-lows 0 --daily-loss 20"  # see the gateway refuse entries after a loss
+task backtest ARGS="--strategy trend --healthy 2 --dangerous 2"  # the indicator example; it buys a fading runner too
 task synth ARGS="--store results"            # keep the result keyed by its manifest; a rerun is skipped
 ```
 
@@ -37,7 +38,7 @@ the generator is a deliberate, reviewed change.
 | `tf-engine` | Hot-engine building blocks: `Tier0` per-symbol state arrays, allocation-free one-second bars and 1s/5s/60s rolling windows, EWMA baselines, and bounded `Tier1` rings with pullback features (depth, volume ratio, higher lows, tape speed, spread), `MtfBars` (1m/5m/15m/1h/day bars for a bounded set of symbols), and indicators (EMA, SMA, VWAP with bands, RSI, ATR, opening range, ...) |
 | `tf-bench` | Throughput and p50/p99/p99.9 latency benchmarks for the run loop (`tf bench`), results as JSON lines per commit |
 | `tf-manifest` | Run manifests (git sha, seed, config, params hash, data range) and results stored under the manifest's SHA-256, so reruns are skipped |
-| `tf-strategy` | Strategy framework: `Intent` (side, size, limit/collar, protective orders, with validation) the order lifecycle (`OrderState`, `Order`, `Decision`, `RejectReason`), and the `Strategy` trait with its `Host` (timers, event-time `Ctx`; a clippy ban list keeps wall clocks and I/O out), `SimBroker` (backtest fills against recorded quotes with latency, slippage and borrow cost) `Report` (P&L, drawdown, slippage, hit rate, per-scenario breakdown) and `MomentumLong` (Strategy 1, long side) |
+| `tf-strategy` | Strategy framework: `Intent` (side, size, limit/collar, protective orders, with validation) the order lifecycle (`OrderState`, `Order`, `Decision`, `RejectReason`), and the `Strategy` trait with its `Host` (timers, event-time `Ctx`; a clippy ban list keeps wall clocks and I/O out), `SimBroker` (backtest fills against recorded quotes with latency, slippage and borrow cost) `Report` (P&L, drawdown, slippage, hit rate, per-scenario breakdown) `MomentumLong` (Strategy 1, long side) and `TrendLong` (an example on the indicator and bar APIs) |
 | `tf-risk` | Risk gateway: caps, daily loss, order rate, kill switch; explicit audited rejections; limits fixed at construction |
 | `tf-backtest` | The backtest loop: strategy -> risk gateway -> simulated broker -> report, plus a synthetic demo session |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |

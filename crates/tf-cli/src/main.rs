@@ -28,6 +28,7 @@ USAGE:
     tf backtest [--seed N] [--secs N] [--healthy N] [--dangerous N] [--quiet N]
                 [--latency-ms N] [--borrow-bps N] [--order-notional USD]
                 [--daily-loss USD] [--max-orders N] [--higher-lows N] [--store DIR]
+                [--strategy momentum|trend] [--lead SECS] [--fast N] [--slow N]
 
     Run Strategy 1 (long side) over a synthetic session of healthy and dangerous
     runners and quiet names, through the risk gateway and the simulated broker,
@@ -44,7 +45,14 @@ USAGE:
     --order-notional  gateway cap per order in dollars (default 5000)
     --daily-loss      gateway daily loss limit in dollars (default 1000)
     --max-orders N    gateway orders per 10 s (default 20)
-    --higher-lows N   strategy: higher lows required before entering (default 1)
+    --higher-lows N   momentum: higher lows required before entering (default 1)
+    --strategy NAME   momentum (the pullback strategy, default) or trend (the example
+                      indicator strategy: EMA cross / VWAP reclaim / volume surge on
+                      one-minute bars; it needs minutes to warm up, so its defaults are
+                      a 1800 s session and a 420 s quiet lead-in)
+    --lead SECS       quiet lead-in before the first runner (default 20; 420 for trend)
+    --fast N          trend: fast EMA period in bars (default 3)
+    --slow N          trend: slow EMA period in bars (default 6)
     --store DIR       keep the result keyed by a manifest hash of the whole setup
                       (seed, git sha, session, limits, parameters); reruns are skipped
 
@@ -265,13 +273,17 @@ struct BacktestArgs {
     daily_loss: u64,
     max_orders: u32,
     higher_lows: u32,
+    strategy: String,
+    lead: Option<u64>,
+    fast: u32,
+    slow: u32,
     store: Option<String>,
 }
 
 fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
     let mut a = BacktestArgs {
         seed: 1,
-        secs: 400,
+        secs: 0,
         healthy: 2,
         dangerous: 2,
         quiet: 2,
@@ -281,6 +293,10 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
         daily_loss: 1_000,
         max_orders: 20,
         higher_lows: 1,
+        strategy: "momentum".to_owned(),
+        lead: None,
+        fast: 3,
+        slow: 6,
         store: None,
     };
     let mut it = args.iter();
@@ -303,10 +319,25 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
             "--daily-loss" => a.daily_loss = val("--daily-loss")?,
             "--max-orders" => a.max_orders = val("--max-orders")? as u32,
             "--higher-lows" => a.higher_lows = val("--higher-lows")? as u32,
+            "--lead" => a.lead = Some(val("--lead")?),
+            "--fast" => a.fast = val("--fast")? as u32,
+            "--slow" => a.slow = val("--slow")? as u32,
+            "--strategy" => a.strategy = it.next().cloned().ok_or("--strategy needs a value")?,
             "--store" => a.store = Some(it.next().cloned().ok_or("--store needs a value")?),
             other => return Err(format!("unknown flag {other}")),
         }
     }
+    if !matches!(a.strategy.as_str(), "momentum" | "trend") {
+        return Err(format!(
+            "unknown strategy {:?} (momentum or trend)",
+            a.strategy
+        ));
+    }
+    let trend = a.strategy == "trend";
+    if a.secs == 0 {
+        a.secs = if trend { 1800 } else { 400 };
+    }
+    a.lead.get_or_insert(if trend { 420 } else { 20 });
     Ok(a)
 }
 
@@ -333,6 +364,11 @@ fn backtest_config(a: &BacktestArgs) -> Result<tf_backtest::BacktestConfig, Stri
             min_higher_lows: a.higher_lows,
             ..tf_strategy::MomentumParams::default()
         },
+        trend: tf_strategy::TrendParams {
+            fast_period: a.fast,
+            slow_period: a.slow,
+            ..tf_strategy::TrendParams::default()
+        },
     })
 }
 
@@ -348,7 +384,9 @@ fn backtest_manifest(
     };
     let mut m = Manifest::new(&git_sha(), "backtest", a.seed, data).map_err(|e| e.to_string())?;
     let session = [
+        ("strategy", a.strategy.clone()),
         ("secs", a.secs.to_string()),
+        ("lead_secs", a.lead.unwrap_or(20).to_string()),
         ("healthy", a.healthy.to_string()),
         ("dangerous", a.dangerous.to_string()),
         ("quiet", a.quiet.to_string()),
@@ -363,7 +401,12 @@ fn backtest_manifest(
             .with_config(&format!("limit_{k}"), &v)
             .map_err(|e| e.to_string())?;
     }
-    for (k, v) in cfg.params.pairs() {
+    let params = if a.strategy == "trend" {
+        cfg.trend.pairs()
+    } else {
+        cfg.params.pairs()
+    };
+    for (k, v) in params {
         m = m.with_param(k, &v).map_err(|e| e.to_string())?;
     }
     Ok(m)
@@ -372,8 +415,14 @@ fn backtest_manifest(
 fn backtest(args: &[String]) -> Result<(), String> {
     let a = parse_backtest(args)?;
     let cfg = backtest_config(&a)?;
-    let (events, labels) =
-        tf_backtest::demo_session(a.seed, a.secs, a.healthy, a.dangerous, a.quiet);
+    let (events, labels) = tf_backtest::demo_session_with_lead(
+        a.seed,
+        a.secs,
+        a.healthy,
+        a.dangerous,
+        a.quiet,
+        a.lead.unwrap_or(20),
+    );
     let mut hash = HashSink::new();
     for ev in &events {
         hash.on_event(ev);
@@ -392,10 +441,14 @@ fn backtest(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let r = tf_backtest::momentum_backtest(events.iter().copied(), labels, &cfg)?;
+    let r = if a.strategy == "trend" {
+        tf_backtest::trend_backtest(events.iter().copied(), labels, &cfg)?
+    } else {
+        tf_backtest::momentum_backtest(events.iter().copied(), labels, &cfg)?
+    };
     println!(
-        "seed {} | {} healthy, {} dangerous, {} quiet | {} s simulated | latency {} ms",
-        a.seed, a.healthy, a.dangerous, a.quiet, a.secs, a.latency_ms
+        "{} | seed {} | {} healthy, {} dangerous, {} quiet | {} s simulated | latency {} ms",
+        a.strategy, a.seed, a.healthy, a.dangerous, a.quiet, a.secs, a.latency_ms
     );
     print!("{}", r.report.render());
     println!(
@@ -603,6 +656,8 @@ mod tests {
             &["--daily-loss", "999"],
             &["--max-orders", "19"],
             &["--higher-lows", "0"],
+            &["--strategy", "trend"],
+            &["--lead", "100"],
         ] {
             assert_ne!(
                 base,
@@ -613,7 +668,28 @@ mod tests {
     }
 
     #[test]
+    fn every_trend_setting_is_part_of_its_manifest() {
+        let base = hash(&["--strategy", "trend"]);
+        assert_eq!(base, hash(&["--strategy", "trend"]));
+        for flags in [
+            &["--fast", "4"][..],
+            &["--slow", "7"],
+            &["--secs", "1700"],
+            &["--lead", "400"],
+            &["--seed", "2"],
+            &["--daily-loss", "999"],
+        ] {
+            let mut a = vec!["--strategy", "trend"];
+            a.extend_from_slice(flags);
+            assert_ne!(base, hash(&a), "{flags:?}");
+        }
+        // The momentum-only flag does not matter to a trend run (and is not recorded for it).
+        assert_eq!(base, hash(&["--strategy", "trend", "--higher-lows", "0"]));
+    }
+
+    #[test]
     fn bad_backtest_arguments_are_refused() {
+        assert!(parse_backtest(&["--strategy".to_owned(), "nope".to_owned()]).is_err());
         let bad = |a: &[&str]| {
             parse_backtest(&a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()).is_err()
         };

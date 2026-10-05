@@ -142,6 +142,7 @@ name = "tf-strategy"
 version = "0.1.0"
 dependencies = [
  "tf-core",
+ "tf-engine",
  "tf-synth",
 ]
 

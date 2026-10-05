@@ -30,6 +30,7 @@ USAGE:
                 [--daily-loss USD] [--max-orders N] [--higher-lows N] [--store DIR]
                 [--strategy momentum|trend] [--lead SECS] [--fast N] [--slow N]
                 [--propose NAME=VALUE@SECS]... [--revert-drawdown USD] [--lockout SECS]
+                [--export FILE.json]
 
     Run Strategy 1 (long side) over a synthetic session of healthy and dangerous
     runners and quiet names, through the risk gateway and the simulated broker,
@@ -60,6 +61,10 @@ USAGE:
                       with fixed parameters on the same feed, each with its own simulated
                       broker and gateway. Prints both reports, the difference, the
                       changes applied and the proposals refused (with why).
+    --export FILE     momentum only: also write a JSON document for the trade explorer
+                      (bars, ticks, scanner hits, tier moves, orders with the gateway's
+                      answer, fills, stop paths, and the strategy's own record of why it
+                      entered or declined each symbol)
     --revert-drawdown USD   with --propose: the safety policy returns every tuned
                       parameter to baseline when the tuned side falls this many dollars
                       behind its own best showing against the shadow
@@ -294,6 +299,7 @@ struct BacktestArgs {
     max_orders: u32,
     higher_lows: u32,
     propose: Vec<(String, i64, u64)>,
+    export: Option<String>,
     revert_drawdown: Option<u64>,
     lockout: u64,
     strategy: String,
@@ -317,6 +323,7 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
         max_orders: 20,
         higher_lows: 1,
         propose: Vec::new(),
+        export: None,
         revert_drawdown: None,
         lockout: 300,
         strategy: "momentum".to_owned(),
@@ -346,6 +353,7 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
             "--max-orders" => a.max_orders = val("--max-orders")? as u32,
             "--higher-lows" => a.higher_lows = val("--higher-lows")? as u32,
             "--lead" => a.lead = Some(val("--lead")?),
+            "--export" => a.export = Some(it.next().cloned().ok_or("--export needs a file")?),
             "--revert-drawdown" => a.revert_drawdown = Some(val("--revert-drawdown")?),
             "--lockout" => a.lockout = val("--lockout")?,
             "--propose" => {
@@ -373,6 +381,11 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
     }
     if a.revert_drawdown == Some(0) {
         return Err("--revert-drawdown must be positive".to_owned());
+    }
+    if a.export.is_some() && (trend || !a.propose.is_empty()) {
+        return Err(
+            "--export is for a single momentum run (no --strategy trend, no --propose)".to_owned(),
+        );
     }
     if trend && !a.propose.is_empty() {
         return Err(
@@ -495,6 +508,25 @@ fn backtest_single(
 ) -> Result<Vec<(String, i64)>, String> {
     let r = if a.strategy == "trend" {
         tf_backtest::trend_backtest(events.iter().copied(), labels, cfg)?
+    } else if let Some(path) = &a.export {
+        let traced =
+            tf_backtest::momentum_backtest_traced(events.iter().copied(), labels.clone(), cfg)?;
+        let json = tf_backtest::export::export_json(
+            events,
+            &labels,
+            cfg,
+            &traced.result,
+            &traced.entries,
+            &traced.declines,
+            &tf_backtest::export::ExportMeta {
+                strategy: &a.strategy,
+                seed: a.seed,
+                secs: a.secs,
+            },
+        );
+        std::fs::write(path, &json).map_err(|e| format!("{path}: {e}"))?;
+        println!("exported {path} ({} bytes)", json.len());
+        traced.result
     } else {
         tf_backtest::momentum_backtest(events.iter().copied(), labels, cfg)?
     };
@@ -662,7 +694,8 @@ fn backtest(args: &[String]) -> Result<(), String> {
     let start = events.first().map_or(0, |e| e.ts_recv());
     let manifest = backtest_manifest(&a, &cfg, start)?;
     let store = a.store.as_deref().map(DirStore::new);
-    if let Some(store) = &store {
+    // An export needs the run itself, so it does not use a cached result.
+    if let (Some(store), None) = (&store, &a.export) {
         if let Some(r) = store.get(&manifest).map_err(|e| e.to_string())? {
             println!("cached   {}  (not rerun)", manifest.hash());
             println!("events   {:>12}", r.events);

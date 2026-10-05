@@ -192,6 +192,61 @@ impl Limits {
         v
     }
 
+    /// Limits from the pairs [`Limits::pairs`] gives: every name exactly once, nothing else.
+    /// The inverse of `pairs`, so limits recorded in a ledger can be rebuilt to replay it.
+    pub fn from_pairs(pairs: &[(String, String)]) -> Result<Limits, String> {
+        let mut seen = BTreeMap::new();
+        for (k, v) in pairs {
+            if seen.insert(k.as_str(), v.as_str()).is_some() {
+                return Err(format!("limit `{k}` given twice"));
+            }
+        }
+        fn take<'a>(seen: &mut BTreeMap<&'a str, &'a str>, k: &str) -> Result<&'a str, String> {
+            seen.remove(k)
+                .ok_or_else(|| format!("limit `{k}` is missing"))
+        }
+        fn num<T: std::str::FromStr>(k: &str, v: &str) -> Result<T, String> {
+            v.parse::<T>()
+                .map_err(|_| format!("limit `{k}` = {v:?} is not a whole number"))
+        }
+        let mut l = Limits::new(
+            num(
+                "max_order_notional_raw",
+                take(&mut seen, "max_order_notional_raw")?,
+            )?,
+            num(
+                "max_position_shares",
+                take(&mut seen, "max_position_shares")?,
+            )?,
+            num(
+                "max_gross_notional_raw",
+                take(&mut seen, "max_gross_notional_raw")?,
+            )?,
+            num("max_daily_loss_raw", take(&mut seen, "max_daily_loss_raw")?)?,
+            num(
+                "max_orders_per_window",
+                take(&mut seen, "max_orders_per_window")?,
+            )?,
+            num("rate_window_ns", take(&mut seen, "rate_window_ns")?)?,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        if seen.get("gap_rule") == Some(&"none") {
+            seen.remove("gap_rule");
+        } else {
+            let rule = GapRule::new(
+                num("gap_equity_raw", take(&mut seen, "gap_equity_raw")?)?,
+                num("gap_max_loss_ppm", take(&mut seen, "gap_max_loss_ppm")?)?,
+                num("gap_permille", take(&mut seen, "gap_permille")?)?,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            l = l.with_gap_rule(rule);
+        }
+        if let Some(k) = seen.keys().next() {
+            return Err(format!("unknown limit `{k}`"));
+        }
+        Ok(l)
+    }
+
     pub fn max_order_notional(&self) -> u128 {
         self.max_order_notional
     }
@@ -218,6 +273,23 @@ pub struct Audit {
     pub ts: Nanos,
     pub intent: IntentId,
     pub outcome: Decision,
+}
+
+/// A gateway's state as comparable data (see [`Gateway::snapshot`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GatewaySnapshot {
+    /// Instrument, signed shares, average cost, mark: for each instrument holding a position.
+    pub positions: Vec<(InstrumentId, i64, i64, i64)>,
+    /// Order, instrument, shares remaining, limit, reference: for each working order.
+    pub working: Vec<(OrderId, InstrumentId, u32, i64, i64)>,
+    pub next_order: u64,
+    pub realized: i128,
+    pub day_base: i128,
+    pub killed: bool,
+    pub loss_latched: bool,
+    pub recent: Vec<Nanos>,
+    pub accepted: u64,
+    pub rejected: Vec<(String, u64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -550,6 +622,48 @@ impl Gateway {
             .ok_or(GatewayError::UnknownOrder(order))?;
         self.working.remove(i);
         Ok(())
+    }
+
+    /// The whole state that decisions depend on, as plain data to compare. Marks are included only
+    /// for instruments with a position (a flat instrument's mark changes nothing).
+    pub fn snapshot(&self) -> GatewaySnapshot {
+        GatewaySnapshot {
+            positions: self
+                .pos
+                .iter()
+                .zip(&self.marks)
+                .enumerate()
+                .filter(|(_, (p, _))| p.qty != 0)
+                .map(|(i, (p, m))| (i as InstrumentId, p.qty, p.avg, *m))
+                .collect(),
+            working: self
+                .working
+                .iter()
+                .map(|w| (w.id, w.instrument, w.remaining, w.limit, w.reference))
+                .collect(),
+            next_order: self.next_order,
+            realized: self.realized,
+            day_base: self.day_base,
+            killed: self.killed,
+            loss_latched: self.loss_latched,
+            recent: self.recent.iter().copied().collect(),
+            accepted: self.accepted,
+            rejected: self
+                .rejected
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), *v))
+                .collect(),
+        }
+    }
+
+    /// The last mark given for an instrument, raw (0 if none).
+    pub fn mark_of(&self, instrument: InstrumentId) -> i64 {
+        self.marks.get(instrument as usize).copied().unwrap_or(0)
+    }
+
+    /// How many instruments the gateway knows.
+    pub fn instruments(&self) -> usize {
+        self.pos.len()
     }
 
     /// Signed position in shares.

@@ -23,6 +23,7 @@ tf-strategy = { path = "crates/tf-strategy" }
 tf-risk = { path = "crates/tf-risk" }
 tf-params = { path = "crates/tf-params" }
 tf-backtest = { path = "crates/tf-backtest" }
+tf-ledger = { path = "crates/tf-ledger" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -619,10 +619,13 @@ epics:
           - A +100 percent gap on any short loses at most a configured fraction of equity
       - id: E09-S04
         jira: TIC-73
-        title: Order state machine and event-sourced Postgres ledger
-        status: todo
+        title: Order state machine and event-sourced ledger (storage trait, file-backed log, exact restart)
+        status: done
+        evidence: crates/tf-ledger (Journal over the risk gateway and Order state machine; records are gateway inputs with each decision's answer, replay re-decides and fails on any difference; LedgerStore trait with FileStore - checksummed lines, fsync, torn-tail repair, single-writer lock - MemStore and a conformance suite); tf ledger verify DIR; Gateway::snapshot and Limits::from_pairs added to tf-risk; a journal rebuilt from its ledger equals the live one after every step of 12 random days (3000 steps), and a cut at every byte of the last dozen records of a day recovers the state before that record; 33 mutations tried, 2 survivors found and closed; ADR 0030. Not yet used by the backtest harness or a broker adapter; Postgres is E09-S09
         ac:
           - Restart reconstructs open orders and positions exactly
+          - A damaged last record is repaired and reported; damage anywhere else is refused
+          - Storage sits behind a trait with a conformance suite, so another store can be proven against it
       - id: E09-S05
         jira: TIC-74
         title: Alpaca trading adapter (paper)
@@ -651,6 +654,15 @@ epics:
         deps: [E09-S04, E02-S02]
         ac:
           - Same adapter interface as Alpaca; fills against synthetic quotes with latency and rejects
+      - id: E09-S09
+        jira: TIC-118
+        title: Postgres-backed ledger store (same interface and conformance tests as the file log)
+        status: todo
+        deps: [E09-S04]
+        ac:
+          - Implements LedgerStore on Postgres (gap-free numbered append-only table, one transaction per append) and passes tf_ledger::conformance
+          - A single-writer lease so two engines cannot both append, and idempotent retries of an append
+          - Runs against a Postgres service container in CI
   - id: E10
     jira: TIC-11
     title: Alpaca data and news adapter

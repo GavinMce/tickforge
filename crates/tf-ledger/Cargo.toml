@@ -1,0 +1,19 @@
+[package]
+name = "tf-ledger"
+description = "Event-sourced order ledger: every gateway input and outcome in an append-only log, exact restart"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+tf-risk.workspace = true
+tf-strategy.workspace = true
+
+[dev-dependencies]
+tf-synth.workspace = true

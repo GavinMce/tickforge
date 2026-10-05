@@ -1,4 +1,5 @@
 mod explore;
+mod ledger_cmd;
 mod rules_cmd;
 mod runs;
 
@@ -129,6 +130,15 @@ USAGE:
     approve   record a named person's approval (appended to the record). A rejected proposal
               cannot be approved, and nothing is live until a person has approved it.
     The gates test internal consistency on synthetic sessions; they are not evidence of an edge.
+
+    tf ledger verify DIR [--orders]
+
+    Replay an order ledger (the append-only log the risk gateway and order book write) and
+    show what it holds: records, orders and which are open, positions, refusals by reason,
+    realised P&L, the kill switch. Every recorded decision is re-decided and must come out the
+    same, or this fails and says which record differs. A torn last record is repaired and
+    reported, as a restart would; damage anywhere else is refused. It takes the ledger's lock,
+    so it refuses while an engine is writing the ledger.
 
     tf bench [--symbols N] [--secs N] [--seed N] [--runs N] [--out FILE]
              [--compare FILE] [--commit SHA] [--flag-drop PCT] [--flag-rise PCT]
@@ -940,6 +950,7 @@ fn main() -> ExitCode {
         Some("explore") => explore::explore(&args[1..]),
         Some("runs") => runs::runs(&args[1..]),
         Some("rules") => rules_cmd::rules(&args[1..]),
+        Some("ledger") => ledger_cmd::ledger(&args[1..]),
         Some("help" | "--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())

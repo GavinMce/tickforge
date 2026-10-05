@@ -21,6 +21,20 @@ USAGE:
     --secs N          simulated session length (default 600)
     --runners N       permille of symbols with a runner scenario (default 20)
     --dump N          also print the first N events
+
+    tf bench [--symbols N] [--secs N] [--seed N] [--runs N] [--out FILE]
+             [--compare FILE] [--commit SHA]
+
+    Measure events/s and per-event p50/p99/p99.9 latency through the run loop
+    for four scenarios, and print a markdown table. Use a release build.
+
+    --symbols N       universe size (default 5000)
+    --secs N          simulated session length (default 400)
+    --seed N          RNG seed (default 1)
+    --runs N          repetitions per scenario (default 3)
+    --out FILE        append the results as JSON lines (a per-commit history)
+    --compare FILE    show the change against the results in FILE
+    --commit SHA      label for the results (default: $GITHUB_SHA, else git HEAD)
 ";
 
 struct SynthArgs {
@@ -140,10 +154,108 @@ fn synth(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+struct BenchArgs {
+    symbols: usize,
+    secs: u64,
+    seed: u64,
+    runs: usize,
+    out: Option<String>,
+    compare: Option<String>,
+    commit: Option<String>,
+}
+
+fn parse_bench(args: &[String]) -> Result<BenchArgs, String> {
+    let mut a = BenchArgs {
+        symbols: 5000,
+        secs: 400,
+        seed: 1,
+        runs: 3,
+        out: None,
+        compare: None,
+        commit: None,
+    };
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let mut text = |name: &str| -> Result<String, String> {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        let num = |name: &str, v: String| v.parse::<u64>().map_err(|e| format!("{name}: {e}"));
+        match flag.as_str() {
+            "--symbols" => a.symbols = num("--symbols", text("--symbols")?)? as usize,
+            "--secs" => a.secs = num("--secs", text("--secs")?)?,
+            "--seed" => a.seed = num("--seed", text("--seed")?)?,
+            "--runs" => a.runs = num("--runs", text("--runs")?)? as usize,
+            "--out" => a.out = Some(text("--out")?),
+            "--compare" => a.compare = Some(text("--compare")?),
+            "--commit" => a.commit = Some(text("--commit")?),
+            other => return Err(format!("unknown flag {other}")),
+        }
+    }
+    Ok(a)
+}
+
+fn git_head() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+fn bench(args: &[String]) -> Result<(), String> {
+    let a = parse_bench(args)?;
+    if cfg!(debug_assertions) {
+        eprintln!("warning: this is a debug build; the timings mean nothing. Use a release build.");
+    }
+    let commit = a
+        .commit
+        .or_else(|| std::env::var("GITHUB_SHA").ok())
+        .or_else(git_head)
+        .unwrap_or_else(|| "unknown".to_owned());
+    let workload = tf_bench::Workload {
+        symbols: a.symbols,
+        secs: a.secs,
+        seed: a.seed,
+    };
+    let rows = tf_bench::run_all(&workload, a.runs, &tf_bench::Env::detect(commit))?;
+
+    let base = match &a.compare {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+            Some(tf_bench::from_jsonl(&text).map_err(|e| format!("{path}: {e}"))?)
+        }
+        None => None,
+    };
+    print!("{}", tf_bench::markdown(&rows, base.as_deref()));
+
+    if let Some(path) = &a.out {
+        use std::io::Write as _;
+        if let Some(dir) = std::path::Path::new(path)
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{path}: {e}"))?;
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| format!("{path}: {e}"))?;
+        f.write_all(tf_bench::to_jsonl(&rows).as_bytes())
+            .map_err(|e| format!("{path}: {e}"))?;
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("synth") => synth(&args[1..]),
+        Some("bench") => bench(&args[1..]),
         Some("help" | "--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())

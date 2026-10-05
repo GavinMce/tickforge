@@ -14,6 +14,7 @@ Taskfile calls it by full path.
 task check                                   # fmt + clippy -D warnings + tests
 task synth ARGS="--symbols 5000 --secs 600"  # run a synthetic session through the run loop
 task synth ARGS="--seed 7 --symbols 20 --secs 60 --dump 10"
+task bench                                   # events/s and p50/p99/p99.9 through the run loop
 ```
 
 `tf synth` prints event counts and a hash; identical inputs give an identical
@@ -31,6 +32,7 @@ the generator is a deliberate, reviewed change.
 | `tf-secmaster` | Persistent security master: stable `InstrumentId`s, dated tickers and provider keys, dense per-date `Session` lookups |
 | `tf-tape` | Raw tape: zstd-compressed blocks of encoded events with a footer index; seek by `ts_recv`; `TapeProvider` replays a tape as a `Provider` at 1x..Nx or max speed |
 | `tf-engine` | Hot-engine building blocks: `Tier0` per-symbol state arrays, allocation-free one-second bars and 1s/5s/60s rolling windows, EWMA baselines |
+| `tf-bench` | Throughput and p50/p99/p99.9 latency benchmarks for the run loop (`tf bench`), results as JSON lines per commit |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |
 | `tf-cli` | `tf` binary |
 

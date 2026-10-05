@@ -1,0 +1,67 @@
+name: Bench
+
+# Throughput and tail latency of the run loop, tracked per commit. Informational:
+# shared runners are too noisy to gate a merge on, so this is not a required check.
+# Each run uploads its results as an artifact and shows the change against the
+# last successful run on main in the job summary (see docs/adr/0008).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --bin tf
+
+      # The baseline is the artifact of the most recent successful run on main.
+      # There is none until the first run on main has finished.
+      - name: Fetch baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh run list --workflow bench.yml --branch main --status success --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$id" ] && gh run download "$id" --name bench-results --dir baseline; then
+            echo "baseline from run $id"
+          else
+            echo "no baseline yet"
+          fi
+
+      - name: Benchmark
+        run: |
+          set -o pipefail
+          args=(--out bench-results/bench.jsonl --commit "${{ github.event.pull_request.head.sha || github.sha }}")
+          if [ -f baseline/bench.jsonl ]; then
+            args+=(--compare baseline/bench.jsonl)
+          fi
+          ./target/release/tf bench "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-results
+          path: bench-results/bench.jsonl
+          retention-days: 90

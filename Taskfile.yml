@@ -37,3 +37,8 @@ tasks:
     desc: "Run the synthetic provider through the run loop (ARGS='--symbols 5000 --secs 600')"
     cmds:
       - '{{.CARGO}} run --release --quiet --bin tf -- synth {{.ARGS}}'
+
+  bench:
+    desc: "Throughput and tail-latency benchmark (ARGS='--symbols 5000 --out bench/results.jsonl')"
+    cmds:
+      - '{{.CARGO}} run --release --quiet --bin tf -- bench {{.ARGS}}'

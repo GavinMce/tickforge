@@ -194,6 +194,10 @@ fn synth(args: &[String]) -> Result<(), String> {
                 Event::News(n) => {
                     println!("{:>16} {name} news #{}", n.hdr.ts_recv, n.article_id)
                 }
+                Event::ParamChange(p) => println!(
+                    "{:>16} param #{} -> {} ({:?}, proposer {}, reason {}, evidence {:#x})",
+                    p.hdr.ts_recv, p.param, p.new_value, p.scope, p.proposer, p.reason, p.evidence
+                ),
             }
         }
         println!();

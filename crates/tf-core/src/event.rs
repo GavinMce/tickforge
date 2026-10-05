@@ -138,6 +138,46 @@ pub struct News {
     pub article_id: u64,
 }
 
+/// What a parameter change applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ParamScope {
+    /// Every instrument. `hdr.instrument` is zero and means nothing.
+    Global = 0,
+    /// Only the instrument in `hdr.instrument`.
+    Instrument = 1,
+}
+
+impl ParamScope {
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ParamScope::Global),
+            1 => Some(ParamScope::Instrument),
+            _ => None,
+        }
+    }
+}
+
+/// A strategy parameter was changed (see `tf-params`). It is an event so that a
+/// replay of the tape reproduces the exact session, parameters included.
+///
+/// `param` is the index of the parameter in the store's declaration list;
+/// `proposer` identifies who asked (an agent, an operator); `reason` is a code
+/// from the proposer's vocabulary; `evidence` is an id of the supporting
+/// artifact (for example the hash prefix of a backtest result). The old value is
+/// not carried: it is the value the previous change, or the baseline, left.
+/// Free text lives in the journal beside the tape, keyed by `hdr.seq`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParamChange {
+    pub hdr: Header,
+    pub param: u16,
+    pub scope: ParamScope,
+    pub proposer: u16,
+    pub reason: u16,
+    pub new_value: i64,
+    pub evidence: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Trade(Trade),
@@ -146,6 +186,7 @@ pub enum Event {
     Correction(Correction),
     CancelError(CancelError),
     News(News),
+    ParamChange(ParamChange),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +197,7 @@ pub enum EventKind {
     Correction,
     CancelError,
     News,
+    ParamChange,
 }
 
 impl Event {
@@ -167,6 +209,7 @@ impl Event {
             Event::Correction(c) => &c.hdr,
             Event::CancelError(c) => &c.hdr,
             Event::News(n) => &n.hdr,
+            Event::ParamChange(p) => &p.hdr,
         }
     }
 
@@ -178,6 +221,7 @@ impl Event {
             Event::Correction(c) => &mut c.hdr,
             Event::CancelError(c) => &mut c.hdr,
             Event::News(n) => &mut n.hdr,
+            Event::ParamChange(p) => &mut p.hdr,
         }
     }
 
@@ -189,6 +233,7 @@ impl Event {
             Event::Correction(_) => EventKind::Correction,
             Event::CancelError(_) => EventKind::CancelError,
             Event::News(_) => EventKind::News,
+            Event::ParamChange(_) => EventKind::ParamChange,
         }
     }
 

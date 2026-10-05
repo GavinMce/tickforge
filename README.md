@@ -40,6 +40,7 @@ the generator is a deliberate, reviewed change.
 | `tf-manifest` | Run manifests (git sha, seed, config, params hash, data range) and results stored under the manifest's SHA-256, so reruns are skipped |
 | `tf-strategy` | Strategy framework: `Intent` (side, size, limit/collar, protective orders, with validation) the order lifecycle (`OrderState`, `Order`, `Decision`, `RejectReason`), and the `Strategy` trait with its `Host` (timers, event-time `Ctx`; a clippy ban list keeps wall clocks and I/O out), `SimBroker` (backtest fills against recorded quotes with latency, slippage and borrow cost) `Report` (P&L, drawdown, slippage, hit rate, per-scenario breakdown) `MomentumLong` (Strategy 1, long side) and `TrendLong` (an example on the indicator and bar APIs) |
 | `tf-risk` | Risk gateway: caps, daily loss, order rate, kill switch; explicit audited rejections; limits fixed at construction |
+| `tf-params` | Bounded, rate-limited strategy parameters whose changes are tape events and apply to new entries only |
 | `tf-backtest` | The backtest loop: strategy -> risk gateway -> simulated broker -> report, plus a synthetic demo session |
 | `tf-replay` | `run()` loop on a simulated clock, plus sinks (hash, stats, dedupe) |
 | `tf-cli` | `tf` binary |

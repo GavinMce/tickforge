@@ -40,6 +40,7 @@ pub struct StatsSink {
     pub corrections: u64,
     pub cancel_errors: u64,
     pub news: u64,
+    pub param_changes: u64,
     pub shares: u64,
     pub first_ts_event: Option<Nanos>,
     pub last_ts_event: Option<Nanos>,
@@ -56,6 +57,7 @@ impl EventSink for StatsSink {
             EventKind::Correction => self.corrections += 1,
             EventKind::CancelError => self.cancel_errors += 1,
             EventKind::News => self.news += 1,
+            EventKind::ParamChange => self.param_changes += 1,
         }
         if let Event::Trade(t) = ev {
             self.shares += u64::from(t.size);
@@ -64,6 +66,9 @@ impl EventSink for StatsSink {
         let ts = ev.ts_event();
         self.first_ts_event = Some(self.first_ts_event.map_or(ts, |f| f.min(ts)));
         self.last_ts_event = Some(self.last_ts_event.map_or(ts, |l| l.max(ts)));
+        if matches!(ev, Event::ParamChange(_)) {
+            return; // not about any instrument
+        }
         let i = ev.instrument() as usize;
         if self.per_instrument.len() <= i {
             self.per_instrument.resize(i + 1, 0);

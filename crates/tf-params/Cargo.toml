@@ -1,6 +1,6 @@
 [package]
-name = "tf-strategy"
-description = "Strategy framework: intents, the order lifecycle and (next) the strategy trait"
+name = "tf-params"
+description = "Typed, bounded, rate-limited strategy parameters whose changes are events"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +12,6 @@ workspace = true
 
 [dependencies]
 tf-core.workspace = true
-tf-engine.workspace = true
-tf-params.workspace = true
 
 [dev-dependencies]
-tf-manifest.workspace = true
 tf-synth.workspace = true

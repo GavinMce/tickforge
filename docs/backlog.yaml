@@ -412,7 +412,8 @@ epics:
       - id: E07-S02
         jira: TIC-56
         title: Allocation-free rolling-window primitives
-        status: todo
+        status: done
+        evidence: crates/tf-engine/ (RollingBars, Ewma, EwmaVar); crates/tf-engine/tests/properties.rs compares them with brute-force references; types are Copy
         ac:
           - Ring buffers for 1s/5s/60s volume and price change; 1s bars; EWMA baselines
           - Property tests against a naive reference implementation

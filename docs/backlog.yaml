@@ -63,7 +63,8 @@ epics:
       - id: E01-S05
         jira: TIC-20
         title: CI pipeline (GitHub Actions)
-        status: todo
+        status: done
+        evidence: .github/workflows/ci.yml (job `check`, 23-27 s); `check` is a required status on main
         ac:
           - Runs fmt, clippy -D warnings and tests on every PR
           - Cargo cache configured; runs in under 5 minutes

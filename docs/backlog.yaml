@@ -489,7 +489,8 @@ epics:
       - id: E08-S03
         jira: TIC-65
         title: Strategy 1 long side (healthy-pullback entry and ride)
-        status: todo
+        status: done
+        evidence: crates/tf-strategy/src/momentum.rs (MomentumLong, MomentumParams); enters healthy and never dangerous (20 seeds exactly, 58/60 and 0 dangerous over 60); every threshold shown to change the outcome; partial/failed order handling; 17 mutations caught (one gap found and closed); ADR 0015. Defaults tuned on synthetic scenarios only; not yet run through the gateway end to end
         deps: [E08-S01, E07-S06, E02-S02]
         ac:
           - Enters on the healthy-pullback synthetic scenario and not on the dangerous one

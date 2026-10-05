@@ -1,4 +1,4 @@
-use tf_core::{Event, Fnv1a64, NANOS_PER_SEC, Nanos};
+use tf_core::{Event, Fnv1a64, NANOS_PER_SEC, Nanos, Status, StatusKind, Trade};
 use tf_provider::{Channels, Poll, Provider, ProviderError, Subscription};
 
 use crate::{
@@ -335,4 +335,411 @@ fn disconnect_with_replay_recovers_everything_with_one_boundary_duplicate() {
     assert_eq!(got[499], got[500]);
     got.remove(500);
     assert_eq!(got, clean);
+}
+
+// ---- scenario library v2: halts, LULD, SSR, squeeze, gap-and-go, multi-spike ----
+
+fn collect(cfg: &SynthConfig) -> Vec<Event> {
+    SynthStream::new(cfg).collect()
+}
+
+fn statuses(evs: &[Event]) -> Vec<Status> {
+    evs.iter()
+        .filter_map(|e| match e {
+            Event::Status(s) => Some(*s),
+            _ => None,
+        })
+        .collect()
+}
+
+fn trades(evs: &[Event]) -> Vec<Trade> {
+    evs.iter()
+        .filter_map(|e| match e {
+            Event::Trade(t) => Some(*t),
+            _ => None,
+        })
+        .collect()
+}
+
+fn kinds(sts: &[Status]) -> Vec<StatusKind> {
+    sts.iter().map(|s| s.kind).collect()
+}
+
+/// Shares traded per second from `from` to `to` seconds after `t0`.
+fn shares_per_s(evs: &[Event], t0: Nanos, from: u64, to: u64) -> f64 {
+    let (a, b) = (t0 + from * NANOS_PER_SEC, t0 + to * NANOS_PER_SEC);
+    let shares: u64 = trades(evs)
+        .iter()
+        .filter(|t| (a..b).contains(&t.hdr.ts_event))
+        .map(|t| u64::from(t.size))
+        .sum();
+    shares as f64 / (to - from) as f64
+}
+
+/// The last trade before a halt and the first after it ends.
+fn around_halt(evs: &[Event], halt: Nanos, resume: Nanos) -> (Trade, Trade) {
+    let ts = trades(evs);
+    let pre = ts.iter().rev().find(|t| t.hdr.ts_event < halt).copied();
+    let post = ts.iter().find(|t| t.hdr.ts_event > resume).copied();
+    (
+        pre.expect("no trade before the halt"),
+        post.expect("no trade after the halt"),
+    )
+}
+
+fn assert_silent_between(evs: &[Event], from: Nanos, to: Nanos) {
+    for ev in evs {
+        if matches!(ev, Event::Trade(_) | Event::Quote(_)) {
+            let ts = ev.ts_event();
+            assert!(
+                !(from < ts && ts < to),
+                "{:?} at {ts} during the halt",
+                ev.kind()
+            );
+        }
+    }
+}
+
+fn assert_golden(cfg: &SynthConfig, want: (u64, u64)) {
+    let got = hash_events(SynthStream::new(cfg));
+    assert_eq!(got, want, "got count={} hash={:#018x}", got.0, got.1);
+}
+
+#[test]
+fn halt_up_spikes_halts_then_reopens_higher() {
+    let s = NANOS_PER_SEC;
+    let lead_in = 20 * s;
+    let cfg = single(Scenario::halt_up(lead_in), 500, 200);
+    let t0 = cfg.session_start;
+    let evs = collect(&cfg);
+
+    let st = statuses(&evs);
+    assert_eq!(
+        kinds(&st),
+        [StatusKind::TradingHalt, StatusKind::TradingResume]
+    );
+    let (halt, resume) = (st[0].hdr.ts_event, st[1].hdr.ts_event);
+    assert!(
+        halt.abs_diff(t0 + lead_in + 15 * s) < 10_000,
+        "halt at +{}",
+        halt - t0
+    );
+    assert!(
+        resume.abs_diff(halt + 60 * s) < 10_000,
+        "halt lasted {}",
+        resume - halt
+    );
+    assert_silent_between(&evs, halt, resume);
+
+    let (pre, post) = around_halt(&evs, halt, resume);
+    assert!(
+        pre.px.to_cents() > 540,
+        "no spike before the halt: {}",
+        pre.px
+    );
+    assert!(
+        post.px.to_cents() * 1000 >= pre.px.to_cents() * 1040,
+        "reopened at {} after {}",
+        post.px,
+        pre.px
+    );
+
+    let quiet = shares_per_s(&evs, t0, 0, 20);
+    let spike = shares_per_s(&evs, t0, 20, 35);
+    assert!(
+        spike > 10.0 * quiet,
+        "quiet {quiet:.0}/s vs spike {spike:.0}/s"
+    );
+}
+
+#[test]
+fn luld_pins_at_the_band_then_halts_and_recentres() {
+    let s = NANOS_PER_SEC;
+    let cfg = single(Scenario::luld(20 * s), 500, 260);
+    let evs = collect(&cfg);
+
+    let st = statuses(&evs);
+    assert_eq!(
+        kinds(&st),
+        [
+            StatusKind::LuldBand,
+            StatusKind::LuldBand,
+            StatusKind::TradingHalt,
+            StatusKind::TradingResume,
+            StatusKind::LuldBand,
+        ]
+    );
+    let band = |s: &Status| (s.lo.to_cents(), s.hi.to_cents());
+    assert_eq!(
+        band(&st[0]),
+        (450, 550),
+        "opening band is +/-10% of the price"
+    );
+
+    // Every trade sits inside the band in force when it printed.
+    let mut current = None;
+    for ev in &evs {
+        match ev {
+            Event::Status(s) if s.kind == StatusKind::LuldBand => current = Some(band(s)),
+            Event::Status(s) if s.kind == StatusKind::TradingHalt => current = None,
+            Event::Trade(t) => {
+                if let Some((lo, hi)) = current {
+                    let c = t.px.to_cents();
+                    assert!(
+                        (lo..=hi).contains(&c),
+                        "trade at {c} outside band {lo}..{hi}"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // The push runs into the upper limit and stays there until the halt.
+    let (push_start, halt, resume) = (st[1].hdr.ts_event, st[2].hdr.ts_event, st[3].hdr.ts_event);
+    let push_hi = band(&st[1]).1;
+    let pinned = trades(&evs)
+        .iter()
+        .filter(|t| (push_start..halt).contains(&t.hdr.ts_event) && t.px.to_cents() == push_hi)
+        .count();
+    assert!(pinned >= 20, "only {pinned} prints at the limit {push_hi}");
+    assert_silent_between(&evs, halt, resume);
+
+    // The halt starts at the limit (the price still jitters, by at most one
+    // 3c step), and the band after it is centred on the price it reopens at.
+    let (pre, _) = around_halt(&evs, halt, resume);
+    let last = pre.px.to_cents();
+    assert!(
+        (push_hi - 3..=push_hi).contains(&last),
+        "halt began at {last}, limit {push_hi}"
+    );
+    let (lo, hi) = band(&st[4]);
+    assert_eq!(
+        (lo + hi) / 2,
+        last,
+        "new band {lo}..{hi} not centred on {last}"
+    );
+}
+
+#[test]
+fn ssr_fires_once_on_the_first_print_ten_percent_below_the_close() {
+    let cfg = single(Scenario::ssr(20 * NANOS_PER_SEC), 500, 120);
+    let evs = collect(&cfg);
+
+    let st = statuses(&evs);
+    assert_eq!(kinds(&st), [StatusKind::ShortSaleRestriction]);
+    assert_eq!(
+        (st[0].lo.to_cents(), st[0].hi.to_cents()),
+        (450, 500),
+        "trigger and prior close"
+    );
+
+    let first = trades(&evs)
+        .into_iter()
+        .find(|t| t.px.to_cents() <= 450)
+        .expect("the sell-off never reached the trigger");
+    assert_eq!(
+        st[0].hdr.ts_event, first.hdr.ts_event,
+        "SSR is stamped at the tripping print"
+    );
+    let trade_at = evs.iter().position(|e| *e == Event::Trade(first)).unwrap();
+    let status_at = evs
+        .iter()
+        .position(|e| matches!(e, Event::Status(_)))
+        .unwrap();
+    assert!(
+        trade_at < status_at,
+        "SSR arrived before the print that tripped it"
+    );
+
+    // No 10% drop, no SSR.
+    let calm = single(
+        Scenario {
+            ssr: true,
+            ..Scenario::quiet()
+        },
+        500,
+        120,
+    );
+    assert!(statuses(&collect(&calm)).is_empty());
+}
+
+#[test]
+fn squeeze_gaps_through_a_naive_stop() {
+    let s = NANOS_PER_SEC;
+    let lead_in = 20 * s;
+    let cfg = single(Scenario::squeeze(lead_in), 500, 300);
+    let t0 = cfg.session_start;
+    let evs = collect(&cfg);
+
+    let st = statuses(&evs);
+    assert_eq!(
+        kinds(&st),
+        [StatusKind::TradingHalt, StatusKind::TradingResume]
+    );
+    let (halt, resume) = (st[0].hdr.ts_event, st[1].hdr.ts_event);
+    assert_silent_between(&evs, halt, resume);
+
+    // A short taken at the last pre-halt print with a stop 10% above it.
+    let (pre, post) = around_halt(&evs, halt, resume);
+    let entry = pre.px.to_cents();
+    let stop = entry * 110 / 100;
+    let fill = post.px.to_cents();
+    assert!(entry > 600, "no ramp before the halt: {entry}");
+    assert!(
+        fill > stop,
+        "stop {stop} was not gapped, reopened at {fill}"
+    );
+    assert!(
+        (fill - stop) * 100 >= stop * 10,
+        "stop {stop} filled at {fill}: slipped less than 10% past its trigger"
+    );
+
+    // Blow-off, then fade.
+    let blowoff_end = resume + 20 * s;
+    let peak = trades(&evs)
+        .iter()
+        .filter(|t| (resume..blowoff_end).contains(&t.hdr.ts_event))
+        .map(|t| t.px.to_cents())
+        .max()
+        .unwrap();
+    let trough = trades(&evs)
+        .iter()
+        .filter(|t| (blowoff_end..blowoff_end + 60 * s).contains(&t.hdr.ts_event))
+        .map(|t| t.px.to_cents())
+        .min()
+        .unwrap();
+    assert!(
+        trough * 10 < peak * 9,
+        "no fade: peak {peak}, trough {trough}"
+    );
+
+    let quiet = shares_per_s(&evs, t0, 0, 20);
+    let ramp = shares_per_s(&evs, t0, 20, 45);
+    assert!(
+        ramp > 10.0 * quiet,
+        "quiet {quiet:.0}/s vs ramp {ramp:.0}/s"
+    );
+}
+
+#[test]
+fn gap_and_go_opens_above_the_close_and_keeps_going() {
+    let s = NANOS_PER_SEC;
+    let cfg = single(Scenario::gap_and_go(120), 500, 300);
+    let t0 = cfg.session_start;
+    let evs = collect(&cfg);
+
+    assert!(
+        statuses(&evs).is_empty(),
+        "a plain gap has no halts or bands"
+    );
+    let ts = trades(&evs);
+    let open = ts[0].px.to_cents();
+    assert!(
+        (550..=570).contains(&open),
+        "opened at {open}, expected about 560 (12% over 500)"
+    );
+    let lowest = ts.iter().map(|t| t.px.to_cents()).min().unwrap();
+    assert!(lowest > 500, "the gap filled: traded down to {lowest}");
+    let high = ts
+        .iter()
+        .filter(|t| t.hdr.ts_event < t0 + 60 * s)
+        .map(|t| t.px.to_cents())
+        .max()
+        .unwrap();
+    assert!(
+        high * 100 >= open * 105,
+        "no follow-through: open {open}, high {high}"
+    );
+
+    let hot = shares_per_s(&evs, t0, 0, 60);
+    let calm = shares_per_s(&evs, t0, 200, 260);
+    assert!(hot > 10.0 * calm, "open {hot:.0}/s vs late {calm:.0}/s");
+}
+
+#[test]
+fn multi_spike_repeats_with_cooldowns_between() {
+    let s = NANOS_PER_SEC;
+    let cfg = single(Scenario::multi_spike(3, 20 * s), 500, 520);
+    let t0 = cfg.session_start;
+    let evs = collect(&cfg);
+
+    let baseline = shares_per_s(&evs, t0, 0, 20);
+    let cycle = 135; // 20 s spike + 25 s pullback + 90 s cool-down
+    for k in 0..3 {
+        let start = 20 + k * cycle;
+        let spike = shares_per_s(&evs, t0, start, start + 20);
+        let cooled = shares_per_s(&evs, t0, start + 45, start + cycle);
+        assert!(
+            spike > 20.0 * baseline,
+            "spike {k}: {spike:.0}/s vs baseline {baseline:.0}/s"
+        );
+        assert!(
+            cooled < 2.0 * baseline,
+            "cool-down {k}: {cooled:.0}/s vs baseline {baseline:.0}/s"
+        );
+    }
+    let after = shares_per_s(&evs, t0, 20 + 3 * cycle + 10, 20 + 3 * cycle + 70);
+    assert!(
+        after < 2.0 * baseline,
+        "still hot after the last cycle: {after:.0}/s"
+    );
+
+    // Exactly three spikes in the whole session. Count runs of hot 10 s
+    // buckets: a spike can straddle two or three of them.
+    let hot: Vec<bool> = (0..52)
+        .map(|b| shares_per_s(&evs, t0, b * 10, b * 10 + 10) > 20.0 * baseline)
+        .collect();
+    let runs = usize::from(hot[0]) + hot.windows(2).filter(|w| !w[0] && w[1]).count();
+    assert_eq!(runs, 3, "hot buckets: {hot:?}");
+}
+
+/// Per-scenario goldens, like `golden_stream_hash`: any change to a scenario
+/// or to how the generator walks it changes these, and must be deliberate.
+#[test]
+fn golden_stream_hash_halt_up() {
+    assert_golden(
+        &single(Scenario::halt_up(20 * NANOS_PER_SEC), 500, 300),
+        (876, 0xf54a_e23a_af55_54d5),
+    );
+}
+
+#[test]
+fn golden_stream_hash_luld() {
+    assert_golden(
+        &single(Scenario::luld(20 * NANOS_PER_SEC), 500, 300),
+        (1202, 0x3f68_7768_52a2_4889),
+    );
+}
+
+#[test]
+fn golden_stream_hash_ssr() {
+    assert_golden(
+        &single(Scenario::ssr(20 * NANOS_PER_SEC), 500, 300),
+        (865, 0x228d_dbd0_71a5_8119),
+    );
+}
+
+#[test]
+fn golden_stream_hash_squeeze() {
+    assert_golden(
+        &single(Scenario::squeeze(20 * NANOS_PER_SEC), 500, 300),
+        (1662, 0xa908_c2bd_0363_bc91),
+    );
+}
+
+#[test]
+fn golden_stream_hash_gap_and_go() {
+    assert_golden(
+        &single(Scenario::gap_and_go(120), 500, 300),
+        (2025, 0x0619_03c6_8e50_9beb),
+    );
+}
+
+#[test]
+fn golden_stream_hash_multi_spike() {
+    assert_golden(
+        &single(Scenario::multi_spike(3, 20 * NANOS_PER_SEC), 500, 520),
+        (2094, 0x74bf_a259_3313_bce9),
+    );
 }

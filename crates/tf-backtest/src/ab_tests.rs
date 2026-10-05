@@ -255,6 +255,7 @@ fn both_equity_curves_are_observable_as_they_diverge_and_end_at_the_reports() {
         labels,
         events.iter().copied(),
         &stricter(t0),
+        None,
         |s| snaps.push(*s),
     )
     .unwrap();
@@ -345,6 +346,7 @@ fn a_tuned_side_without_a_store_refuses_every_proposal() {
         labels,
         events,
         &[at(t0, 1, prop("min_higher_lows", 2))],
+        None,
         |_| {},
     )
     .unwrap();
@@ -359,4 +361,226 @@ fn the_same_inputs_give_the_same_comparison() {
     let a = momentum_ab(events.clone(), labels.clone(), &cfg, &stricter(t0)).unwrap();
     let b = momentum_ab(events, labels, &cfg, &stricter(t0)).unwrap();
     assert_eq!(a, b);
+}
+
+// ---- auto-revert ----
+
+use crate::ab::{REASON_AUTO_REVERT, RevertConfig, momentum_ab_with};
+use tf_params::PROPOSER_POLICY;
+
+const D: u128 = 1_000_000_000;
+
+/// Two healthy runners four minutes apart: room for a revert between them.
+fn two_waves() -> (Vec<Event>, Vec<String>, Nanos) {
+    let spec = |symbol: &str, base: i64, lead: u64| tf_synth::SymbolSpec {
+        symbol: symbol.into(),
+        base_px_cents: base,
+        base_interval_ns: 300_000_000,
+        quote_every: 2,
+        scenario: tf_synth::Scenario::runner(tf_synth::PullbackKind::Healthy, lead * SEC),
+        news: Vec::new(),
+    };
+    let cfg = tf_synth::SynthConfig {
+        seed: 1,
+        session_start: tf_synth::DEFAULT_SESSION_START,
+        duration: 700 * SEC,
+        symbols: vec![spec("EARLY", 500, 20), spec("LATE", 600, 300)],
+    };
+    let events: Vec<Event> = tf_synth::SynthStream::new(&cfg).collect();
+    let t0 = events[0].ts_recv();
+    (events, vec!["early".into(), "late".into()], t0)
+}
+
+fn revert_cfg() -> RevertConfig {
+    RevertConfig {
+        max_drawdown: 100 * D,
+        lockout: 120 * SEC,
+    }
+}
+
+#[test]
+fn a_tuned_side_that_falls_behind_the_shadow_is_returned_to_baseline_in_time_for_the_next_entry() {
+    let (events, labels, t0) = two_waves();
+    let cfg = BacktestConfig::default();
+    let without = momentum_ab(events.clone(), labels.clone(), &cfg, &stricter(t0)).unwrap();
+    let with = momentum_ab_with(
+        events.clone(),
+        labels,
+        &cfg,
+        &stricter(t0),
+        Some(revert_cfg()),
+    )
+    .unwrap();
+    // Without the policy the strict rule keeps it out of both runners; the shadow trades them.
+    assert_eq!(without.tuned.report.total.trades, 0);
+    assert!(without.shadow.report.total.trades >= 2);
+    // With it, the policy trips once the shadow's first trade is far enough ahead.
+    assert!(!with.reverts.is_empty(), "{:?}", with.comparison);
+    let r = with.reverts[0];
+    assert!(r.trip.drawdown >= 100 * D && r.parameters == 1, "{r:?}");
+    assert!(
+        with.reverts.iter().all(|r| r.parameters > 0),
+        "a trip with nothing tuned is not a revert: {:?}",
+        with.reverts
+    );
+    assert_eq!(with.reverts.len(), 1, "{:?}", with.reverts);
+    assert!(r.at > t0 + 62 * SEC, "after the tuning that caused it");
+    // The revert is on the tape, after the event that tripped it, from the policy, back to baseline.
+    let pos = with
+        .tape
+        .iter()
+        .position(|e| matches!(e, Event::ParamChange(c) if c.proposer == PROPOSER_POLICY))
+        .unwrap();
+    let Event::ParamChange(c) = with.tape[pos] else {
+        unreachable!()
+    };
+    assert_eq!(
+        (c.new_value, c.reason, c.hdr.ts_recv),
+        (1, REASON_AUTO_REVERT, r.at)
+    );
+    assert_eq!(c.evidence, u64::try_from(r.trip.drawdown).unwrap());
+    assert_eq!(
+        with.tape[pos - 1].ts_recv(),
+        r.at,
+        "right after the market event that tripped it"
+    );
+    assert!(with.changes.last().unwrap().policy);
+    // The second runner is entered on baseline parameters; the shadow side is unaffected by all this.
+    assert!(
+        with.tuned.report.by_label["late"].trades >= 1,
+        "tuned traded the second runner after the revert"
+    );
+    assert_eq!(with.shadow, without.shadow);
+    assert!(
+        with.comparison.pnl_net > without.comparison.pnl_net,
+        "reverting recovered something"
+    );
+    assert!(with.tuned.books_agree() && with.tuned.bookkeeping_errors == 0);
+}
+
+#[test]
+fn a_limit_that_is_never_reached_changes_nothing() {
+    let (events, labels, t0) = two_waves();
+    let cfg = BacktestConfig::default();
+    let plain = momentum_ab(events.clone(), labels.clone(), &cfg, &stricter(t0)).unwrap();
+    let huge = RevertConfig {
+        max_drawdown: 1_000_000 * D,
+        lockout: 120 * SEC,
+    };
+    let with = momentum_ab_with(events, labels, &cfg, &stricter(t0), Some(huge)).unwrap();
+    assert!(with.reverts.is_empty());
+    assert_eq!(with.tuned, plain.tuned);
+    assert_eq!(with.tape, plain.tape);
+}
+
+#[test]
+fn tuning_proposed_during_the_lockout_is_refused_and_after_it_is_accepted() {
+    let (events, labels, t0) = two_waves();
+    let cfg = BacktestConfig::default();
+    let probe = momentum_ab_with(
+        events.clone(),
+        labels.clone(),
+        &cfg,
+        &stricter(t0),
+        Some(revert_cfg()),
+    )
+    .unwrap();
+    let revert_at = probe.reverts[0].at;
+    // A proposal a minute after the revert (lockout 120 s) and another three minutes after it.
+    let after = |secs: u64| Scheduled {
+        at: revert_at + secs * SEC,
+        proposal: prop("trail_permille", 40),
+    };
+    let during = momentum_ab_with(
+        events.clone(),
+        labels.clone(),
+        &cfg,
+        &[stricter(t0), vec![after(60)]].concat(),
+        Some(revert_cfg()),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            during.refused.last().map(|r| r.why),
+            Some(Reject::Locked { .. })
+        ),
+        "{:?}",
+        during.refused
+    );
+    let later = momentum_ab_with(
+        events,
+        labels,
+        &cfg,
+        &[stricter(t0), vec![after(180)]].concat(),
+        Some(revert_cfg()),
+    )
+    .unwrap();
+    assert!(later.refused.is_empty(), "{:?}", later.refused);
+    assert_eq!(
+        later.changes.last().map(|a| (a.param, a.new)),
+        Some((prop("trail_permille", 40).param, 40))
+    );
+}
+
+#[test]
+fn a_session_with_a_revert_replays_exactly() {
+    let (events, labels, t0) = two_waves();
+    let cfg = BacktestConfig::default();
+    let ab = momentum_ab_with(
+        events,
+        labels.clone(),
+        &cfg,
+        &stricter(t0),
+        Some(revert_cfg()),
+    )
+    .unwrap();
+    assert!(!ab.reverts.is_empty());
+    let n = labels.len();
+    let store = ParamStore::new(tunable_specs(&cfg.params))
+        .unwrap()
+        .with_lockout(120 * SEC);
+    let mut host =
+        Host::new(MomentumLong::new(StrategyId(1), cfg.params, n).unwrap(), n).with_params(store);
+    let mut broker = SimBroker::new(cfg.sim, n);
+    let mut gateway = Gateway::new(cfg.limits, n);
+    let replay = run_gated(
+        &mut host,
+        &mut broker,
+        &mut gateway,
+        labels,
+        ab.tape.iter().copied(),
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(replay, ab.tuned);
+    assert_eq!(host.param_errors(), 0);
+    assert_eq!(host.params().unwrap().history(), ab.changes.as_slice());
+}
+
+#[test]
+fn reverts_are_exported_with_the_other_comparison_metrics() {
+    let (events, labels, t0) = two_waves();
+    let ab = momentum_ab_with(
+        events,
+        labels,
+        &BacktestConfig::default(),
+        &stricter(t0),
+        Some(revert_cfg()),
+    )
+    .unwrap();
+    let m = ab.metrics();
+    let get = |n: &str| m.iter().find(|(k, _)| k == n).map(|(_, v)| *v);
+    assert_eq!(get("params.reverts"), Some(ab.reverts.len() as i64));
+    assert_eq!(get("params.reverted"), Some(1));
+    assert_eq!(get("params.applied"), Some(ab.changes.len() as i64));
+}
+
+#[test]
+fn a_zero_limit_is_refused() {
+    let (events, labels, _) = two_waves();
+    let bad = RevertConfig {
+        max_drawdown: 0,
+        lockout: SEC,
+    };
+    assert!(momentum_ab_with(events, labels, &BacktestConfig::default(), &[], Some(bad)).is_err());
 }

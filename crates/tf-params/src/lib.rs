@@ -28,12 +28,22 @@
 //! in a journal beside the tape keyed by the event's `seq`. Integers only, time
 //! from the caller.
 
+mod revert;
+
 use std::collections::BTreeMap;
+
+pub use revert::{PolicyError, RevertPolicy, Trip};
 
 use tf_core::{Event, Header, InstrumentId, Nanos, ParamChange, ParamScope, ProviderId};
 
 /// Index of a parameter in the store's declaration list.
 pub type ParamId = u16;
+
+/// The proposer id of the system's own safety policy (see [`ParamStore::revert_events`]).
+/// An agent cannot use it: [`ParamStore::check`] refuses it. A change event carrying it
+/// may only return a parameter to its baseline, and is exempt from the step size, the
+/// cooldown and the lockout.
+pub const PROPOSER_POLICY: u16 = u16::MAX;
 
 /// At what level a parameter may be set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +108,14 @@ pub enum Reject {
     },
     /// The value is already the current one.
     NoChange,
+    /// The proposer id belongs to the safety policy.
+    ReservedProposer,
+    /// Tuning is locked out after a revert; allowed again at `until`.
+    Locked {
+        until: Nanos,
+    },
+    /// A policy change to something other than the baseline.
+    NotBaseline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +142,8 @@ pub struct Applied {
     pub reason: u16,
     pub evidence: u64,
     pub seq: u64,
+    /// Made by the safety policy: a return to baseline.
+    pub policy: bool,
 }
 
 pub struct ParamStore {
@@ -133,6 +153,8 @@ pub struct ParamStore {
     last_change: BTreeMap<(ParamId, Target), Nanos>,
     history: Vec<Applied>,
     next_seq: u64,
+    lockout: Nanos,
+    locked_until: Nanos,
 }
 
 fn target_of(c: &ParamChange) -> Target {
@@ -165,7 +187,21 @@ impl ParamStore {
             last_change: BTreeMap::new(),
             history: Vec::new(),
             next_seq: 0,
+            lockout: 0,
+            locked_until: 0,
         })
+    }
+
+    /// After the safety policy reverts parameters, refuse all other changes for this
+    /// long. Zero (the default) means no lockout.
+    pub fn with_lockout(mut self, lockout: Nanos) -> Self {
+        self.lockout = lockout;
+        self
+    }
+
+    /// Tuning is refused until this time (zero when not locked).
+    pub fn locked_until(&self) -> Nanos {
+        self.locked_until
     }
 
     pub fn specs(&self) -> &[ParamSpec] {
@@ -214,7 +250,10 @@ impl ParamStore {
             }
             match a.target {
                 Target::Global => global = a.new,
-                Target::Instrument(i) if i == instrument => over = Some(a.new),
+                // A policy revert clears an override: the instrument follows the global again.
+                Target::Instrument(i) if i == instrument => {
+                    over = if a.policy { None } else { Some(a.new) };
+                }
                 Target::Instrument(_) => {}
             }
         }
@@ -234,6 +273,7 @@ impl ParamStore {
         target: Target,
         value: i64,
         now: Nanos,
+        policy: bool,
     ) -> Result<(), Reject> {
         let spec = self
             .specs
@@ -241,6 +281,24 @@ impl ParamStore {
             .ok_or(Reject::UnknownParam(param))?;
         if matches!(target, Target::Instrument(_)) && spec.scope == Scope::Global {
             return Err(Reject::ScopeNotAllowed);
+        }
+        if policy {
+            // Only ever back to the declared baseline; a per-instrument override counts as a
+            // change even if it equals the baseline, since reverting clears it.
+            if value != spec.baseline {
+                return Err(Reject::NotBaseline);
+            }
+            let has_override =
+                matches!(target, Target::Instrument(i) if self.overrides.contains_key(&(param, i)));
+            if !has_override && value == self.current(param, target) {
+                return Err(Reject::NoChange);
+            }
+            return Ok(());
+        }
+        if now < self.locked_until {
+            return Err(Reject::Locked {
+                until: self.locked_until,
+            });
         }
         if spec.max_step == 0 {
             return Err(Reject::Frozen);
@@ -275,7 +333,10 @@ impl ParamStore {
     /// event to append to the tape; feed it to [`ParamStore::apply`] (live, once it
     /// is on the tape) and on replay.
     pub fn check(&self, p: &Proposal, now: Nanos) -> Result<ParamChange, Reject> {
-        self.validate(p.param, p.target, p.value, now)?;
+        if p.proposer == PROPOSER_POLICY {
+            return Err(Reject::ReservedProposer);
+        }
+        self.validate(p.param, p.target, p.value, now, false)?;
         let (scope, instrument) = match p.target {
             Target::Global => (ParamScope::Global, 0),
             Target::Instrument(i) => (ParamScope::Instrument, i),
@@ -302,15 +363,22 @@ impl ParamStore {
     pub fn apply(&mut self, c: &ParamChange) -> Result<(), Reject> {
         let target = target_of(c);
         let now = c.hdr.ts_recv;
-        self.validate(c.param, target, c.new_value, now)?;
+        let policy = c.proposer == PROPOSER_POLICY;
+        self.validate(c.param, target, c.new_value, now, policy)?;
         let old = self.current(c.param, target);
         match target {
             Target::Global => self.global[usize::from(c.param)] = c.new_value,
+            Target::Instrument(i) if policy => {
+                self.overrides.remove(&(c.param, i));
+            }
             Target::Instrument(i) => {
                 self.overrides.insert((c.param, i), c.new_value);
             }
         }
         self.last_change.insert((c.param, target), now);
+        if policy && self.lockout > 0 {
+            self.locked_until = self.locked_until.max(now.saturating_add(self.lockout));
+        }
         self.next_seq = self.next_seq.max(c.hdr.seq.saturating_add(1));
         self.history.push(Applied {
             revision: self.history.len() as u64 + 1,
@@ -323,8 +391,52 @@ impl ParamStore {
             reason: c.reason,
             evidence: c.evidence,
             seq: c.hdr.seq,
+            policy,
         });
         Ok(())
+    }
+
+    /// The events that return every changed parameter to its baseline, at time `now`:
+    /// the safety policy's answer to a tuned strategy doing badly. The global value
+    /// first, then each per-instrument override (which a revert clears). They come
+    /// from the policy, so the step size, cooldown and lockout do not apply, and
+    /// applying them locks tuning out for the store's lockout. Empty if everything is
+    /// already at baseline. Nothing changes until the events are applied.
+    pub fn revert_events(&self, now: Nanos, reason: u16, evidence: u64) -> Vec<ParamChange> {
+        let mut out = Vec::new();
+        let mut seq = self.next_seq;
+        let mut push =
+            |param: ParamId, scope: ParamScope, instrument: InstrumentId, baseline: i64| {
+                out.push(ParamChange {
+                    hdr: Header {
+                        ts_event: now,
+                        ts_recv: now,
+                        seq,
+                        instrument,
+                        provider: ProviderId::Internal,
+                    },
+                    param,
+                    scope,
+                    proposer: PROPOSER_POLICY,
+                    reason,
+                    new_value: baseline,
+                    evidence,
+                });
+                seq += 1;
+            };
+        for (i, spec) in self.specs.iter().enumerate() {
+            let param = i as ParamId;
+            if self.global[i] != spec.baseline {
+                push(param, ParamScope::Global, 0, spec.baseline);
+            }
+            for (&(_, instrument), _) in self
+                .overrides
+                .range((param, 0)..=(param, InstrumentId::MAX))
+            {
+                push(param, ParamScope::Instrument, instrument, spec.baseline);
+            }
+        }
+        out
     }
 
     /// Apply an event if it is a parameter change; anything else is ignored.

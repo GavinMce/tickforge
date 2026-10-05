@@ -19,6 +19,7 @@ task backtest                                # Strategy 1 through the risk gatew
 task backtest ARGS="--higher-lows 0 --daily-loss 20"  # see the gateway refuse entries after a loss
 task backtest ARGS="--strategy trend --healthy 2 --dangerous 2"  # the indicator example; it buys a fading runner too
 task backtest ARGS="--propose min_higher_lows=2@1 --propose min_higher_lows=3@62"  # tuned vs fixed-parameter shadow, same feed
+task backtest ARGS="--healthy 2 --dangerous 0 --quiet 0 --secs 700 --propose min_higher_lows=2@1 --propose min_higher_lows=3@62 --revert-drawdown 100"  # auto-revert
 task synth ARGS="--store results"            # keep the result keyed by its manifest; a rerun is skipped
 ```
 

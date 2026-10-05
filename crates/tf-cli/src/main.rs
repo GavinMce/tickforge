@@ -29,7 +29,7 @@ USAGE:
                 [--latency-ms N] [--borrow-bps N] [--order-notional USD]
                 [--daily-loss USD] [--max-orders N] [--higher-lows N] [--store DIR]
                 [--strategy momentum|trend] [--lead SECS] [--fast N] [--slow N]
-                [--propose NAME=VALUE@SECS]...
+                [--propose NAME=VALUE@SECS]... [--revert-drawdown USD] [--lockout SECS]
 
     Run Strategy 1 (long side) over a synthetic session of healthy and dangerous
     runners and quiet names, through the risk gateway and the simulated broker,
@@ -60,6 +60,11 @@ USAGE:
                       with fixed parameters on the same feed, each with its own simulated
                       broker and gateway. Prints both reports, the difference, the
                       changes applied and the proposals refused (with why).
+    --revert-drawdown USD   with --propose: the safety policy returns every tuned
+                      parameter to baseline when the tuned side falls this many dollars
+                      behind its own best showing against the shadow
+    --lockout SECS    with --revert-drawdown: refuse all tuning for this long after a
+                      revert (default 300)
     --store DIR       keep the result keyed by a manifest hash of the whole setup
                       (seed, git sha, session, limits, parameters); reruns are skipped
 
@@ -285,6 +290,8 @@ struct BacktestArgs {
     max_orders: u32,
     higher_lows: u32,
     propose: Vec<(String, i64, u64)>,
+    revert_drawdown: Option<u64>,
+    lockout: u64,
     strategy: String,
     lead: Option<u64>,
     fast: u32,
@@ -306,6 +313,8 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
         max_orders: 20,
         higher_lows: 1,
         propose: Vec::new(),
+        revert_drawdown: None,
+        lockout: 300,
         strategy: "momentum".to_owned(),
         lead: None,
         fast: 3,
@@ -333,6 +342,8 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
             "--max-orders" => a.max_orders = val("--max-orders")? as u32,
             "--higher-lows" => a.higher_lows = val("--higher-lows")? as u32,
             "--lead" => a.lead = Some(val("--lead")?),
+            "--revert-drawdown" => a.revert_drawdown = Some(val("--revert-drawdown")?),
+            "--lockout" => a.lockout = val("--lockout")?,
             "--propose" => {
                 let v = it.next().ok_or("--propose needs NAME=VALUE@SECS")?;
                 a.propose.push(parse_proposal(v)?);
@@ -351,6 +362,14 @@ fn parse_backtest(args: &[String]) -> Result<BacktestArgs, String> {
         ));
     }
     let trend = a.strategy == "trend";
+    if a.revert_drawdown.is_some() && a.propose.is_empty() {
+        return Err(
+            "--revert-drawdown needs at least one --propose (it watches a tuned side)".to_owned(),
+        );
+    }
+    if a.revert_drawdown == Some(0) {
+        return Err("--revert-drawdown must be positive".to_owned());
+    }
     if trend && !a.propose.is_empty() {
         return Err(
             "--propose applies to the momentum strategy; trend has no tunable parameters yet"
@@ -450,6 +469,12 @@ fn backtest_manifest(
     for (k, v) in params {
         m = m.with_param(k, &v).map_err(|e| e.to_string())?;
     }
+    if let Some(d) = a.revert_drawdown {
+        m = m
+            .with_config("revert_drawdown_usd", &d.to_string())
+            .and_then(|m| m.with_config("lockout_secs", &a.lockout.to_string()))
+            .map_err(|e| e.to_string())?;
+    }
     for (i, (name, value, secs)) in a.propose.iter().enumerate() {
         m = m
             .with_config(&format!("propose_{i}"), &format!("{name}={value}@{secs}"))
@@ -512,7 +537,7 @@ fn backtest_ab(
     labels: Vec<String>,
     start: u64,
 ) -> Result<Vec<(String, i64)>, String> {
-    use tf_backtest::ab::{Scheduled, momentum_ab};
+    use tf_backtest::ab::{RevertConfig, Scheduled, momentum_ab_with};
     let params = tf_params::ParamStore::new(tf_strategy::tunable_specs(&cfg.params))
         .map_err(|e| format!("{e:?}"))?;
     let mut scheduled = Vec::new();
@@ -533,7 +558,11 @@ fn backtest_ab(
             },
         });
     }
-    let r = momentum_ab(events.iter().copied(), labels, cfg, &scheduled)?;
+    let revert = a.revert_drawdown.map(|d| RevertConfig {
+        max_drawdown: tf_backtest::dollars(d),
+        lockout: a.lockout * NANOS_PER_SEC,
+    });
+    let r = momentum_ab_with(events.iter().copied(), labels, cfg, &scheduled, revert)?;
     println!(
         "momentum A/B | seed {} | {} healthy, {} dangerous, {} quiet | {} s simulated | {} proposals",
         a.seed,
@@ -575,6 +604,15 @@ fn backtest_ab(
             name(ch.param),
             ch.old,
             ch.new
+        );
+    }
+    for rv in &r.reverts {
+        println!(
+            "REVERT   +{:>4} s  {} parameter(s) back to baseline: {} behind its best (limit ${})",
+            (rv.at - start) / NANOS_PER_SEC,
+            rv.parameters,
+            usd(-(rv.trip.drawdown as i128)),
+            a.revert_drawdown.unwrap_or(0)
         );
     }
     for rf in &r.refused {
@@ -816,6 +854,12 @@ mod tests {
             &["--strategy", "trend"],
             &["--lead", "100"],
             &["--propose", "min_higher_lows=2@1"],
+            &[
+                "--propose",
+                "min_higher_lows=2@1",
+                "--revert-drawdown",
+                "100",
+            ],
         ] {
             assert_ne!(
                 base,
@@ -877,6 +921,41 @@ mod tests {
             ]),
             "the order they are listed in is part of the setup"
         );
+    }
+
+    #[test]
+    fn the_revert_policy_is_part_of_the_manifest_and_needs_a_tuned_side() {
+        let base = hash(&[
+            "--propose",
+            "min_higher_lows=2@1",
+            "--revert-drawdown",
+            "100",
+        ]);
+        for flags in [
+            &[
+                "--propose",
+                "min_higher_lows=2@1",
+                "--revert-drawdown",
+                "101",
+            ][..],
+            &[
+                "--propose",
+                "min_higher_lows=2@1",
+                "--revert-drawdown",
+                "100",
+                "--lockout",
+                "60",
+            ],
+        ] {
+            assert_ne!(base, hash(flags), "{flags:?}");
+        }
+        let args =
+            |v: &[&str]| parse_backtest(&v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        assert!(
+            args(&["--revert-drawdown", "100"]).is_err(),
+            "nothing is tuned"
+        );
+        assert!(args(&["--propose", "x=1@1", "--revert-drawdown", "0"]).is_err());
     }
 
     #[test]

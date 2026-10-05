@@ -454,3 +454,256 @@ fn replaying_the_events_reproduces_the_store_exactly_and_every_change_obeys_its_
         assert_eq!(seqs, (0..seqs.len() as u64).collect::<Vec<_>>());
     }
 }
+
+// ---- the safety policy: revert to baseline ----
+
+fn tuned_store() -> ParamStore {
+    let mut s = store().with_lockout(300 * SEC);
+    s.propose(&g(TRAIL, 40), 0).unwrap();
+    s.propose(&g(DEPTH, 400), 0).unwrap();
+    s.propose(&prop(TRAIL, Target::Instrument(3), 50), 0)
+        .unwrap();
+    s
+}
+
+#[test]
+fn a_revert_returns_everything_to_baseline_ignoring_steps_and_cooldowns() {
+    let mut s = tuned_store();
+    // Walk depth a long way from its baseline (350), one allowed step at a time.
+    s.propose(&g(DEPTH, 450), 10 * SEC).unwrap();
+    s.propose(&g(DEPTH, 500), 20 * SEC).unwrap();
+    assert_eq!(
+        (s.value(TRAIL), s.value(DEPTH), s.value_for(TRAIL, 3)),
+        (40, 500, 50)
+    );
+    let events = s.revert_events(30 * SEC, 9, 0xfeed);
+    // Per parameter: its global, then its overrides; each is the policy's, back to baseline.
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| (e.param, e.scope, e.hdr.instrument, e.new_value))
+            .collect::<Vec<_>>(),
+        [
+            (TRAIL, ParamScope::Global, 0, 30),
+            (TRAIL, ParamScope::Instrument, 3, 30),
+            (DEPTH, ParamScope::Global, 0, 350)
+        ]
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e.proposer == PROPOSER_POLICY && e.reason == 9 && e.evidence == 0xfeed)
+    );
+    assert_eq!(
+        events.iter().map(|e| e.hdr.seq).collect::<Vec<_>>(),
+        [5, 6, 7],
+        "numbered after the 5 applied changes"
+    );
+    assert_eq!(s.value(DEPTH), 500, "nothing changed yet");
+    for e in &events {
+        s.apply(e).unwrap(); // 500 -> 350 is a step of 150, and trail was changed moments ago: allowed
+    }
+    assert_eq!(
+        (s.value(TRAIL), s.value(DEPTH), s.value_for(TRAIL, 3)),
+        (30, 350, 30)
+    );
+    assert!(s.history().iter().rev().take(3).all(|a| a.policy));
+    assert!(
+        s.revert_events(40 * SEC, 9, 0).is_empty(),
+        "already at baseline: nothing to revert"
+    );
+}
+
+#[test]
+fn a_revert_clears_overrides_so_the_instrument_follows_the_global_again() {
+    let mut s = tuned_store();
+    for e in s.revert_events(30 * SEC, 1, 0) {
+        s.apply(&e).unwrap();
+    }
+    // After the lockout, a global tune reaches instrument 3 (its override is gone).
+    s.propose(&g(TRAIL, 40), 1_000 * SEC).unwrap();
+    assert_eq!(s.value_for(TRAIL, 3), 40);
+    // And the history replays the same way.
+    let h = s.history().len() as u64;
+    assert_eq!(
+        (s.value_at(TRAIL, 3, h - 1), s.value_at(TRAIL, 3, h)),
+        (30, 40)
+    );
+    assert_eq!(
+        s.value_at(TRAIL, 3, 3),
+        50,
+        "before the revert it had its override"
+    );
+    assert_eq!(s.value_at(TRAIL, 3, 6), 30, "after it, the baseline");
+}
+
+#[test]
+fn tuning_is_locked_out_after_a_revert_and_the_cooldown_restarts() {
+    let mut s = tuned_store();
+    for e in s.revert_events(100 * SEC, 1, 0) {
+        s.apply(&e).unwrap();
+    }
+    assert_eq!(s.locked_until(), 400 * SEC);
+    assert_eq!(
+        s.propose(&g(DEPTH, 400), 399 * SEC),
+        Err(Reject::Locked { until: 400 * SEC })
+    );
+    assert_eq!(
+        s.propose(&prop(TRAIL, Target::Instrument(1), 40), 200 * SEC),
+        Err(Reject::Locked { until: 400 * SEC })
+    );
+    s.propose(&g(DEPTH, 400), 400 * SEC).unwrap(); // the lockout ends exactly at its end
+    // Without a lockout configured, a revert locks nothing.
+    let mut free = store();
+    free.propose(&g(DEPTH, 400), 0).unwrap();
+    for e in free.revert_events(1, 1, 0) {
+        free.apply(&e).unwrap();
+    }
+    assert_eq!(free.locked_until(), 0);
+    free.propose(&g(DEPTH, 400), 1).unwrap();
+}
+
+#[test]
+fn the_policys_proposer_id_is_reserved_and_its_events_may_only_return_to_baseline() {
+    let mut s = tuned_store();
+    let mut p = g(DEPTH, 450);
+    p.proposer = PROPOSER_POLICY;
+    assert_eq!(
+        s.check(&p, 1_000 * SEC),
+        Err(Reject::ReservedProposer),
+        "an agent cannot claim it"
+    );
+    // A tape event that uses it for anything but the baseline is refused and changes nothing.
+    let mut e = s.revert_events(5 * SEC, 1, 0)[2]; // depth, global
+    e.new_value = 300;
+    assert_eq!(s.apply(&e), Err(Reject::NotBaseline));
+    e.new_value = 5; // the baseline of the frozen parameter, which is already there
+    e.param = LOCKED; // frozen and already at baseline
+    assert_eq!(s.apply(&e), Err(Reject::NoChange));
+    assert_eq!(s.value(DEPTH), 400);
+    let before = s.history().len();
+    let good = s.revert_events(5 * SEC, 1, 0)[2];
+    s.apply(&good).unwrap();
+    assert_eq!(s.history().len(), before + 1);
+    // The policy cannot use an override scope the parameter does not allow.
+    let mut bad = good;
+    bad.scope = ParamScope::Instrument;
+    bad.hdr.instrument = 1;
+    bad.param = DEPTH;
+    assert_eq!(s.apply(&bad), Err(Reject::ScopeNotAllowed));
+}
+
+#[test]
+fn reverts_replay_exactly_like_every_other_change() {
+    for seed in 0..20 {
+        let mut rng = SplitMix64::new(seed);
+        let mut live = store().with_lockout(120 * SEC);
+        let mut events = Vec::new();
+        let mut now = 0;
+        for _ in 0..300 {
+            now += rng.next_u64() % (50 * SEC);
+            if rng.next_u64() % 25 == 0 {
+                for e in live.revert_events(now, 1, 0) {
+                    live.apply(&e).unwrap();
+                    events.push(e);
+                }
+                continue;
+            }
+            let param = (rng.next_u64() % 2) as ParamId;
+            let target = if param == TRAIL && rng.next_u64() % 3 == 0 {
+                Target::Instrument((rng.next_u64() % 3) as u32)
+            } else {
+                Target::Global
+            };
+            let cur = match target {
+                Target::Global => live.value(param),
+                Target::Instrument(i) => live.value_for(param, i),
+            };
+            let p = Proposal {
+                param,
+                target,
+                value: cur + (rng.next_u64() % 80) as i64 - 40,
+                proposer: 2,
+                reason: 1,
+                evidence: 0,
+            };
+            if let Ok(e) = live.propose(&p, now) {
+                events.push(e);
+            }
+        }
+        assert!(
+            live.history().iter().any(|a| a.policy),
+            "seed {seed} included a revert"
+        );
+        let mut replay = store().with_lockout(120 * SEC);
+        for e in &events {
+            let mut b = Vec::new();
+            Event::ParamChange(*e).encode(&mut b);
+            replay
+                .apply_event(&Event::decode(&b).unwrap().0)
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(replay.history(), live.history(), "seed {seed}");
+        assert_eq!(replay.locked_until(), live.locked_until());
+        for p in 0..2 {
+            for i in 0..3 {
+                for rev in [0, live.revision() / 2, live.revision()] {
+                    assert_eq!(replay.value_at(p, i, rev), live.value_at(p, i, rev));
+                }
+                assert_eq!(replay.value_for(p, i), live.value_for(p, i));
+            }
+        }
+        // No tuning change ever landed inside a lockout.
+        let mut locked = 0;
+        for a in live.history() {
+            if a.policy {
+                locked = a.ts + 120 * SEC;
+            } else {
+                assert!(
+                    a.ts >= locked,
+                    "seed {seed}: {a:?} inside a lockout ending {locked}"
+                );
+            }
+        }
+    }
+}
+
+// ---- the policy itself ----
+
+#[test]
+fn the_policy_trips_on_a_drawdown_in_the_relative_curve_and_rearms() {
+    assert_eq!(RevertPolicy::new(0), Err(PolicyError::ZeroDrawdown));
+    let mut p = RevertPolicy::new(100).unwrap();
+    // Together, then the tuned side pulls ahead by 50 and falls back: a drawdown from the peak.
+    assert_eq!(p.observe(0, 0), None);
+    assert_eq!(p.observe(150, 100), None); // relative +50
+    assert_eq!(p.observe(100, 100), None); // relative 0: down 50 from the peak
+    assert_eq!(p.observe(100, 149), None); // relative -49: down 99
+    let t = p.observe(100, 150).unwrap(); // relative -50: down exactly 100
+    assert_eq!((t.relative, t.peak, t.drawdown), (-50, 50, 100));
+    // Re-armed from here: a fall of 99 more is not enough, 100 is.
+    assert_eq!(p.observe(100, 249), None);
+    assert!(p.observe(100, 250).is_some());
+}
+
+#[test]
+fn a_shadow_that_is_also_losing_is_not_a_reason_to_revert() {
+    let mut p = RevertPolicy::new(100).unwrap();
+    // Both fall together by far more than the limit: the relative curve is flat.
+    for k in 0..50 {
+        assert_eq!(p.observe(-k * 50, -k * 50), None);
+    }
+    // And the tuned side falling while the shadow falls less does count.
+    assert!(p.observe(-3_000, -2_800).is_some());
+}
+
+#[test]
+fn the_peak_starts_at_zero_not_at_the_first_observation() {
+    let mut p = RevertPolicy::new(100).unwrap();
+    // The first thing seen is already 100 behind: that is a drawdown from the starting zero.
+    assert!(p.observe(0, 100).is_some());
+    let mut q = RevertPolicy::new(100).unwrap();
+    assert_eq!(q.observe(500, 400), None);
+    assert_eq!(q.peak(), 100);
+}

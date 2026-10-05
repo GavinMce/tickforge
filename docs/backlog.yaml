@@ -511,7 +511,8 @@ epics:
       - id: E08-S06
         jira: TIC-68
         title: Fill, slippage and borrow-cost simulation for backtests
-        status: todo
+        status: done
+        evidence: crates/tf-strategy/src/sim.rs (SimBroker, run_backtest); 16 tests in sim_tests.rs incl. latency, quote-size sharing, halts, borrow fee checked independently in Python; every mutation tried was caught; ADR 0011
         ac:
           - Marketable-limit fills against recorded quotes with latency; borrow fee modelled
       - id: E08-S07

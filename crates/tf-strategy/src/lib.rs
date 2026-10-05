@@ -5,12 +5,14 @@
 //!
 //! - [`intent`]: what a strategy asks for, and the rules a request must satisfy.
 //! - [`lifecycle`]: the gateway's decisions and the state of an order.
+//! - [`sim`]: a simulated broker (fills against recorded quotes, latency, slippage, borrow cost).
 //! - [`strategy`]: the [`Strategy`] trait, its [`Ctx`] and the [`Host`] that drives it.
 
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
 pub mod intent;
 pub mod lifecycle;
+pub mod sim;
 pub mod strategy;
 
 pub use intent::{
@@ -19,8 +21,11 @@ pub use intent::{
 pub use lifecycle::{
     Decision, LifecycleError, Order, OrderId, OrderState, OrderUpdate, RejectReason,
 };
+pub use sim::{Fill, SimBroker, SimConfig, run_backtest};
 pub use strategy::{Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};
 
+#[cfg(test)]
+mod sim_tests;
 #[cfg(test)]
 mod strategy_tests;
 #[cfg(test)]

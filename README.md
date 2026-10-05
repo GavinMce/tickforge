@@ -33,6 +33,8 @@ the generator is a deliberate, reviewed change.
 
 ## Rules of the road
 
+The reasoning is in [`docs/adr/`](docs/adr/README.md); the determinism rules are ADR 0003.
+
 - Engine and strategy code take time from a `Clock` or event timestamps, never
   `SystemTime`/`Instant`. Engine code does no I/O.
 - Prices are fixed-point integers. Floats appear only at JSON adapter boundaries.
@@ -40,10 +42,20 @@ the generator is a deliberate, reviewed change.
 - Determinism is a feature: do not use `rand`, floating-point transcendental
   functions or hash-map iteration order in anything that feeds a golden hash.
 
-## Workflow (Jira)
+## Workflow (Jira and GitHub)
 
-- Epics hold larger bodies of work; stories are the actionable units.
-- Jira project `TIC` ([board](https://arb-it-test.atlassian.net/jira/software/projects/TIC/boards/2/backlog)).
-- Branch: `TIC-123-short-description`. Commit/PR titles start with `TIC-123:`.
+- Epics hold larger bodies of work; stories are the actionable units. Jira
+  project `TIC` ([board](https://arb-it-test.atlassian.net/jira/software/projects/TIC/boards/2/backlog)).
+- New work goes into `docs/backlog.yaml` first, then Jira, then the issue key is
+  written back to the yaml.
+- Branch from `main` as `TIC-123-short-description`. Commit and PR titles start
+  with `TIC-123:`, and the PR body links the Jira issue. PRs are squash-merged,
+  so `main` has one `TIC-123: ... (#n)` commit per PR.
+- Run `task check` before pushing. `main` is protected: the CI checks `check`,
+  `determinism (x86_64)` and `determinism (aarch64)` must pass to merge.
+- Jira status: In Progress when you start; Done when every acceptance criterion
+  is met (repo settings included), which is after the merge.
 - A story is done when its acceptance criteria are met and `task check` passes.
-- New work goes into `docs/backlog.yaml` first, then Jira.
+  Record that in `docs/backlog.yaml` (`status: done` plus `evidence:`), in the
+  finishing PR or a small follow-up PR.
+- Decisions that are expensive to reverse get an ADR in [`docs/adr/`](docs/adr/README.md).

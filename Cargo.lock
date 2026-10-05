@@ -86,6 +86,14 @@ name = "tf-core"
 version = "0.1.0"
 
 [[package]]
+name = "tf-engine"
+version = "0.1.0"
+dependencies = [
+ "tf-core",
+ "tf-synth",
+]
+
+[[package]]
 name = "tf-provider"
 version = "0.1.0"
 dependencies = [

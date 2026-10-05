@@ -18,6 +18,7 @@ pub mod intent;
 pub mod lifecycle;
 pub mod momentum;
 pub mod report;
+pub mod rule_diff;
 pub mod rules;
 pub mod sim;
 pub mod strategy;
@@ -46,6 +47,8 @@ mod momentum_tests;
 mod params_tests;
 #[cfg(test)]
 mod report_tests;
+#[cfg(test)]
+mod rule_diff_tests;
 #[cfg(test)]
 mod rules_tests;
 #[cfg(test)]

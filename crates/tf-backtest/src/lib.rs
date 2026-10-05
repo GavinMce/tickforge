@@ -25,6 +25,9 @@
 pub mod ab;
 pub mod compare;
 pub mod export;
+pub mod review;
+#[cfg(test)]
+mod review_tests;
 
 use std::collections::BTreeMap;
 

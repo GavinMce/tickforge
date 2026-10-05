@@ -212,7 +212,20 @@ pub(crate) fn listing(
     table(rows, now.as_deref())
 }
 
+/// Runs to open, the rule files that may be needed for them, and where to write the page.
+type OpenRequest = (Vec<RunResult>, Vec<String>, String);
+
 pub(crate) fn runs(args: &[String]) -> Result<(), String> {
+    let (text, open) = report(args)?;
+    print!("{text}");
+    if let Some((chosen, rules, out)) = open {
+        open_runs(&chosen, &rules, &out)?;
+    }
+    Ok(())
+}
+
+/// What `tf runs` prints, and the runs to open afterwards if `--open` was given.
+pub(crate) fn report(args: &[String]) -> Result<(String, Option<OpenRequest>), String> {
     let (mut store, mut rules, mut out) = (None, Vec::new(), None);
     let (mut q, mut check, mut open) = (Query::default(), false, Vec::new());
     let mut it = args.iter().peekable();
@@ -253,27 +266,35 @@ pub(crate) fn runs(args: &[String]) -> Result<(), String> {
     }
     let store =
         store.ok_or("tf runs needs --store DIR (where `tf backtest --store` kept the runs)")?;
+    rules.extend(crate::rules_cmd::store_rules(Path::new(&store)));
     let (found, skipped) = scan(Path::new(&store))?;
     let by_key: std::collections::BTreeMap<String, &RunResult> =
         found.iter().map(|r| (r.key().hex(), r)).collect();
     let rows = select(found.iter().map(row_of).collect(), &q);
+    let mut text = String::new();
     if rows.is_empty() {
-        println!(
-            "no runs{} in {store}",
+        text.push_str(&format!(
+            "no runs{} in {store}\n",
             if found.is_empty() { "" } else { " match" }
-        );
+        ));
     } else {
-        print!("{}", listing(&rows, &by_key, &rules, check));
+        text.push_str(&listing(&rows, &by_key, &rules, check));
     }
     if skipped > 0 {
-        println!("skipped  {skipped} file(s) that did not parse");
+        text.push_str(&format!("skipped  {skipped} file(s) that did not parse\n"));
     }
-    if !open.is_empty() {
+    let open = if open.is_empty() {
+        None
+    } else {
         let keys = pick(&rows, &open)?;
         let chosen: Vec<RunResult> = keys.iter().map(|k| by_key[k].clone()).collect();
-        open_runs(&chosen, &rules, out.as_deref().unwrap_or("explorer.html"))?;
-    }
-    Ok(())
+        Some((
+            chosen,
+            rules,
+            out.unwrap_or_else(|| "explorer.html".to_owned()),
+        ))
+    };
+    Ok((text, open))
 }
 
 #[cfg(test)]

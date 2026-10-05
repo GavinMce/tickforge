@@ -153,6 +153,17 @@ pub struct Condition {
     pub threshold: Threshold,
 }
 
+impl std::fmt::Display for Condition {
+    /// The text form: `depth > @max_depth_permille`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {} ", self.feature.name(), self.cmp.symbol())?;
+        match self.threshold {
+            Threshold::Value(v) => write!(f, "{v}"),
+            Threshold::Param(i) => write!(f, "@{}", TUNABLES[i].name),
+        }
+    }
+}
+
 impl Condition {
     pub fn holds(&self, f: &PullbackFeatures, impulse: i64, p: &MomentumParams) -> bool {
         self.feature
@@ -342,21 +353,7 @@ impl RuleSet {
                 if st.mode == Mode::All { "all" } else { "any" }
             );
             for (i, c) in st.conditions.iter().enumerate() {
-                let _ = write!(
-                    s,
-                    "{} {} {} ",
-                    if i == 0 { "" } else { ";" },
-                    c.feature.name(),
-                    c.cmp.symbol()
-                );
-                match c.threshold {
-                    Threshold::Value(v) => {
-                        let _ = write!(s, "{v}");
-                    }
-                    Threshold::Param(i) => {
-                        let _ = write!(s, "@{}", TUNABLES[i].name);
-                    }
-                }
+                let _ = write!(s, "{} {c}", if i == 0 { "" } else { ";" });
             }
             s.push('\n');
         }

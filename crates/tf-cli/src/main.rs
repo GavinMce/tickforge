@@ -1,4 +1,5 @@
 mod explore;
+mod rules_cmd;
 mod runs;
 
 use std::process::ExitCode;
@@ -104,6 +105,30 @@ USAGE:
                       replays every run, so it takes as long as running them
     --open ROW [ROW]  open that row of the list in the explorer, or compare two rows
                       (same rules as `tf explore`: pass --rules FILE for custom rules)
+
+    tf rules diff BASE CAND
+    tf rules review CAND --store DIR --proposer NAME --reason TEXT [--base FILE] [--seeds A..B]
+                    [--min-sessions N] [--min-trades N] [--allow-net-drop USD]
+                    [--allow-drawdown-rise USD] [--worse-pct N]
+    tf rules show|approve|list ... --store DIR [--by NAME]
+
+    Review a proposed change to the momentum strategy's entry rules before anything uses it.
+    BASE and CAND are rules files (BASE may be `built-in`).
+
+    diff      the structural change, flagging any loosening of a protective stage
+              (too_old, dangerous): a condition removed, a threshold moved so it fires less
+              often, or `any` made `all`
+    review    runs base and candidate on the same held-out sessions (seeds 1000..1023 unless
+              --seeds), keeps every run in the store (open them with `tf runs` / `tf explore`),
+              applies the gates (a different rule set; enough sessions and trades; no more
+              entries in the dangerous scenarios; net P&L and worst drawdown no worse; not
+              worse in more than a quarter of the sessions) and writes a proposal record with
+              the verdict: accepted, needs-human (it loosens a veto) or rejected. Exits with
+              an error when rejected.
+    show      the record and its status;  list  all records
+    approve   record a named person's approval (appended to the record). A rejected proposal
+              cannot be approved, and nothing is live until a person has approved it.
+    The gates test internal consistency on synthetic sessions; they are not evidence of an edge.
 
     tf bench [--symbols N] [--secs N] [--seed N] [--runs N] [--out FILE]
              [--compare FILE] [--commit SHA] [--flag-drop PCT] [--flag-rise PCT]
@@ -914,6 +939,7 @@ fn main() -> ExitCode {
         Some("backtest") => backtest(&args[1..]),
         Some("explore") => explore::explore(&args[1..]),
         Some("runs") => runs::runs(&args[1..]),
+        Some("rules") => rules_cmd::rules(&args[1..]),
         Some("help" | "--help" | "-h") | None => {
             print!("{USAGE}");
             Ok(())

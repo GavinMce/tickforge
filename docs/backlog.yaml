@@ -930,3 +930,14 @@ epics:
           - Runs in a store are listed with what a person picks by, and can be filtered and sorted
           - Whether the current code still reproduces each run can be checked from the list
           - A run, or a pair of runs, opens from the list without copying hashes
+      - id: E16-S04
+        jira: TIC-117
+        title: Rule-edit review path (diff, held-out paired backtest, gates, verdict record, human approval)
+        status: done
+        evidence: tf rules diff / review / show / approve / list (crates/tf-cli/src/rules_cmd.rs); tf_strategy::rule_diff flags a loosened veto; tf_backtest::review holds the gates, verdicts and the append-only proposal record (a verdict its gates do not support does not parse; a rejected proposal cannot be approved); both runs of every session go in the store so tf runs and tf explore open them and find the kept rule files themselves; run for real, the entry-loosening edit is rejected (worse in 24 of 24 sessions), a harmless tightening is accepted, a loosened veto goes to a person; ADR 0029; 23 mutations tried, 3 survivors found and closed. The gates test consistency on synthetic sessions, not an edge; nothing reads approvals to switch rules on yet
+        deps: [E16-S01, E16-S02, E16-S03]
+        ac:
+          - A proposed rule set is shown as a structural diff with any loosening of a protective stage flagged
+          - It is backtested against the base on held-out sessions and judged by explicit gates, with a stored record of the verdict and the runs
+          - Nothing is approved by the gates alone; a person's approval is recorded, and a rejected proposal cannot be approved
+

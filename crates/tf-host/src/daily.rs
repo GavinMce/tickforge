@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use tf_core::{InstrumentId, Nanos, SymbolTable};
 use tf_engine::OwnerStats;
-use tf_ingest::Stats;
+use tf_ingest::{Lost, Stats};
 use tf_ledger::LedgerStore;
 
 use crate::def::Route;
@@ -372,10 +372,11 @@ impl DailyReport {
                     s,
                     "    {} {} between {} and {}",
                     g.count,
-                    if g.trades {
-                        "trades lost"
-                    } else {
-                        "control events lost"
+                    match g.lost {
+                        Lost::Trades => "trades lost",
+                        Lost::Control => "control events lost",
+                        Lost::Skipped =>
+                            "gateway skip notices (an unknown number of records, skipped because we read too slowly)",
                     },
                     clock(g.first_ts),
                     clock(g.last_ts)

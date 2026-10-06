@@ -66,3 +66,4 @@ How:
 | [0047](0047-a-day-is-checked-by-replaying-its-capture-and-comparing-decision-logs.md) | A day is checked by replaying its capture and comparing decision logs | Accepted |
 | [0048](0048-the-daily-report-is-a-plain-reading-that-says-what-was-not-measured.md) | The daily report is a plain reading that says what was not measured | Accepted |
 | [0049](0049-the-live-feed-is-a-small-synchronous-client-not-the-official-async-one.md) | The live feed is a small synchronous client, not the official async one | Accepted |
+| [0050](0050-one-engine-thread-takes-the-queue-and-the-feed-thread-keeps-the-bytes.md) | One engine thread takes the queue, and the feed thread keeps the bytes | Accepted |

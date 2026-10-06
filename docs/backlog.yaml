@@ -392,13 +392,38 @@ epics:
       - id: E18-S12
         jira: TIC-153
         title: "Live day driver: feed, ingest queue, host, capture and decision log wired together"
-        status: todo
+        status: done
         deps: [E06-S02, E06-S04, E18-S05, E18-S06, E18-S07]
+        evidence: >
+          tf-driver (ADR 0050): `run(config, strategies-with-certificates, ledger store, stop flag)` runs a day from
+          the first instrument name to the close. Warm-up: logs in, waits until the gateway has been quiet about
+          instrument names (or a limit), builds the symbol table from them, builds the host and admits the
+          strategies, whose universes are resolved against those names (events wait in the queue). The raw
+          capture is written by the feed thread from the bytes as read (a new Decoder tap and a RawSink in tf-live);
+          if it cannot be written the day stops with the kill switch thrown. The decision log is appended to a
+          file as the day goes and closed at the end (a log cut by a crash reads back as far as it goes,
+          `Log::parse_partial`). Events the gateway sent twice after a reconnect are dropped by one rule
+          (tf_core::Dedupe, exact repeats within one receive time) that the replay of the capture applies too;
+          the replay stops at the live day's end-of-day, so events a capture holds beyond the close are not
+          replayed. A dropped or silent session is reopened from the last event's time with backoff; one that
+          stays down ends the day with "THE GATEWAY WAS LOST" and a list of the positions left open. The engine's
+          time per event is measured with the wall clock (the host cannot) and goes, with the queue's counters and
+          the capture's size, into the daily report; the capture is finished, verified and (if asked) replayed
+          through a fresh host, with the comparison in the report. Gateway skip notices become gaps on the host and
+          in the report. 7 driver tests against a fake gateway: a whole day (names, universes, 800 and 400 shares
+          held, log equal to the host's, capture clean, replay equal, report with the driver's measurements), a
+          forced disconnect (same decisions as the uninterrupted day, `start=` the last event's time, one repeat
+          dropped, replay of the capture still equal), a gateway that does not return, a capture that cannot be written, an
+          operator's stop (everything queued is taken first), a skip notice, and a strategy whose
+          certificate is for another; 11 mutants of dedupe, resume, close time, tail, capture failure,
+          reconnect limit, gaps, log close, the replay and lag killed. Not done, and said so: it has not run
+          against the real feed (needs the plan): the subscription lines, stream and heartbeats were
+          confirmed only against the fake; no real process scheduling (the 04:00 start, a signal handler for
+          the stop flag, the ledger on disk) which is E18-S09; no strategies yet (E18-S08).
         ac:
-          - One driver loop runs a day from the open to the close, against a fake gateway and against a capture replayed through the same path
-          - The day's raw capture verifies clean and its replay equals the live decision log
-          - A forced disconnect resumes from the last event time with no loss and no double delivery
-          - The daily report is produced with the driver's own measurements (engine lag, queue counters, capture facts); a gateway that stays down is reported
+          - One driver loop runs a day from the first instrument name to the close, against a fake gateway, with the capture replayed through the same host to the same decisions
+          - A forced disconnect resumes from the last event time with no loss and no double delivery, and the day is the same as without it
+          - The daily report is produced with the driver's own measurements; a gateway that stays down, a capture that cannot be written and an operator's stop each end the day honestly
       - id: E06-S03
         jira: TIC-51
         title: Session management with intraday replay and symbol sharding

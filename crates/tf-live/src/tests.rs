@@ -1,15 +1,10 @@
-use std::ffi::c_char;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::Write;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dbn::encode::{DbnEncoder, EncodeRecord};
-use dbn::{
-    ErrorCode, ErrorMsg, FlagSet, MetadataBuilder, RecordHeader, SType, SymbolMappingMsg,
-    SystemMsg, TradeMsg, rtype,
-};
+use dbn::encode::EncodeRecord;
+use dbn::{ErrorCode, ErrorMsg};
 use tf_core::{Event, Px};
 use tf_databento::Decoder;
 use tf_ingest::{Config as IngestConfig, Lost};
@@ -22,11 +17,7 @@ use crate::protocol::{
 use crate::provider::LiveProvider;
 use crate::session::Config;
 use crate::sha256::{hex, sha256};
-
-const KEY: &str = "db-abcdefghijklmnopqrstuvwxyz123";
-const CHALLENGE: &str = "G6EDS7OL0FZGYP4mNdhwTGptwJrMOrL2";
-/// SHA-256 of `CHALLENGE|KEY`, from Python's hashlib.
-const DIGEST: &str = "fe2c2793e5b328ff8c87036f8fd54a4862a106b4ae58f026b99703f1727161c5";
+use crate::testing::*;
 
 #[test]
 fn sha256_matches_the_standards_vectors_and_every_padding_boundary() {
@@ -79,10 +70,6 @@ fn sha256_matches_the_standards_vectors_and_every_padding_boundary() {
     ] {
         assert_eq!(h(&vec![b'x'; n]), want, "{n} bytes");
     }
-}
-
-fn key() -> ApiKey {
-    ApiKey::new(KEY).unwrap()
 }
 
 #[test]
@@ -210,191 +197,6 @@ fn a_subscription_is_one_line_or_one_per_five_hundred_symbols() {
         };
         assert!(sub_lines(&s, 1, None).is_err());
     }
-}
-
-// ---- a gateway to talk to ----
-
-/// What a fake gateway does for one connection.
-#[derive(Clone)]
-struct Conn {
-    /// Reply to the login with this error instead of success.
-    refuse: Option<String>,
-    /// What to send once the session starts, written in small pieces.
-    stream: Vec<u8>,
-    /// What to do when it has been sent.
-    then: Then,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Then {
-    Close,
-    /// Keep the connection open and silent.
-    Hang,
-    /// Heartbeat every 200 ms for this many milliseconds, then close.
-    Heartbeat(u64),
-}
-
-impl Conn {
-    fn new(stream: Vec<u8>, then: Then) -> Conn {
-        Conn {
-            refuse: None,
-            stream,
-            then,
-        }
-    }
-}
-
-struct Gateway {
-    addr: String,
-    seen: Arc<Mutex<Vec<Vec<String>>>>,
-    thread: Option<JoinHandle<()>>,
-}
-
-fn gateway(conns: Vec<Conn>) -> Gateway {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
-    let log = seen.clone();
-    let thread = std::thread::spawn(move || {
-        for conn in conns {
-            let (sock, _) = listener.accept().unwrap();
-            let mut lines = Vec::new();
-            let mut w = sock.try_clone().unwrap();
-            let mut r = BufReader::new(sock);
-            w.write_all(format!("lsg_version=0.9.4\ncram={CHALLENGE}\n").as_bytes())
-                .unwrap();
-            let mut auth = String::new();
-            r.read_line(&mut auth).unwrap();
-            lines.push(auth.clone());
-            let want = format!("auth={DIGEST}-yz123|dataset=XNAS.BASIC|");
-            if let Some(e) = &conn.refuse {
-                w.write_all(format!("success=0|error={e}\n").as_bytes())
-                    .unwrap();
-                log.lock().unwrap().push(lines);
-                continue;
-            }
-            if !auth.starts_with(&want) {
-                w.write_all(b"success=0|error=Authentication failed.\n")
-                    .unwrap();
-                log.lock().unwrap().push(lines);
-                continue;
-            }
-            w.write_all(b"success=1|session_id=4242\n").unwrap();
-            loop {
-                let mut l = String::new();
-                if r.read_line(&mut l).unwrap() == 0 {
-                    break;
-                }
-                let done = l == "start_session\n";
-                lines.push(l);
-                if done {
-                    break;
-                }
-            }
-            log.lock().unwrap().push(lines);
-            for piece in conn.stream.chunks(1000) {
-                if w.write_all(piece).is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_micros(200));
-            }
-            match conn.then {
-                Then::Close => {}
-                Then::Hang => {
-                    // Until the client goes away.
-                    let mut b = [0u8; 16];
-                    let mut s = r.into_inner();
-                    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-                    let _ = s.read(&mut b);
-                }
-                Then::Heartbeat(ms) => {
-                    let start = Instant::now();
-                    while start.elapsed() < Duration::from_millis(ms) {
-                        let mut hb = Vec::new();
-                        hb.extend_from_slice(
-                            dbn::RecordRef::from(&SystemMsg::heartbeat(1)).as_ref(),
-                        );
-                        if w.write_all(&hb).is_err() {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(200));
-                    }
-                }
-            }
-        }
-    });
-    Gateway {
-        addr,
-        seen,
-        thread: Some(thread),
-    }
-}
-
-impl Gateway {
-    fn lines(&self) -> Vec<Vec<String>> {
-        self.seen.lock().unwrap().clone()
-    }
-}
-
-impl Drop for Gateway {
-    fn drop(&mut self) {
-        // A test that failed may leave the thread waiting; it is detached, not joined.
-        let _ = self.thread.take();
-    }
-}
-
-fn trade(raw: u32, ts: u64, cents: i64, size: u32, seq: u32) -> TradeMsg {
-    TradeMsg {
-        hd: RecordHeader::new::<TradeMsg>(rtype::MBP_0, 81, raw, ts - 1_000),
-        price: cents * 10_000_000,
-        size,
-        action: b'T' as c_char,
-        side: b'N' as c_char,
-        flags: FlagSet::empty(),
-        depth: 0,
-        ts_recv: ts,
-        ts_in_delta: 0,
-        sequence: seq,
-    }
-}
-
-fn mapping(raw: u32, name: &str) -> SymbolMappingMsg {
-    SymbolMappingMsg::new(raw, 0, SType::RawSymbol, name, SType::RawSymbol, name, 0, 0).unwrap()
-}
-
-/// A DBN stream as the gateway sends it: the header, then whatever `write` puts in it.
-fn stream(write: impl FnOnce(&mut DbnEncoder<&mut Vec<u8>>)) -> Vec<u8> {
-    let md = MetadataBuilder::new()
-        .dataset("XNAS.BASIC".to_owned())
-        .schema(None)
-        .start(0)
-        .stype_in(Some(SType::RawSymbol))
-        .stype_out(SType::InstrumentId)
-        .build();
-    let mut bytes = Vec::new();
-    {
-        let mut e = DbnEncoder::new(&mut bytes, &md).unwrap();
-        write(&mut e);
-    }
-    bytes
-}
-
-/// Two symbols and `n` trades alternating between them.
-fn day(n: u32, first_ts: u64) -> Vec<u8> {
-    stream(|e| {
-        e.encode_record(&mapping(20_001, "AAPL")).unwrap();
-        e.encode_record(&mapping(20_002, "MSFT")).unwrap();
-        for i in 0..n {
-            e.encode_record(&trade(
-                20_001 + i % 2,
-                first_ts + u64::from(i) * 1_000,
-                18_000 + i64::from(i),
-                100,
-                i,
-            ))
-            .unwrap();
-        }
-    })
 }
 
 fn cfg(g: &Gateway) -> Config {
@@ -856,5 +658,60 @@ fn an_engine_that_does_not_read_never_blocks_the_feed() {
             + s.dropped_quotes
             + s.dropped_control,
         "every event is accounted for: {s:?}"
+    );
+}
+
+struct Collect(Arc<Mutex<Vec<u8>>>, usize);
+
+impl crate::RawSink for Collect {
+    fn record(&mut self, rec: &dbn::RecordRef<'_>) -> Result<(), String> {
+        let mut v = self.0.lock().unwrap();
+        if v.len() >= self.1 {
+            return Err("the disk is full".to_owned());
+        }
+        v.push(rec.header().rtype);
+        Ok(())
+    }
+}
+
+#[test]
+fn every_record_goes_to_the_raw_sink_and_a_sink_that_refuses_stops_the_session() {
+    let bytes = day(100, 1_000_000_000);
+    let g = gateway(vec![Conn::new(bytes.clone(), Then::Close)]);
+    let seen: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let mut p = provider(&g).with_sink(Arc::new(Mutex::new(Collect(seen.clone(), usize::MAX))));
+    p.connect().unwrap();
+    let (events, end) = drain(&mut p, 10);
+    assert_eq!((events.len(), end), (100, Poll::Disconnected));
+    // Two mappings and a hundred trades, as the gateway sent them.
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 102);
+    assert_eq!(
+        seen.iter()
+            .filter(|r| **r == dbn::rtype::SYMBOL_MAPPING)
+            .count(),
+        2
+    );
+    drop(seen);
+    // A sink that stops taking records ends the session, with its words, and the events before it
+    // are still delivered.
+    let g = gateway(vec![Conn::new(bytes, Then::Hang)]);
+    let seen: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let mut p = provider(&g).with_sink(Arc::new(Mutex::new(Collect(seen.clone(), 50))));
+    p.connect().unwrap();
+    let sh = p.shared().unwrap().clone();
+    let (events, end) = drain(&mut p, 10);
+    assert_eq!(end, Poll::Disconnected);
+    assert_eq!(
+        events.len(),
+        48,
+        "50 records taken: two mappings and 48 trades"
+    );
+    assert_eq!(sh.state(), crate::State::Failed);
+    assert!(
+        sh.error()
+            .is_some_and(|e| e.contains("tap: the disk is full")),
+        "{:?}",
+        sh.error()
     );
 }

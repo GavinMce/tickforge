@@ -93,6 +93,8 @@ pub enum DecodeError {
         index: u64,
         why: &'static str,
     },
+    /// The tap (see [`Decoder::with_tap`]) refused a record: what it said.
+    Tap(String),
 }
 
 impl std::fmt::Display for DecodeError {
@@ -100,6 +102,7 @@ impl std::fmt::Display for DecodeError {
         match self {
             DecodeError::Dbn(e) => write!(f, "DBN: {e}"),
             DecodeError::Record { index, why } => write!(f, "record {index}: {why}"),
+            DecodeError::Tap(m) => write!(f, "tap: {m}"),
         }
     }
 }
@@ -236,10 +239,15 @@ impl Mapper {
     }
 }
 
+/// Sees every record as it comes off the wire, before it is mapped: for keeping the provider's own bytes.
+/// An `Err` ends the stream with [`DecodeError::Tap`].
+pub type Tap = Box<dyn FnMut(&RecordRef<'_>) -> Result<(), String> + Send>;
+
 pub struct Decoder<'a> {
     inner: Box<dyn NextRecord + Send + 'a>,
     mapper: Mapper,
     pending: VecDeque<Item>,
+    tap: Option<Tap>,
 }
 
 fn side_px(px: i64) -> Px {
@@ -265,6 +273,7 @@ impl<'a> Decoder<'a> {
             inner,
             mapper: Mapper::default(),
             pending: VecDeque::new(),
+            tap: None,
         }
     }
 
@@ -290,6 +299,12 @@ impl<'a> Decoder<'a> {
     /// Pass prints of zero shares through as trades of size 0 (the default drops and counts them).
     pub fn keep_zero_size(mut self, keep: bool) -> Self {
         self.mapper = self.mapper.keep_zero_size(keep);
+        self
+    }
+
+    /// Show every record to `tap` as it is read (see [`Tap`]).
+    pub fn with_tap(mut self, tap: Tap) -> Self {
+        self.tap = Some(tap);
         self
     }
 
@@ -321,6 +336,9 @@ impl<'a> Decoder<'a> {
             let Some(rec) = self.inner.next_ref()? else {
                 return Ok(None);
             };
+            if let Some(tap) = self.tap.as_mut() {
+                tap(&rec).map_err(DecodeError::Tap)?;
+            }
             let mut out: Vec<Item> = Vec::with_capacity(2);
             self.mapper.map(&rec, &mut out)?;
             self.pending.extend(out);

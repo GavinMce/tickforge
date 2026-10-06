@@ -261,16 +261,40 @@ impl Log {
         }
     }
 
-    pub fn render(&self) -> String {
-        let mut s = format!(
+    /// The first three lines of the text form.
+    pub fn header(&self) -> String {
+        format!(
             "decisions v1\nid_space {}\nsymbols {:016x} {}\n",
             self.id_space, self.symbols, self.symbol_count
-        );
+        )
+    }
+
+    /// The last line, which says how many records there were.
+    pub fn footer(&self) -> String {
+        format!("end {}\n", self.recs.len())
+    }
+
+    pub fn render(&self) -> String {
+        let mut s = self.header();
         for r in &self.recs {
             let _ = writeln!(s, "{}", r.line());
         }
-        let _ = writeln!(s, "end {}", self.recs.len());
+        s.push_str(&self.footer());
         s
+    }
+
+    /// Read a log that may have been cut short (the process died): the records there are, and whether
+    /// the `end` line was found. A damaged line is still an error.
+    pub fn parse_partial(text: &str) -> Result<(Log, bool), String> {
+        match Log::parse(text) {
+            Ok(l) => Ok((l, true)),
+            Err(e) if e.contains("cut short") => {
+                let n = text.lines().skip(3).filter(|l| !l.is_empty()).count();
+                let closed = format!("{}\nend {n}\n", text.trim_end_matches('\n'));
+                Log::parse(&closed).map(|l| (l, false))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn parse(text: &str) -> Result<Log, String> {

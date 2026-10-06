@@ -1,6 +1,6 @@
 use tf_budget::{Group, LossLimits, Strategy as BudgetStrategy, Tree};
 use tf_core::{Event, Header, Nanos, ProviderId, Px, Trade, TradeFlags};
-use tf_ingest::Stats;
+use tf_ingest::{Lost, Stats};
 use tf_ledger::MemStore;
 use tf_risk::Budgets;
 use tf_universe::Spec;
@@ -281,9 +281,10 @@ fn what_the_driver_measured_is_shown_and_lost_events_are_called_lost() {
     for e in &tape {
         h.on_event(e).unwrap();
     }
-    h.on_gap(true, 120, T0 + SEC, T0 + 2 * SEC);
-    h.on_gap(false, 3, T0 + 3 * SEC, T0 + 3 * SEC + 5);
-    assert_eq!(h.gaps().len(), 2);
+    h.on_gap(Lost::Trades, 120, T0 + SEC, T0 + 2 * SEC);
+    h.on_gap(Lost::Control, 3, T0 + 3 * SEC, T0 + 3 * SEC + 5);
+    h.on_gap(Lost::Skipped, 2, T0 + 4 * SEC, T0 + 4 * SEC + 9);
+    assert_eq!(h.gaps().len(), 3);
     let inputs = SystemInputs {
         ingest: Some(Stats {
             offered: 1_000,
@@ -305,10 +306,14 @@ fn what_the_driver_measured_is_shown_and_lost_events_are_called_lost() {
     };
     let text = DailyReport::build(&h, "x", inputs, None).render();
     assert!(text.contains("ingest queue: 1000 offered, 50 conflated, 130 dropped (120 trades, 7 quotes, 3 control), 2 gaps, fullest 1999000"), "{text}");
+    assert!(
+        text.contains("2 gateway skip notices (an unknown number of records"),
+        "{text}"
+    );
     assert!(text.contains("EVENTS WERE LOST"), "{text}");
     assert!(text.contains("engine lag: 99% within 2.500 us, worst 1.200 ms"));
     assert!(text.contains("capture:    1000 records in 3 segments, 12345 bytes"));
-    assert!(text.contains("gaps:       2\n    120 trades lost between 00:01:41.000000000 UTC and 00:01:42.000000000 UTC\n    3 control events lost between"), "{text}");
+    assert!(text.contains("gaps:       3\n    120 trades lost between 00:01:41.000000000 UTC and 00:01:42.000000000 UTC\n    3 control events lost between"), "{text}");
     // A queue that lost nothing says nothing about loss.
     let calm = SystemInputs {
         ingest: Some(Stats {
@@ -321,7 +326,7 @@ fn what_the_driver_measured_is_shown_and_lost_events_are_called_lost() {
     let text = DailyReport::build(&h, "x", calm, None).render();
     assert!(!text.contains("EVENTS WERE LOST") && text.contains("0 dropped"));
     let _ = GapNote {
-        trades: true,
+        lost: Lost::Trades,
         count: 1,
         first_ts: 0,
         last_ts: 0,

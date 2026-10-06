@@ -137,26 +137,33 @@ pub fn replay(
     let acts = actions(live);
     let mut next = 0;
     let mut batch = Vec::new();
+    // The live day ended at its `end_of_day`: nothing after it was seen, though a capture may hold it.
+    let mut ended = false;
     macro_rules! due {
         () => {
             while next < acts.len() && acts[next].0 <= host.events() {
                 let (_, ts, what) = &acts[next];
                 apply(&mut host, defs, *ts, what)?;
+                ended |= what == "end_of_day";
                 next += 1;
             }
         };
     }
-    loop {
+    'day: loop {
         batch.clear();
         if !source(&mut batch) {
             break;
         }
         for ev in &batch {
             due!();
+            if ended {
+                break 'day;
+            }
             host.on_event(ev)?;
         }
     }
     due!();
+    let _ = ended;
     let stats = defs
         .iter()
         .filter_map(|d| host.stats_of(d.id).map(|s| (d.id, s)))
@@ -246,6 +253,25 @@ pub fn report(
     }
 }
 
+/// The table of names for dense instrument ids `0..`, as the gateway named them (`None` where an id was
+/// seen in a record and not named: it is called `#id`). Two ids that carry one symbol are still two
+/// instruments, numbered as they were, the second called `SYMBOL~1`.
+pub fn symbol_table(names: &[Option<String>]) -> SymbolTable {
+    let mut table = SymbolTable::new();
+    for (id, n) in names.iter().enumerate() {
+        let base = n.clone().unwrap_or_else(|| format!("#{id}"));
+        let mut name = base.clone();
+        let mut k = 1;
+        while table.get(&name).is_some() {
+            name = format!("{base}~{k}");
+            k += 1;
+        }
+        let got = table.intern(&name);
+        debug_assert_eq!(got as usize, id);
+    }
+    table
+}
+
 /// Replay a raw capture of a day (a directory written by `tf-capture`) through the host and compare.
 /// Two passes: the first reads the capture to learn which instrument ids the day had and what they were
 /// called (the same ids the live run assigned, since they are numbered in the order first seen); the
@@ -269,28 +295,30 @@ pub fn replay_capture(
         }
     }
     let map = first.instruments();
-    let mut symbols = SymbolTable::new();
-    for id in 0..map.len() as u32 {
-        let base = map.symbol(id).map_or_else(
-            || format!("#{}", map.raw_of(id).unwrap_or(0)),
-            str::to_owned,
-        );
-        let mut name = base.clone();
-        let mut k = 1;
-        // Two raw ids that carry one symbol must still be two instruments, numbered as they were.
-        while symbols.get(&name).is_some() {
-            name = format!("{base}~{k}");
-            k += 1;
-        }
-        let got = symbols.intern(&name);
-        debug_assert_eq!(got, id);
-    }
+    let names: Vec<Option<String>> = (0..map.len() as u32)
+        .map(|id| {
+            Some(map.symbol(id).map_or_else(
+                || format!("#{}", map.raw_of(id).unwrap_or(0)),
+                str::to_owned,
+            ))
+        })
+        .collect();
+    let symbols = symbol_table(&names);
     let reference = Reference { symbols, snapshot };
     let mut cfg = cfg.clone();
     cfg.id_space = live.id_space;
     let mut second = CaptureReplay::open(dir).map_err(cap)?;
+    // The live run dropped what the gateway sent twice after a reconnect; the capture holds it, so the
+    // replay drops it the same way.
+    let mut dedupe = tf_core::Dedupe::new();
+    let mut raw = Vec::new();
     let replayed = replay(live, &cfg, &reference, defs, |out| {
-        matches!(second.poll(out, 4096), Poll::Events(_))
+        raw.clear();
+        if !matches!(second.poll(&mut raw, 4096), Poll::Events(_)) {
+            return false;
+        }
+        out.extend(raw.iter().filter(|e| dedupe.admit(e)));
+        true
     })?;
     Ok(report(
         live,

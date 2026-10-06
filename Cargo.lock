@@ -104,12 +104,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-catalog"
+version = "0.1.0"
+dependencies = [
+ "tf-budget",
+ "tf-core",
+ "tf-ledger",
+ "tf-manifest",
+ "tf-risk",
+ "tf-strategy",
+]
+
+[[package]]
 name = "tf-cli"
 version = "0.1.0"
 dependencies = [
  "tf-backtest",
  "tf-bench",
  "tf-budget",
+ "tf-catalog",
  "tf-core",
  "tf-ledger",
  "tf-manifest",

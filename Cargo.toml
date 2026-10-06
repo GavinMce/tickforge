@@ -25,6 +25,7 @@ tf-params = { path = "crates/tf-params" }
 tf-backtest = { path = "crates/tf-backtest" }
 tf-ledger = { path = "crates/tf-ledger" }
 tf-budget = { path = "crates/tf-budget" }
+tf-catalog = { path = "crates/tf-catalog" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

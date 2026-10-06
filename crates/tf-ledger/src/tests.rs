@@ -1953,3 +1953,31 @@ fn rebalancing_keeps_shares_near_the_targets_a_person_set_not_near_where_it_last
     assert_eq!(j.targets().unwrap(), &split(2_000, 2_000, 2_000));
     same(&j, &recover(&j, 1));
 }
+
+#[test]
+fn an_observer_sees_the_journal_after_each_replayed_record_in_order() {
+    let mut j = fresh(1);
+    round_trip(&mut j, 1, 10, 7);
+    j.new_day(40 * SEC).unwrap();
+    let total = j.store().records().len();
+    let mut seen: Vec<(u64, bool, i128)> = Vec::new();
+    let (end, _) = Journal::open_recorded_observed(
+        MemStore::from_records(j.store().records().to_vec()),
+        &mut |at, rec| {
+            seen.push((
+                at.records(),
+                matches!(rec, Record::Start { .. }),
+                at.gateway().strategy_realized(1),
+            ));
+        },
+    )
+    .unwrap();
+    assert_eq!(seen.len(), total, "once per record, the start included");
+    assert_eq!(seen[0], (1, true, 0));
+    assert!(seen.windows(2).all(|w| w[1].0 == w[0].0 + 1 && !w[1].1));
+    assert_eq!(seen.last().unwrap().0, end.records());
+    // The profit appears at the closing fill, not before and not only at the end.
+    let first_profit = seen.iter().position(|s| s.2 != 0).unwrap();
+    assert!(first_profit > 1 && first_profit < total - 1, "{seen:?}");
+    assert_eq!(seen.last().unwrap().2, 200 * P as i128);
+}

@@ -1022,7 +1022,8 @@ epics:
       - id: E17-S08
         jira: TIC-127
         title: "Run catalog per strategy (most recent first, with paper, live and backtest kept apart)"
-        status: todo
+        status: done
+        evidence: "tf-catalog: Catalog of Runs (strategy, kind backtest|paper|live, start, net P&L, trades, rules, budget, source) newest first with latest(strategy); stored backtests from the run store (DirStore::list, now shared with tf runs), explorable by hash; paper or live sessions from an order ledger, one per strategy per trading day (records between newday marks), read by replaying with the new Journal::open_recorded_observed hook so a session's P&L is the change in the strategy's realised profit (a strategy's sessions sum to the ledger's own total), trades are opening orders that got a fill, budget is the one in force at the strategy's last decision of the day; `tf catalog [--store DIR] [--ledger DIR --kind paper|live] [--strategy S] [--latest]`. Ledger sessions carry no rules version (the ledger does not record one) and cannot be opened in the explorer (no stored tape to replay); the ledger does not say paper or live so the operator does. 11 + 4 tests, 18 mutations tried (one redundant field and one equivalent arm removed)"
         deps: [E16-S03, E17-S03]
         ac:
           - Each strategy's runs list session date, net P&L, trades, rules version and the budget in force, newest first

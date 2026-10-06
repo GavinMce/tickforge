@@ -112,28 +112,9 @@ pub(crate) fn money(raw: i64) -> String {
 
 /// The runs in `dir` and how many files were skipped because they did not parse.
 pub(crate) fn scan(dir: &Path) -> Result<(Vec<RunResult>, usize), String> {
-    let mut runs = Vec::new();
-    let mut skipped = 0;
-    let top = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for sub in top.flatten().filter(|e| e.path().is_dir()) {
-        let Ok(files) = std::fs::read_dir(sub.path()) else {
-            continue;
-        };
-        for f in files.flatten() {
-            let path = f.path();
-            if path.extension().is_none_or(|x| x != "tfrs") {
-                continue;
-            }
-            match std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| RunResult::parse(&t).ok())
-            {
-                Some(r) => runs.push(r),
-                None => skipped += 1,
-            }
-        }
-    }
-    Ok((runs, skipped))
+    tf_manifest::DirStore::new(dir)
+        .list()
+        .map_err(|e| e.to_string())
 }
 
 /// Whether the current code still gives the stored result.

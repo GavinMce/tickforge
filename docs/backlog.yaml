@@ -1085,7 +1085,8 @@ epics:
       - id: E17-S15
         jira: TIC-134
         title: "Proposals panel in the app (approve and decline)"
-        status: todo
+        status: done
+        evidence: "The overview's side panel lists agents' proposals newest first: state (applied: scheduled / waiting for you / approved / declined / refused), who and when, what each changes in dollars of the budgets in force, the agent's reason, its evidence, the policy's reasons, and the decision with its note; a waiting one has Approve and Decline. GET /api/proposals; POST /api/proposals/ID/approve|decline need sign-in and X-Requested-With, go through tf_proposals::flow (an approval is re-checked against the budgets and drawdown as they are now, queued in the ledger inbox so it takes effect at the next rebalance like any edit, refused with the reason if the strategy has since run into drawdown; decided once) and never write ledger.log (tested). Looked at in headless Chromium (1360 and 390 px) on a stressed ledger with an applied, a waiting and a refused proposal: approve queued a request and left the ledger untouched, the waiting-for-engine note appeared; no console errors. Found and fixed: the inbox cut 'who asked' to 64 characters, dropping the proposing agent from an approval (now 160). 31 workspace tests; 14 mutations tried, one equivalent. Limits: the panel shows the 12 newest; evidence is text, not links to runs; no per-person identity until E17-S17; the browser check was manual"
         deps: [E17-S14, E17-S10]
         ac:
           - Applied and pending proposals show what changed, why and the evidence

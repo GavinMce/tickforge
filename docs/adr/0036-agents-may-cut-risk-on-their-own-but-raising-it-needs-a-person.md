@@ -38,6 +38,12 @@ a tool layer can wrap later.
 - **Approval checks again.** A person approving does so against the budgets and drawdown as they
   are now. The agent's step and cooldown do not bind a person; the rules and the drawdown refusal
   still do. If the approval cannot be queued the decision is taken back.
+- **The app shows them and a person answers there** (E17-S15): `GET /api/proposals` lists them with
+  what each changes in dollars, why and the evidence; `POST /api/proposals/<id>/approve|decline` are
+  the only other writes besides the budget editor's, under the same conditions (signed in, the
+  `X-Requested-With` header) and through the same `flow::approve`/`decline`, so an approval is
+  re-checked, queued in the inbox and never enacted by the app. The inbox's "who asked" keeps 160
+  characters so an approval still names the agent it approved.
 - **`tf budgets propose|proposals|approve|decline`.** A refused proposal makes `propose` exit with
   an error so an agent notices.
 

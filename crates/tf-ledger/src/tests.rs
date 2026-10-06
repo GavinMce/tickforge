@@ -2064,7 +2064,7 @@ fn requests_wait_in_order_and_come_back_exactly_as_made() {
         "a request cannot smuggle in a line"
     );
     assert_eq!(got[1].tree, None, "a withdrawal has no tree");
-    assert_eq!(got[2].by.len(), 64, "who asked is kept short");
+    assert_eq!(got[2].by.len(), 160, "who asked is kept to a length");
     // Settled requests leave the queue; a refused one is kept apart with its reason; the numbers
     // are never reused.
     settle(&dir, &a, Ok(())).unwrap();

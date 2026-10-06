@@ -737,6 +737,33 @@ fn the_page_only_reads_fields_the_api_sends_and_never_writes_markup_from_data() 
         app.contains("\"budgets v1\\n\"") && app.contains("\"group \""),
         "the page writes the text form"
     );
+    // And for the proposals panel.
+    propose(&dir, "growth-agent", 5_500, 3_000, 1_500, 100 * DAY_NS);
+    let props_json = crate::proposals::view(&src(&dir)).unwrap();
+    for key in [
+        "proposals",
+        "unreadable",
+        "id",
+        "by",
+        "at",
+        "state",
+        "reason",
+        "evidence",
+        "why",
+        "changes",
+        "decision",
+        "call",
+        "note",
+    ] {
+        assert!(
+            app.contains(&format!(".{key}")),
+            "the panel does not use {key}"
+        );
+        assert!(
+            props_json.contains(&format!("\"{key}\":")) || key == "call" || key == "note",
+            "/api/proposals does not send {key}"
+        );
+    }
     // Text from the ledger goes in as text, and the page cannot send anything but GETs.
     for banned in [
         "innerHTML",
@@ -752,10 +779,18 @@ fn the_page_only_reads_fields_the_api_sends_and_never_writes_markup_from_data() 
     // helper that always carries the header, and it is only pointed at the budget routes.
     assert_eq!(
         app.matches("method:").count(),
-        1,
-        "one place makes non-GET requests"
+        2,
+        "two places make non-GET requests: the budget helper and the proposal answer"
     );
-    assert!(app.contains("\"X-Requested-With\": \"workspace\""));
+    assert_eq!(
+        app.matches("\"X-Requested-With\": \"workspace\"").count(),
+        2
+    );
+    assert!(app.contains("fetch(\"/api/proposals/\" + p.id + \"/\" + what, { method: \"POST\""));
+    assert!(
+        app.contains("what === \"decline\" ? \"declined in the app\" : \"approved in the app\""),
+        "the answer is only ever approve or decline"
+    );
     let posts: Vec<&str> = app
         .match_indices("post(\"")
         .map(|(i, _)| &app[i + 6..])
@@ -1332,4 +1367,193 @@ fn a_strategy_already_over_its_budget_is_told_it_cannot_be_cut() {
     );
     drop(j);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- proposals
+
+fn propose(
+    dir: &Path,
+    by: &str,
+    alpha: u32,
+    beta: u32,
+    gamma: u32,
+    at: Nanos,
+) -> tf_proposals::flow::Submitted {
+    tf_proposals::flow::submit(
+        dir,
+        &tf_proposals::Policy::default(),
+        by,
+        "lost three sessions in a row",
+        "runs abc123 and def456, review 7",
+        &tree_text(alpha, beta, gamma, 300, 600),
+        at,
+    )
+    .unwrap()
+}
+
+const DAY_NS: Nanos = 86_400 * SEC;
+
+#[test]
+fn the_panel_lists_proposals_newest_first_with_what_changed_why_and_the_evidence() {
+    let dir = scratch("panel");
+    let j = account(&dir, true);
+    let s = src(&dir);
+    assert_eq!(
+        crate::proposals::view(&s).unwrap(),
+        "{\"proposals\":[],\"unreadable\":0}"
+    );
+    let cut = propose(&dir, "risk-agent", 4_500, 3_000, 2_000, 100 * DAY_NS);
+    let up = propose(&dir, "growth-agent", 5_500, 3_000, 1_500, 101 * DAY_NS);
+    let same = propose(&dir, "noisy-agent", 5_000, 3_000, 2_000, 102 * DAY_NS);
+    assert_eq!((cut.id, up.id, same.id), (1, 2, 3));
+    let v = crate::proposals::view(&s).unwrap();
+    // Newest first.
+    let (p3, p2, p1) = (
+        v.find("\"id\":3").unwrap(),
+        v.find("\"id\":2").unwrap(),
+        v.find("\"id\":1").unwrap(),
+    );
+    assert!(p3 < p2 && p2 < p1, "{v}");
+    assert!(v.contains("\"id\":1,\"by\":\"risk-agent\",\"at\":\"1970-04-11 00:00\",\"state\":\"scheduled\",\"reason\":\"lost three sessions in a row\",\"evidence\":\"runs abc123 and def456, review 7\""), "{v}");
+    assert!(
+        v.contains("\"changes\":[\"alpha: 50% → 45% of day ($15,000.00 → $13,500.00)\"]"),
+        "{v}"
+    );
+    assert!(
+        v.contains("\"state\":\"waiting\"")
+            && v.contains("alpha: 50% → 55% of day ($15,000.00 → $16,500.00)")
+            && v.contains("gamma: 20% → 15% of day ($6,000.00 → $4,500.00)"),
+        "{v}"
+    );
+    assert!(v.contains("alpha: an increase needs a person"), "{v}");
+    assert!(
+        v.contains("\"state\":\"refused\"") && v.contains("it changes nothing"),
+        "{v}"
+    );
+    assert!(v.contains("\"decision\":null"), "{v}");
+    assert!(v.contains("queued as 0000000001.req"), "{v}");
+    // Over HTTP: needs sign-in, and without a ledger there is nothing to show.
+    assert_eq!(handle(&s, TOKEN, &get("/api/proposals")).status, 401);
+    assert_eq!(handle(&s, TOKEN, &signed("/api/proposals")).status, 200);
+    assert_eq!(
+        handle(&Source::default(), TOKEN, &signed("/api/proposals")).status,
+        409
+    );
+    drop(j);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_person_approves_or_declines_from_the_app_and_the_ledger_is_never_written() {
+    let dir = scratch("panel-answer");
+    let mut j = account(&dir, true);
+    let s = src(&dir);
+    let log = std::fs::read(dir.join("ledger.log")).unwrap();
+    let a = propose(&dir, "growth-agent", 5_500, 3_000, 1_500, 100 * DAY_NS);
+    let b = propose(&dir, "growth-agent", 4_500, 3_000, 2_500, 101 * DAY_NS);
+    let c = propose(&dir, "growth-agent", 5_100, 3_000, 1_900, 102 * DAY_NS);
+    let answer = |what: &str, id: u64, note: &str, header: Option<&str>| {
+        handle(
+            &s,
+            TOKEN,
+            &post(&format!("/api/proposals/{id}/{what}"), note, header),
+        )
+    };
+    // Sign-in and the header are both needed; nothing is decided by the refused calls.
+    let anon = Request {
+        method: "POST".into(),
+        requested_with: Some("workspace".into()),
+        ..get("/api/proposals/1/approve")
+    };
+    assert_eq!(handle(&s, TOKEN, &anon).status, 401);
+    assert_eq!(answer("approve", a.id, "", None).status, 403);
+    assert_eq!(answer("approve", a.id, "", Some("x")).status, 403);
+    let before = crate::proposals::view(&s).unwrap();
+    assert_eq!(
+        before.matches("\"state\":\"waiting\"").count(),
+        3,
+        "{before}"
+    );
+    // Approve one: queued like any edit, and shown as decided with the note.
+    let ok = answer("approve", a.id, "agreed", Some("workspace"));
+    assert_eq!(
+        (ok.status, ok.body.as_str()),
+        (200, "{\"requested\":\"0000000001.req\"}"),
+        "{}",
+        ok.body
+    );
+    let (waiting, _) = tf_ledger::inbox::pending(&dir).unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert!(
+        waiting[0]
+            .by
+            .contains("approving a proposal by growth-agent"),
+        "{}",
+        waiting[0].by
+    );
+    let v = crate::proposals::view(&s).unwrap();
+    assert!(v.contains("\"state\":\"approved\"") && v.contains("\"decision\":{\"by\":\"the workspace app (shared token)\",\"call\":\"approved\",\"note\":\"agreed\""), "{v}");
+    // Decide once.
+    assert_eq!(answer("approve", a.id, "", Some("workspace")).status, 409);
+    assert_eq!(answer("decline", a.id, "", Some("workspace")).status, 409);
+    // Decline another: nothing queued.
+    let no = answer("decline", b.id, "not now", Some("workspace"));
+    assert_eq!((no.status, no.body.as_str()), (200, r#"{"declined":true}"#));
+    assert_eq!(tf_ledger::inbox::pending(&dir).unwrap().0.len(), 1);
+    assert!(
+        crate::proposals::view(&s)
+            .unwrap()
+            .contains("\"call\":\"declined\",\"note\":\"not now\"")
+    );
+    // Unknown, malformed and wrong routes.
+    assert_eq!(answer("approve", 99, "", Some("workspace")).status, 404);
+    assert_eq!(
+        handle(
+            &s,
+            TOKEN,
+            &post("/api/proposals/x/approve", "", Some("workspace"))
+        )
+        .status,
+        404
+    );
+    assert_eq!(
+        handle(&s, TOKEN, &post("/api/proposals/1", "", Some("workspace"))).status,
+        404
+    );
+    assert_eq!(
+        handle(
+            &s,
+            TOKEN,
+            &post("/api/proposals/1/delete", "", Some("workspace"))
+        )
+        .status,
+        404
+    );
+    assert_eq!(
+        handle(&s, TOKEN, &post("/api/proposals", "", Some("workspace"))).status,
+        405
+    );
+    // A proposal approved late, after its strategy has run into a drawdown, is refused and stays waiting.
+    trip_loss(&mut j);
+    let late = answer("approve", c.id, "", Some("workspace"));
+    assert_eq!(late.status, 422, "{}", late.body);
+    assert!(late.body.contains("drawdown"), "{}", late.body);
+    assert!(crate::proposals::view(&s).unwrap().contains("\"id\":3,"));
+    assert_eq!(tf_ledger::inbox::pending(&dir).unwrap().0.len(), 1);
+    drop(j);
+    // The ledger itself was written only by the engine side of this test (the loss), never by the app.
+    assert!(
+        std::fs::read(dir.join("ledger.log"))
+            .unwrap()
+            .starts_with(&log)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// alpha (the strategy a proposal raised) sells the 100 shares it holds at $5 for 40 cents: it loses
+/// $460, past its soft limit of $450.
+fn trip_loss(j: &mut Journal<FileStore>) {
+    let s = intent(1, 1_010, Side::Sell, Purpose::Close, 4 * P / 10);
+    fill(j, &s, 4 * P / 10);
+    assert!(!j.check_loss_limits(1_500 * SEC).unwrap().is_empty());
 }

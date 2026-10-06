@@ -26,16 +26,22 @@
 
 mod certify;
 mod def;
+mod equiv;
 mod host;
+mod replay;
 mod runner;
 
+#[cfg(test)]
+mod replay_tests;
 #[cfg(test)]
 mod tests;
 
 pub use certify::{CertifyError, certify};
 pub use def::{Build, Certificate, Route, StrategyDef};
+pub use equiv::{Answer, Difference, Log, Rec, Verdict, compare, symbols_fingerprint};
 pub use host::{
     AdmitError, Host, HostConfig, HostError, REASON_FLATTEN, Reference, SlotState, StopReason,
     StrategyStats,
 };
+pub use replay::{ReplayError, Replayed, Report, replay, replay_capture, replay_events, report};
 pub use runner::{DynRunner, runner};

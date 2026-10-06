@@ -13,6 +13,7 @@ use tf_strategy::{Market, Members};
 use tf_universe::{RefInfo, Selection, Selector, Snapshot, Tier0View, select};
 
 use crate::def::{Certificate, Route, StrategyDef};
+use crate::equiv::{Answer, Log, Rec};
 use crate::runner::DynRunner;
 
 /// Intents the host makes itself (flattening) are numbered from here, apart from the strategies' own.
@@ -197,6 +198,7 @@ pub struct Host<S: LedgerStore> {
     anomalies: Vec<String>,
     hash: Fnv,
     failed: bool,
+    log: Option<Log>,
 }
 
 impl<S: LedgerStore> Host<S> {
@@ -245,9 +247,54 @@ impl<S: LedgerStore> Host<S> {
             anomalies: Vec::new(),
             hash: Fnv(0xcbf2_9ce4_8422_2325),
             failed: false,
+            log: None,
             reference,
             cfg,
         })
+    }
+
+    /// Keep a log of every decision, tier change, fill and action (see [`crate::equiv`]). Call before
+    /// adding strategies.
+    pub fn record(mut self) -> Self {
+        self.log = Some(Log::new(self.cfg.id_space, &self.reference.symbols));
+        self
+    }
+
+    /// The decision log so far, if recording.
+    pub fn log(&self) -> Option<&Log> {
+        self.log.as_ref()
+    }
+
+    fn note(&mut self, ts: Nanos, rec: impl FnOnce(u64, Nanos) -> Rec) {
+        let idx = self.events;
+        if let Some(l) = self.log.as_mut() {
+            l.recs.push(rec(idx, ts));
+        }
+    }
+
+    fn note_action(&mut self, ts: Nanos, what: String) {
+        self.note(ts, |idx, ts| Rec::Action { idx, ts, what });
+    }
+
+    fn log_tiers(&mut self, from: usize) {
+        if self.log.is_none() {
+            return;
+        }
+        let idx = self.events;
+        let new: Vec<Rec> = self.tier_tape[from.min(self.tier_tape.len())..]
+            .iter()
+            .map(|c| Rec::Tier {
+                idx,
+                ts: c.hdr.ts_recv,
+                instrument: c.hdr.instrument,
+                promote: c.action == tf_core::TierAction::Promote,
+                reason: c.reason,
+                score: c.score,
+            })
+            .collect();
+        if let Some(l) = self.log.as_mut() {
+            l.recs.extend(new);
+        }
     }
 
     /// The broker for strategies routed to [`Route::Paper`].
@@ -315,6 +362,8 @@ impl<S: LedgerStore> Host<S> {
             *runner.members_mut() = Members::from_ids(candidates.iter().copied());
         }
         self.promoter.set_priority(def.id, def.priority);
+        let (now, fp) = (self.now, def.fingerprint());
+        self.note_action(now, format!("add {} {fp:016x}", def.id));
         self.slots.push(Slot {
             id: def.id,
             name: def.name.clone(),
@@ -380,7 +429,9 @@ impl<S: LedgerStore> Host<S> {
             self.journal.mark(t.hdr.instrument, t.px);
         }
         self.tier0.on_event(ev);
+        let tier_before = self.tier_tape.len();
         self.promoter.on_event(&self.tier0, ev, &mut self.tier_tape);
+        self.log_tiers(tier_before);
         for slot in self.slots.iter_mut() {
             if slot.state != SlotState::Running {
                 continue;
@@ -426,6 +477,7 @@ impl<S: LedgerStore> Host<S> {
 
     /// What strategies asked for, in strategy order, goes through the gateway.
     fn collect(&mut self, ts: Nanos) -> Result<(), HostError> {
+        let tier_before = self.tier_tape.len();
         let mut batch: Vec<Intent> = Vec::new();
         for slot in &mut self.slots {
             if slot.alive() {
@@ -433,6 +485,7 @@ impl<S: LedgerStore> Host<S> {
                 self.tier_tape.extend(slot.runner.drain_tier_events());
             }
         }
+        self.log_tiers(tier_before);
         for i in batch {
             // A strategy that has been stopped cannot get an order out by way of what it left behind.
             let running = self
@@ -518,6 +571,23 @@ impl<S: LedgerStore> Host<S> {
         let decision = self.journal.decide(&intent, intent.ts)?;
         self.hash.put(u64::from(s));
         self.hash.put(intent.id.seq);
+        let answer = match decision {
+            Decision::Accepted(o) => Answer::Accepted(o.0),
+            Decision::Rejected(r) => Answer::Rejected(tf_risk::reason_name(&r).to_owned()),
+        };
+        self.note(intent.ts, |idx, ts| Rec::Decision {
+            idx,
+            ts,
+            strategy: s,
+            seq: intent.id.seq,
+            instrument: intent.instrument,
+            side: intent.side,
+            qty: intent.qty,
+            purpose: intent.purpose,
+            limit: intent.limit_price().raw(),
+            reason: intent.reason,
+            answer,
+        });
         match decision {
             Decision::Rejected(r) => {
                 self.hash.put(0);
@@ -591,6 +661,16 @@ impl<S: LedgerStore> Host<S> {
                     self.hash.put(u64::from(qty));
                     self.hash.put(px.raw() as u64);
                     self.hash.put(e.ts);
+                    if let Some(&(_, instrument, _)) = self.orders.get(&e.order) {
+                        self.note(e.ts, |idx, ts| Rec::Fill {
+                            idx,
+                            ts,
+                            order: e.order.0,
+                            instrument,
+                            qty,
+                            px: px.raw(),
+                        });
+                    }
                     if let Some((s, _, _)) = self.orders.get(&e.order) {
                         if let Some(k) = self.slot_index(*s) {
                             self.slots[k].stats.filled_shares += u64::from(qty);
@@ -755,6 +835,7 @@ impl<S: LedgerStore> Host<S> {
         let Some(k) = self.slot_index(id) else {
             return Ok(false);
         };
+        self.note_action(ts, format!("kill_strategy {id}"));
         if self.slots[k].alive() {
             self.slots[k].state = SlotState::Stopped(StopReason::Killed);
         }
@@ -766,6 +847,7 @@ impl<S: LedgerStore> Host<S> {
     /// The kill switch: the gateway refuses every opening order from now on, and what is working to
     /// open is cancelled. Positions are left (closes still pass) for the strategies to exit.
     pub fn kill_switch(&mut self, ts: Nanos) -> Result<(), HostError> {
+        self.note_action(ts, "kill_switch".to_owned());
         self.journal.engage_kill_switch(ts)?;
         let ids: Vec<u16> = self.slots.iter().map(|s| s.id).collect();
         for id in ids {
@@ -776,6 +858,7 @@ impl<S: LedgerStore> Host<S> {
 
     /// The session ended: what is still working expires.
     pub fn end_of_day(&mut self, ts: Nanos) -> Result<(), HostError> {
+        self.note_action(ts, "end_of_day".to_owned());
         self.now = self.now.max(ts);
         self.sim.close_day(ts);
         if let Some(p) = self.paper.as_mut() {

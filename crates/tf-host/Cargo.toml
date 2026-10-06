@@ -11,13 +11,17 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tf-capture.workspace = true
 tf-core.workspace = true
 tf-engine.workspace = true
 tf-ledger.workspace = true
+tf-provider.workspace = true
 tf-risk.workspace = true
 tf-strategy.workspace = true
 tf-universe.workspace = true
 
 [dev-dependencies]
+dbn = { version = "0.71" }
+tf-databento.workspace = true
 tf-budget.workspace = true
 tf-synth.workspace = true

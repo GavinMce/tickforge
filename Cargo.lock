@@ -411,10 +411,14 @@ dependencies = [
 name = "tf-host"
 version = "0.1.0"
 dependencies = [
+ "dbn",
  "tf-budget",
+ "tf-capture",
  "tf-core",
+ "tf-databento",
  "tf-engine",
  "tf-ledger",
+ "tf-provider",
  "tf-risk",
  "tf-strategy",
  "tf-synth",

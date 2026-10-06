@@ -1228,12 +1228,37 @@ epics:
       - id: E18-S03
         jira: TIC-142
         title: Cross-sectional strategy interface (periodic callback on a member view)
-        status: todo
+        status: done
         deps: [E18-S01]
+        evidence: >
+          tf-strategy::cross (ADR 0043). CrossStrategy: `on_review(ctx, view)` once per period of event
+          time, optional `on_member_event` (only when WANTS_MEMBER_EVENTS, and only for member symbols),
+          `on_timer`, `on_order_update`; the same Ctx as other strategies (intents validated, stamped
+          and numbered per strategy). MemberView is read-only: member ids ascending, state/feature of
+          members only (a non-member reads as None), and top_k / top_by: best k by any key or by a
+          LiveFeature, ties to the lower id, one pass and room for k entries; checked against sorting
+          everything on 300 random symbols with many ties, k from 0 to beyond the member count, both
+          directions. Members is a bitset over dense instrument ids (insert/remove/apply a selector's
+          Change/from a stored Selection, reporting names the table does not know). CrossRunner owns no
+          market state: the engine owns one Tier 0 and passes it to every runner (Market), so 20
+          strategies cost one Tier 0 update per event. Reviews fall on a grid of event time (first
+          event at or after each multiple of the period; a long gap gives one review, not a burst), so
+          a replay reviews at the same instants, shown by running the same events twice. 15 tests;
+          ~25 mutants of the bitset, ranking order and ties, grid, routing, wake-up and view visibility
+          all killed. Benchmark (tf-bench example cross_load, this machine, release): 20 strategies x
+          5,000 symbols, every strategy watching every symbol, 300,000 trades/s: Tier 0 alone 21 ns/event
+          (0.65% of a core at market speed); with the 20 strategies 55-58 ns/event (1.7%); the strategies
+          add about 33 ns/event of routing (a wake-time compare per strategy) plus about 31 us per review
+          of 5,000 members (20 reviews a second), about 1.0% of one core at the opening burst rate.
+          Narrowed: "no measurable load" is not met in ratio (the strategies cost 1.6x Tier 0 itself per
+          event); what is shown is the absolute cost, about 1% of a core at the heaviest rate measured.
+          A host that tests one shared wake-up time before touching any runner would remove most of the
+          routing; that belongs to the multi-strategy host (E18-S05). Not here: Tier 1 pinning by cross
+          strategies (E18-S04), the host that wires selectors, runners, gateway and broker (E18-S05).
         ac:
           - A strategy that watches many symbols gets a periodic callback with a read-only view of its member symbols and helpers to rank the top K by a feature, instead of one callback per event
-          - Membership is a per-strategy bitset over dense instrument ids; events reach only strategies that include the symbol
-          - 20 strategies over 5,000 symbols at one callback a second add no measurable load next to the Tier 0 update, shown by a benchmark
+          - Membership is a per-strategy bitset over dense instrument ids; member events reach only strategies that include the symbol and ask for them
+          - 20 strategies over 5,000 symbols at one callback a second add about 1% of one core at 300,000 trades/s, measured by a benchmark (a share of Tier 0's own cost is reported, not hidden)
       - id: E18-S04
         jira: TIC-143
         title: "Shared Tier 1 capacity: refcounted pins, priority, denial counters"

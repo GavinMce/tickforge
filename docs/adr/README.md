@@ -59,3 +59,4 @@ How:
 | [0040](0040-raw-capture-keeps-the-providers-records-in-files-that-are-complete-or-recoverable.md) | Raw capture keeps the provider's records in files that are complete or recoverable | Accepted |
 | [0041](0041-a-universe-is-a-spec-judged-from-a-dated-snapshot-and-kept-with-the-run.md) | A universe is a spec judged from a dated snapshot, and the list is kept with the run | Accepted |
 | [0042](0042-reference-rows-come-from-dated-daily-bars-and-an-asset-list-and-say-what-they-lack.md) | Reference rows come from dated daily bars and an asset list, and say what they lack | Accepted |
+| [0043](0043-a-strategy-over-many-symbols-reviews-a-member-view-on-a-grid-of-event-time.md) | A strategy over many symbols reviews a member view on a grid of event time | Accepted |

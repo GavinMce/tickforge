@@ -324,8 +324,10 @@ dependencies = [
  "tf-engine",
  "tf-provider",
  "tf-replay",
+ "tf-strategy",
  "tf-synth",
  "tf-tape",
+ "tf-universe",
  "zstd 0.13.3",
 ]
 
@@ -506,6 +508,7 @@ dependencies = [
  "tf-manifest",
  "tf-params",
  "tf-synth",
+ "tf-universe",
 ]
 
 [[package]]

@@ -1076,7 +1076,8 @@ epics:
       - id: E17-S14
         jira: TIC-133
         title: "Agent budget proposals with an asymmetric approval path"
-        status: todo
+        status: done
+        evidence: "tf-proposals + `tf budgets propose|proposals|approve|decline`: tf_proposals::decide judges a proposed tree: refused if the rules do not allow it (tf_budget::check_edit: children within the parent, nothing cut below its use, same shape); an increase (share raised or loss limit loosened) needs a person; an increase for a strategy in drawdown (stopped by a loss limit, or down over its last three sessions) is refused; a cut within the step (default 1000 bp) on a node not changed within the cooldown (default a day) is queued on its own, recorded, and takes effect at the next rebalance via the ledger inbox. Records in <ledger>/proposals (who, why, evidence, policy, verdict, nodes, tree; decisions exclusive so a proposal is decided once); approval re-checks against now and is rolled back if it cannot be queued. A randomised test (4000 cases): whatever applies on its own raises no strategy budget and no loss amount, every change is a cut within the step and cooldown, and an increase in drawdown is never left to a person. 19 proposals tests + 2 CLI; 25 mutations tried, one equivalent (hard latch implies soft); ADR 0036. Limits: the agent tools (E12-S06) are not built, so agents call the command line; a pending proposal approved late can overwrite a newer scheduled tree (inbox is last-wins); drawdown needs ledger history; evidence is free text, not yet linked to stored runs or review records"
         deps: [E17-S01, E12-S06, E16-S04]
         ac:
           - A decrease within bounds (step and cooldown per node) applies on its own and is recorded; an increase needs a person's approval

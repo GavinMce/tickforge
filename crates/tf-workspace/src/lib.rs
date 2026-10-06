@@ -15,7 +15,10 @@ use std::path::PathBuf;
 
 use tf_budget::{Change, diff};
 use tf_catalog::{Catalog, Kind, Run, Source as RunSource, when};
+use tf_core::Nanos;
 use tf_ledger::{Journal, ReadOnlyStore};
+use tf_strategy::Purpose;
+use tf_strategy::intent::Side;
 
 pub mod http;
 
@@ -63,12 +66,22 @@ fn opt(s: Option<String>) -> String {
     s.map_or("null".to_owned(), |s| js(&s))
 }
 
+/// What names a run in this service's API: the stored result's hash, or `session-N` for day N of
+/// the ledger (the ledger's path is not given out).
+pub fn run_id(r: &Run) -> String {
+    match &r.source {
+        RunSource::Stored { hash } => hash.clone(),
+        RunSource::Ledger { session, .. } => format!("session-{session}"),
+    }
+}
+
 /// One run as JSON. Times are text because event time in nanoseconds does not fit a JSON number.
 pub fn run_json(r: &Run) -> String {
-    let (kind_src, id) = match &r.source {
-        RunSource::Stored { hash } => ("stored", hash.clone()),
-        RunSource::Ledger { ledger, session } => ("ledger", format!("{ledger}#{session}")),
+    let kind_src = match &r.source {
+        RunSource::Stored { .. } => "stored",
+        RunSource::Ledger { .. } => "ledger",
     };
+    let id = run_id(r);
     format!(
         "{{\"strategy\":{},\"kind\":{},\"started_ns\":{},\"started\":{},\"net_pnl\":{},\"trades\":{},\"rules\":{},\"budget\":{},\"source\":{},\"id\":{},\"explorable\":{}}}",
         js(&r.strategy),
@@ -102,6 +115,88 @@ pub fn catalog(src: &Source) -> Result<Catalog, String> {
         );
     }
     Ok(Catalog::new(runs))
+}
+
+/// Raw 1e-9 dollars as dollars to four places (prices need more than cents).
+fn price(raw: i64) -> String {
+    let r = i128::from(raw);
+    let scaled = (r.abs() + 50_000) / 100_000;
+    format!(
+        "{}{}.{:04}",
+        if r < 0 && scaled > 0 { "-" } else { "" },
+        scaled / 10_000,
+        scaled % 10_000
+    )
+}
+
+fn clock(ns: Nanos) -> String {
+    let s = ns / 1_000_000_000 % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3_600, s % 3_600 / 60, s % 60)
+}
+
+/// One run with what it did: its fills (as trades), the running realised profit after each, and the
+/// reasons the gateway refused anything. A stored backtest has none of these here (it is opened in
+/// the explorer). `None` if there is no such run.
+pub fn run_detail(src: &Source, strategy: &str, id: &str) -> Result<Option<String>, String> {
+    let cat = catalog(src)?;
+    let Some(run) = cat.of(strategy).find(|r| run_id(r) == id) else {
+        return Ok(None);
+    };
+    let RunSource::Ledger { session, .. } = &run.source else {
+        return Ok(Some(format!(
+            "{{\"run\":{},\"trades\":null,\"curve\":null,\"refused\":[],\"note\":{}}}",
+            run_json(run),
+            js("A stored backtest: its trades are in the explorer (tf explore with this id).")
+        )));
+    };
+    let (dir, kind) = src.ledger.as_ref().ok_or("no ledger")?;
+    let name = dir.display().to_string();
+    let all = tf_catalog::sessions_detailed(ReadOnlyStore::open(dir), &name, *kind)
+        .map_err(|e| e.to_string())?;
+    let detail = all
+        .into_iter()
+        .find(|(r, _)| {
+            r.strategy == strategy
+                && matches!(&r.source, RunSource::Ledger { session: s, .. } if s == session)
+        })
+        .map(|(_, d)| d)
+        .ok_or("the run disappeared from the ledger")?;
+    let mut running = 0i128;
+    let mut curve = Vec::new();
+    let mut trades = Vec::new();
+    for f in &detail.fills {
+        running += f.pnl;
+        curve.push(js(&dollars(running)));
+        trades.push(format!(
+            "{{\"time\":{},\"instrument\":{},\"side\":{},\"purpose\":{},\"qty\":{},\"price\":{},\"pnl\":{}}}",
+            js(&clock(f.ts)),
+            f.instrument,
+            js(match f.side {
+                Side::Buy => "buy",
+                Side::Sell => "sell",
+                Side::SellShort => "short",
+            }),
+            js(match f.purpose {
+                Purpose::Open => "open",
+                Purpose::Close => "close",
+            }),
+            f.qty,
+            js(&price(f.px)),
+            js(&dollars(f.pnl)),
+        ));
+    }
+    let refused: Vec<String> = detail
+        .refused
+        .iter()
+        .map(|(why, n)| format!("{{\"reason\":{},\"count\":{n}}}", js(why)))
+        .collect();
+    Ok(Some(format!(
+        "{{\"run\":{},\"trades\":[{}],\"curve\":[{}],\"refused\":[{}],\"note\":null}}",
+        run_json(run),
+        trades.join(","),
+        curve.join(","),
+        refused.join(",")
+    )))
 }
 
 /// The runs as JSON, for one strategy or all.

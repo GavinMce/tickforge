@@ -83,28 +83,47 @@ fn main() {
         1_791_158_400 * SEC,
     )
     .unwrap();
-    // momentum wins, sweep loses, lows is holding, news is idle.
+    // Two earlier days, then today. momentum wins most days, sweep loses, lows is holding, news is
+    // idle, and on one day all of sweep's orders were refused.
     let mut seq = 10;
-    let mut go = |j: &mut Journal<FileStore>, s: u16, qty: u32, entry: i64, exit: Option<i64>| {
+    fn go(
+        j: &mut Journal<FileStore>,
+        seq: &mut u64,
+        s: u16,
+        qty: u32,
+        entry: i64,
+        exit: Option<i64>,
+    ) {
         fill(
             j,
-            &intent(s, seq, Side::Buy, Purpose::Open, qty, entry),
+            &intent(s, *seq, Side::Buy, Purpose::Open, qty, entry),
             entry,
         );
-        seq += 20;
+        *seq += 20;
         if let Some(x) = exit {
-            fill(j, &intent(s, seq, Side::Sell, Purpose::Close, qty, x), x);
-            seq += 20;
+            fill(j, &intent(s, *seq, Side::Sell, Purpose::Close, qty, x), x);
+            *seq += 20;
         }
-    };
-    go(&mut j, 1, 300, 4 * P, Some(5 * P));
-    go(&mut j, 2, 200, 6 * P, Some(5 * P));
-    go(&mut j, 3, 400, 25 * P, None);
-    go(&mut j, 5, 100, 100 * P, None);
+    }
+    go(&mut j, &mut seq, 1, 200, 4 * P, Some(4 * P + P / 4));
+    let too_big = intent(2, seq, Side::Buy, Purpose::Open, 1_000_000, 6 * P);
+    j.decide(&too_big, too_big.ts).unwrap();
+    j.new_day(1_791_158_400 * SEC + seq * SEC + 60 * SEC)
+        .unwrap();
+    seq += 86_400;
+    go(&mut j, &mut seq, 1, 250, 4 * P, Some(3 * P + P / 2));
+    go(&mut j, &mut seq, 2, 100, 6 * P, Some(6 * P + P / 5));
+    j.new_day(1_791_158_400 * SEC + seq * SEC + 60 * SEC)
+        .unwrap();
+    seq += 86_400;
+    go(&mut j, &mut seq, 1, 300, 4 * P, Some(5 * P));
+    go(&mut j, &mut seq, 2, 200, 6 * P, Some(5 * P));
+    go(&mut j, &mut seq, 3, 400, 25 * P, None);
+    go(&mut j, &mut seq, 5, 100, 100 * P, None);
     if std::env::args().nth(2).as_deref() == Some("stress") {
         // sweep loses past its soft limit, and a person has scheduled a change.
-        go(&mut j, 2, 100, 6 * P, Some(4 * P));
-        j.check_loss_limits(1_791_158_400 * SEC + 900 * SEC)
+        go(&mut j, &mut seq, 2, 100, 6 * P, Some(4 * P));
+        j.check_loss_limits(1_791_158_400 * SEC + seq * SEC)
             .unwrap();
         let t = Tree::new(vec![
             group("day", 2_000, &[("momentum", 5_000), ("sweep", 2_000)]),
@@ -112,7 +131,7 @@ fn main() {
             group("etf", 4_000, &[("rotation", 10_000)]),
         ])
         .unwrap();
-        j.schedule_budgets(Some(t), 1_791_158_400 * SEC + 950 * SEC)
+        j.schedule_budgets(Some(t), 1_791_158_400 * SEC + seq * SEC + 60 * SEC)
             .unwrap();
     }
     drop(j);

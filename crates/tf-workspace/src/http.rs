@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-use crate::{Source, js, overview, runs};
+use crate::{Source, js, overview, run_detail, runs};
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 1024;
@@ -183,7 +183,7 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     }
     let known = matches!(
         req.path.as_str(),
-        "/" | "/app.js" | "/api/overview" | "/api/runs"
+        "/" | "/app.js" | "/api/overview" | "/api/runs" | "/api/run"
     );
     if !known {
         return Response::error(404, "no such route");
@@ -199,6 +199,19 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
         "/" => return Response::new(200, "text/html", HOME),
         "/app.js" => return Response::new(200, "text/javascript", APP_JS),
         "/api/overview" => overview(src),
+        "/api/run" => {
+            let (Some(strategy), Some(id)) = (
+                query_value(&req.query, "strategy"),
+                query_value(&req.query, "id"),
+            ) else {
+                return Response::error(400, "give strategy and id");
+            };
+            match run_detail(src, &strategy, &id) {
+                Ok(Some(body)) => return Response::json(200, body),
+                Ok(None) => return Response::error(404, "no such run"),
+                Err(e) => Err(e),
+            }
+        }
         _ => runs(src, query_value(&req.query, "strategy").as_deref()),
     };
     match answer {

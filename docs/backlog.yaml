@@ -1049,7 +1049,8 @@ epics:
       - id: E17-S11
         jira: TIC-130
         title: "Strategy run view (opens the latest run; older, newer and a run list)"
-        status: todo
+        status: done
+        evidence: "Clicking a strategy on the overview opens #/s/NAME, its most recent run, with Older, Newer, Latest, 'n of N' and a newest-first run list (date, kind, trades, P&L, Latest badge); #/s/NAME/ID opens a given run. Shows the summary (date, net P&L, trades, budget that session, entry rules), a chart of realised profit after each fill, the trades table (time, action, qty, instrument, price, P&L) and, for a session with no entry, why: every refused order's gateway reason in plain words, else that the rules found nothing. New: tf_catalog::sessions_detailed (fills with the profit each made, refusals by reason; fills add up to the session), /api/run?strategy=&id= (run ids are `session-N` or the stored hash, never the ledger path), `GET`-only. Looked at in headless Chromium at 1280 and 390 px with a three-day demo ledger incl. an all-refused day: navigation, disabled ends, unknown strategy, no console errors, no page-level scroll. 21 workspace + 13 catalog tests; 14 mutations tried, all killed after two test gaps closed. Limits: a stored backtest shows its summary only (no trades or chart: that needs a replay, S12 opens it in the explorer); no price chart for ledger sessions (the ledger keeps fills, not prices); instruments show as #N (no symbol names in the ledger); entry rules are not recorded for ledger sessions; peak-in-use from the mock is not shown; the browser check was manual"
         deps: [E17-S08, E17-S10]
         ac:
           - Clicking a strategy opens its most recent run, with Older, Newer, Latest and a newest-first run list

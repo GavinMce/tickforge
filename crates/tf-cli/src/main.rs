@@ -151,6 +151,14 @@ USAGE:
     or on the login page at /. Nothing it serves can place an order or change a budget. It speaks
     plain HTTP: put TLS and a real identity provider in front of it before exposing it.
 
+    tf ledger apply-inbox DIR [--at NANOS]
+
+    Record the budget changes people have requested (through the workspace app) as scheduled
+    changes in the ledger, which take effect at the next rebalance. Each request is checked again
+    against the budgets in force and what each strategy has in use now; one that no longer fits is
+    refused with the reason and kept as `.rej`. Takes the ledger's lock, so it refuses while an
+    engine is writing it (an engine applies its own inbox).
+
     tf ledger verify DIR [--orders]
 
     Replay an order ledger (the append-only log the risk gateway and order book write) and

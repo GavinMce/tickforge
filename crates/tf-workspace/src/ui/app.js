@@ -163,6 +163,12 @@
       h("div", { "class": "small mute" }, "Per strategy, from its own budget. Exits are never blocked."));
   }
 
+  function waitingNote(a) {
+    if (!a.requests_waiting) return null;
+    return h("div", { "class": "banner", role: "status" }, a.requests_waiting + (a.requests_waiting === 1 ? " budget change request is" : " budget change requests are") +
+      " waiting for the engine to record " + (a.requests_waiting === 1 ? "it" : "them") + ". ", h("a", { href: "#/edit", style: "color:inherit" }, "Review"));
+  }
+
   function banner(a) {
     if (!a.scheduled || a.scheduled.length === 0) return null;
     var items = a.scheduled.map(function (t) { return h("li", null, t); });
@@ -182,7 +188,9 @@
           a && a.killed ? h("span", { "class": "state bad" }, "Kill switch on") : null,
           failed ? h("span", { "class": "state bad" }, "Could not refresh") : null),
         h("h1", null, "Overview")),
-      h("div", { "class": "small mute", style: "max-width:380px" }, "Read-only. Budgets are reserved and rebalance after each session: gains and losses move into the strategy that made them."));
+      h("div", { "class": "row", style: "justify-content:flex-end" },
+        h("div", { "class": "small mute", style: "max-width:380px" }, "Budgets are reserved and rebalance after each session: gains and losses move into the strategy that made them."),
+        a && a.budgets ? h("a", { "class": "btn dark", href: "#/edit" }, "Edit budgets") : null));
     kids.push(head);
     if (!a) {
       kids.push(h("div", { "class": "card empty" }, "No ledger is connected to this workspace."));
@@ -192,7 +200,7 @@
       var ids = data.groups.map(function (g) { return g.id; });
       if (ids.indexOf(selected) < 0) selected = ids[0];
       var gi = ids.indexOf(selected), g = data.groups[gi];
-      kids.push(banner(a), totals(a), allocation(),
+      kids.push(banner(a), waitingNote(a), totals(a), allocation(),
         h("div", { "class": "split" },
           h("div", { "class": "mainc" }, groupCards(), strategies(g, gi)),
           h("aside", null, limits(g))));
@@ -340,9 +348,192 @@
       h("div", { "class": "split" }, side, h.apply(null, ["div", { "class": "mainc", style: "gap:16px;flex:999 1 560px" }].concat(main))));
   }
 
+
+  // ---- the budget editor --------------------------------------------------------------------
+  // The page keeps a draft and asks the server, on every edit, whether it is allowed, what each
+  // share may now be and what the changes come to in dollars. The sliders are held to the server's
+  // ranges, and the server checks the draft again when it is scheduled: the rules live there.
+
+  var ed = null;       // {view, draft, nodes, seq, timer, notice, busy}
+
+  function pctText(bp) { return (bp / 100).toFixed(2).replace(/\.?0+$/, "") + "%"; }
+  function draftText() {
+    var t = "budgets v1\n";
+    ed.draft.forEach(function (g) {
+      t += "group " + g.id + " " + g.share_bp + " " + g.loss_soft_bp + " " + g.loss_hard_bp + "\n";
+      g.strategies.forEach(function (s) { t += "strategy " + g.id + " " + s.id + " " + s.share_bp + "\n"; });
+    });
+    return t;
+  }
+  function post(path, body) {
+    return fetch(path, { method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "X-Requested-With": "workspace", "Content-Type": "text/plain" }, body: body }).then(function (r) {
+      if (r.status === 401) { location.href = "/"; return null; }
+      return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+    });
+  }
+  function startDraft(view) {
+    ed.view = view;
+    ed.draft = view.groups.map(function (g) {
+      return { id: g.id, share_bp: g.share_bp, loss_soft_bp: g.loss_soft_bp, loss_hard_bp: g.loss_hard_bp,
+        strategies: g.strategies.map(function (s) { return { id: s.id, share_bp: s.share_bp }; }) };
+    });
+  }
+  function ask() {
+    clearTimeout(ed.timer);
+    var seq = ++ed.seq;
+    ed.timer = setTimeout(function () {
+      post("/api/budgets/preview", draftText()).then(function (r) {
+        if (!r || seq !== ed.seq) return;
+        if (r.ok) { ed.view = r.body; paintEditor(); }
+        else { ed.view.valid = false; ed.view.error = r.body.error || "The server refused the draft."; paintEditor(); }
+      }).catch(function () { ed.view.valid = false; ed.view.error = "Could not reach the server."; paintEditor(); });
+    }, 150);
+  }
+  function rangeOf(id) {
+    for (var i = 0; i < ed.view.groups.length; i++) {
+      var g = ed.view.groups[i];
+      if (g.id === id) return g.range;
+      for (var j = 0; j < g.strategies.length; j++) if (g.strategies[j].id === id) return g.strategies[j].range;
+    }
+    return { min: 0, max: 10000 };
+  }
+  function nodeShare(id, bp) {
+    var done = false;
+    ed.draft.forEach(function (g) {
+      if (g.id === id) { g.share_bp = bp; done = true; }
+      g.strategies.forEach(function (s) { if (s.id === id) { s.share_bp = bp; done = true; } });
+    });
+    return done;
+  }
+
+  function shareControl(id, label, bp) {
+    var slider = h("input", { type: "range", min: "0", max: "10000", step: "1", value: String(bp), "aria-label": label + " share" });
+    var num = h("input", { type: "number", min: "0", max: "100", step: "0.01", value: (bp / 100).toFixed(2), "aria-label": label + " share in percent", "class": "pctin" });
+    var limit = h("div", { "class": "small mute" });
+    var dollars = h("span", { "class": "mono" });
+    function set(bp2, typed) {
+      var r = rangeOf(id), v = Math.max(r.min, Math.min(r.max, Math.round(bp2)));
+      if (typed && v !== Math.round(bp2)) ed.notice = label + " was limited to " + pctText(v) + (v === r.max ? ": " + r.max_why : ": " + r.min_why) + ".";
+      else if (typed) ed.notice = null;
+      nodeShare(id, v);
+      slider.value = String(v); num.value = (v / 100).toFixed(2);
+      ask(); paintEditor();
+    }
+    slider.addEventListener("input", function () { set(+slider.value, false); });
+    num.addEventListener("change", function () { set(Math.round((parseFloat(num.value) || 0) * 100), true); });
+    ed.nodes[id] = { slider: slider, num: num, limit: limit, dollars: dollars };
+    return h("div", { "class": "ctl" }, slider, h("span", { "class": "pctwrap" }, num, "%"), dollars, limit);
+  }
+
+  function lossControl(g) {
+    function field(key, label) {
+      var i = h("input", { type: "number", min: "0.01", max: "100", step: "0.01", "class": "pctin", value: (g[key] / 100).toFixed(2), "aria-label": g.id + " " + label });
+      i.addEventListener("change", function () {
+        var dg = ed.draft.filter(function (x) { return x.id === g.id; })[0];
+        dg[key] = Math.round((parseFloat(i.value) || 0) * 100);
+        ed.notice = null; ask(); paintEditor();
+      });
+      return h("label", { "class": "small" }, label + " ", h("span", { "class": "pctwrap" }, i, "%"));
+    }
+    return h("div", { "class": "row small" }, h("span", { "class": "mute" }, "Per strategy, of its own budget:"),
+      field("loss_soft_bp", "stop opening at"), field("loss_hard_bp", "flatten at"));
+  }
+
+  function drawEditor() {
+    var v = ed.view;
+    ed.nodes = {};
+    var crumbs = h("nav", { "class": "row small mute", "aria-label": "Breadcrumb" }, h("a", { "class": "btn", href: "#" }, "‹ Overview"),
+      h("span", null, "Workspace"), h("span", { "aria-hidden": "true" }, "/"), h("b", { style: "color:var(--ink)" }, "Edit budgets"));
+    var groups = ed.draft.map(function (g, gi) {
+      var head = h("div", { "class": "edhead" }, h("h2", { style: "font-size:15px" }, h("span", { "class": "dot", style: "background:" + COLORS[gi % COLORS.length] }), g.id),
+        shareControl(g.id, g.id, g.share_bp));
+      var rows = g.strategies.map(function (s) {
+        return h("div", { "class": "edrow" }, h("b", null, s.id), shareControl(s.id, s.id, s.share_bp));
+      });
+      return h.apply(null, ["section", { "class": "card", "aria-label": g.id }, head, h("div", { style: "padding:0 16px 8px" }, lossControl(g))].concat(rows));
+    });
+    var out = h("div", { "class": "stack" });
+    ed.refs = {
+      split: h("span", { "class": "small mute" }), error: h("div", { "class": "err", role: "alert" }), notice: h("div", { "class": "small", role: "status" }),
+      changes: h("ul", { style: "margin:6px 0 0;padding-left:18px" }), pending: h("div", null),
+      go: h("button", { "class": "btn dark" }, "Schedule for the next rebalance"),
+      reset: h("button", { "class": "btn" }, "Discard changes"),
+      withdraw: h("button", { "class": "btn" }, "Ask to cancel what is scheduled"),
+      done: h("div", { "class": "banner", role: "status", hidden: "" })
+    };
+    ed.refs.go.addEventListener("click", function () {
+      ed.refs.go.disabled = true;
+      post("/api/budgets/schedule", draftText()).then(function (r) {
+        if (!r) return;
+        if (r.ok) { ed.done = "Requested. The engine records it as a scheduled change and it takes effect at the next rebalance, after the session. Until then the budgets stay as they are."; refreshEditor(); }
+        else { ed.view.valid = false; ed.view.error = r.body.error; paintEditor(); }
+      });
+    });
+    ed.refs.reset.addEventListener("click", function () { ed.notice = null; ed.done = null; refreshEditor(); });
+    ed.refs.withdraw.addEventListener("click", function () {
+      post("/api/budgets/withdraw", "").then(function (r) {
+        if (r && r.ok) { ed.done = "Requested. The engine will cancel the scheduled change when it takes the request."; refreshEditor(); }
+      });
+    });
+    app.replaceChildren(crumbs,
+      h("header", null, h("h1", null, "Edit budgets"),
+        h("div", { "class": "small mute" }, "Reserved shares of " + usd(v.balance) + ". A share can't go above what is not yet assigned in its parent, or below what is in use. Changes are scheduled and take effect at the next rebalance.")),
+      ed.refs.done,
+      h("section", { "class": "card panel", "aria-label": "Split" }, h("div", { "class": "between" }, h("h2", null, "Split of the balance"), ed.refs.split)),
+      h.apply(null, ["div", { "class": "stack" }].concat(groups)),
+      h("section", { "class": "card panel", "aria-label": "Changes" }, h("h2", null, "Changes"), ed.refs.error, ed.refs.notice, ed.refs.changes,
+        h("div", { "class": "row" }, ed.refs.go, ed.refs.reset)),
+      h("section", { "class": "card panel", "aria-label": "Waiting" }, h("h2", null, "Waiting for the engine"), ed.refs.pending, h("div", null, ed.refs.withdraw)));
+    paintEditor();
+  }
+
+  // Bring everything the server decides (ranges, dollars, changes, errors) up to date without
+  // rebuilding the controls the person is using.
+  function paintEditor() {
+    var v = ed.view, r = ed.refs;
+    function node(id, range, budget, used, share) {
+      var n = ed.nodes[id];
+      if (!n) return;
+      n.slider.min = String(range.min); n.slider.max = String(range.max);
+      n.num.min = (range.min / 100).toFixed(2); n.num.max = (range.max / 100).toFixed(2);
+      n.limit.textContent = "between " + pctText(range.min) + " (" + range.min_why + ") and " + pctText(range.max) + " (" + range.max_why + ")";
+      n.dollars.textContent = budget + " · in use " + used;
+    }
+    v.groups.forEach(function (g) {
+      node(g.id, g.range, g.budget, g.used);
+      g.strategies.forEach(function (s) { node(s.id, s.range, s.budget, s.used); });
+    });
+    var topSum = ed.draft.reduce(function (t, g) { return t + g.share_bp; }, 0);
+    r.split.textContent = pctText(topSum) + " assigned · " + pctText(10000 - topSum) + " not reserved";
+    r.error.textContent = v.valid ? "" : v.error || "";
+    r.notice.textContent = ed.notice || "";
+    r.changes.replaceChildren.apply(r.changes, v.changes.length ? v.changes.map(function (c) { return h("li", null, c); }) : [h("li", { "class": "mute", style: "list-style:none;margin-left:-18px" }, "No changes yet.")]);
+    r.go.disabled = !(v.valid && v.changes.length > 0);
+    r.reset.disabled = v.changes.length === 0 && !ed.notice;
+    var waiting = v.pending || [];
+    r.pending.replaceChildren.apply(r.pending, waiting.length ? waiting.map(function (p) {
+      return h("div", { "class": "small", style: "margin-bottom:6px" }, h("b", null, p.name), " · " + p.by, h.apply(null, ["ul", { style: "margin:2px 0 0;padding-left:18px" }].concat(p.changes.map(function (c) { return h("li", null, c); }))));
+    }) : [h("div", { "class": "small mute" }, "No requests are waiting.")]);
+    r.withdraw.hidden = !(data && data.account && data.account.scheduled && data.account.scheduled.length);
+    if (ed.done) { r.done.hidden = false; r.done.textContent = ed.done; } else r.done.hidden = true;
+  }
+
+  function refreshEditor() {
+    get("/api/budgets").then(function (view) {
+      if (!view) return;
+      ed = ed || { seq: 0 };
+      var done = ed.done, notice = ed.notice;
+      startDraft(view);
+      ed.done = done; ed.notice = notice;
+      drawEditor();
+    });
+  }
+
   // ---- routing and loading ------------------------------------------------------------------
 
   function route() {
+    if (location.hash === "#/edit") return { edit: true };
     var m = /^#\/s\/([^/]+)(?:\/(.+))?$/.exec(location.hash);
     if (m) return { strategy: decodeURIComponent(m[1]), id: m[2] ? decodeURIComponent(m[2]) : null };
     return null;
@@ -362,6 +553,17 @@
 
   function load() {
     var want = route();
+    if (want && want.edit) {
+      // The editor is not redrawn by the timer: that would throw away a draft.
+      return get("/api/overview").then(function (d) {
+        if (!d) return;
+        data = d;
+        if (ed && ed.refs && ed.view && !ed.fresh) { paintEditor(); return; }
+        ed = { seq: 0, fresh: false };
+        refreshEditor();
+      }).catch(function () { app.replaceChildren(h("p", { "class": "err" }, "Could not load the editor.")); });
+    }
+    ed = null;
     var jobs = [get("/api/overview")];
     if (want) jobs.push(get("/api/runs?strategy=" + encodeURIComponent(want.strategy)));
     Promise.all(jobs).then(function (res) {

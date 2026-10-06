@@ -1163,3 +1163,197 @@ fn a_rebalance_keeps_each_groups_loss_limits_and_leaves_a_zeroed_balance_alone()
     .unwrap();
     assert_eq!((wiped.balance, wiped.tree), (0, custom));
 }
+
+fn edited(t: &Tree, f: impl Fn(&mut Tree)) -> Tree {
+    let mut w = t.clone();
+    f(&mut w);
+    w
+}
+
+#[test]
+fn an_edit_may_move_shares_and_loss_limits_but_not_add_or_remove_anything() {
+    let t = mock();
+    let u = Usage::new();
+    assert_eq!(check_edit(&t, &t, BAL, &u), Ok(()), "no change is allowed");
+    // Move a strategy share and a group share and its loss limits.
+    let w = edited(&t, |w| {
+        w.groups[0].share = 2000;
+        w.groups[1].share = 4000;
+        w.groups[0].strategies[0].share = 4000;
+        w.groups[2].loss = LossLimits {
+            soft: 200,
+            hard: 500,
+        };
+    });
+    assert_eq!(check_edit(&t, &w, BAL, &u), Ok(()));
+    // A different shape is refused: a strategy renamed, removed, added, or moved to another group.
+    let renamed = edited(&t, |w| w.groups[0].strategies[0].id = "other".into());
+    let removed = edited(&t, |w| {
+        w.groups[0].strategies.pop();
+    });
+    let added = edited(&t, |w| w.groups[0].strategies.push(s("extra", 0)));
+    let dropped_group = edited(&t, |w| {
+        w.groups.pop();
+    });
+    let reordered = edited(&t, |w| w.groups.swap(0, 1));
+    for (name, bad) in [
+        ("renamed", renamed),
+        ("removed", removed),
+        ("added", added),
+        ("group dropped", dropped_group),
+        ("reordered", reordered),
+    ] {
+        assert_eq!(
+            check_edit(&t, &bad, BAL, &u),
+            Err(BudgetError::ShapeMismatch),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_edit_must_be_a_valid_tree() {
+    let t = mock();
+    let u = Usage::new();
+    let over = edited(&t, |w| w.groups[0].share = 9000);
+    assert!(matches!(
+        check_edit(&t, &over, BAL, &u),
+        Err(BudgetError::OverAllocated { .. })
+    ));
+    let squeezed = edited(&t, |w| {
+        w.groups[0].loss = LossLimits {
+            soft: 600,
+            hard: 300,
+        }
+    });
+    assert!(matches!(
+        check_edit(&t, &squeezed, BAL, &u),
+        Err(BudgetError::BadLossLimits { .. })
+    ));
+    let big = edited(&t, |w| w.groups[0].strategies[0].share = 10_001);
+    assert!(check_edit(&t, &big, BAL, &u).is_err());
+}
+
+#[test]
+fn an_edit_cannot_leave_a_strategy_with_less_budget_than_it_uses() {
+    let t = mock(); // day 25% of $100,000 = $25,000; ml 30% = $7,500
+    let used = Usage::new().with("ml", 7_000 * D);
+    // ml to 28% of day = $7,000: exactly what it uses: allowed. 27.99%: not.
+    let at_use = edited(&t, |w| w.groups[0].strategies[0].share = 2800);
+    assert_eq!(check_edit(&t, &at_use, BAL, &used), Ok(()));
+    let below = edited(&t, |w| w.groups[0].strategies[0].share = 2799);
+    assert!(matches!(
+        check_edit(&t, &below, BAL, &used),
+        Err(BudgetError::BelowUse { ref what, used: u, .. }) if what == "ml" && u == 7_000 * D
+    ));
+    // Shrinking the group shrinks every strategy in it, so the group is held up by its busiest.
+    let smaller_group = edited(&t, |w| w.groups[0].share = 2300); // ml = 30% of $23,000 = $6,900
+    assert!(matches!(
+        check_edit(&t, &smaller_group, BAL, &used),
+        Err(BudgetError::BelowUse { .. })
+    ));
+    let still_fits = edited(&t, |w| w.groups[0].share = 2400); // ml = $7,200
+    assert_eq!(check_edit(&t, &still_fits, BAL, &used), Ok(()));
+    // Raising someone else's share while ml is untouched is fine, and so is raising ml.
+    let raise = edited(&t, |w| w.groups[0].strategies[0].share = 3500);
+    assert_eq!(check_edit(&t, &raise, BAL, &used), Ok(()));
+    // The message says who and how much.
+    let e = check_edit(&t, &below, BAL, &used).unwrap_err().to_string();
+    assert!(e.starts_with("ml:") && e.contains("in use"), "{e}");
+}
+
+#[test]
+fn a_strategy_already_over_its_budget_may_stay_or_grow_but_not_be_cut() {
+    let t = mock();
+    let over = Usage::new().with("ml", 9_000 * D); // budget is $7,500
+    assert_eq!(
+        check_edit(&t, &t, BAL, &over),
+        Ok(()),
+        "leaving it alone is allowed"
+    );
+    let bigger = edited(&t, |w| w.groups[0].strategies[0].share = 3200);
+    assert_eq!(check_edit(&t, &bigger, BAL, &over), Ok(()));
+    let cut = edited(&t, |w| w.groups[0].strategies[0].share = 2900);
+    assert!(matches!(
+        check_edit(&t, &cut, BAL, &over),
+        Err(BudgetError::BelowUse { .. })
+    ));
+    // Cutting a different strategy is not affected by ml's overage.
+    let other = edited(&t, |w| w.groups[0].strategies[1].share = 3000);
+    assert_eq!(check_edit(&t, &other, BAL, &over), Ok(()));
+}
+
+#[test]
+fn what_the_ranges_allow_is_what_the_edit_check_allows() {
+    // For random trees and usage: setting one share anywhere inside its range passes the check, and
+    // one step past either end of the range fails it (or is not a valid tree).
+    let mut rng = SplitMix64::new(0xED17);
+    let mut tested = 0;
+    for _ in 0..300 {
+        let (t, usage, balance) = random_tree(&mut rng);
+        for g in t.groups() {
+            let r = t.group_range(&g.id, balance, &usage).unwrap();
+            for bp in [r.min.value, r.max.value, (r.min.value + r.max.value) / 2] {
+                let w = edited(&t, |w| {
+                    w.groups.iter_mut().find(|x| x.id == g.id).unwrap().share = bp;
+                });
+                assert_eq!(
+                    check_edit(&t, &w, balance, &usage),
+                    Ok(()),
+                    "{} to {bp} in {r:?}",
+                    g.id
+                );
+                tested += 1;
+            }
+            if r.max.value < FULL {
+                let w = edited(&t, |w| {
+                    w.groups.iter_mut().find(|x| x.id == g.id).unwrap().share = r.max.value + 1;
+                });
+                assert!(
+                    check_edit(&t, &w, balance, &usage).is_err(),
+                    "{} above its range",
+                    g.id
+                );
+            }
+            if r.min.value > 0 {
+                let w = edited(&t, |w| {
+                    w.groups.iter_mut().find(|x| x.id == g.id).unwrap().share = r.min.value - 1;
+                });
+                let over_before = g
+                    .strategies
+                    .iter()
+                    .any(|st| t.strategy_budget(balance, &st.id).unwrap() < usage.strategy(&st.id));
+                if !over_before {
+                    assert!(
+                        check_edit(&t, &w, balance, &usage).is_err(),
+                        "{} below its range",
+                        g.id
+                    );
+                }
+            }
+        }
+        for g in t.groups() {
+            for st in &g.strategies {
+                let r = t.strategy_range(&st.id, balance, &usage).unwrap();
+                for bp in [r.min.value, r.max.value] {
+                    let w = edited(&t, |w| {
+                        w.groups
+                            .iter_mut()
+                            .flat_map(|x| x.strategies.iter_mut())
+                            .find(|x| x.id == st.id)
+                            .unwrap()
+                            .share = bp;
+                    });
+                    assert_eq!(
+                        check_edit(&t, &w, balance, &usage),
+                        Ok(()),
+                        "{} to {bp} in {r:?}",
+                        st.id
+                    );
+                    tested += 1;
+                }
+            }
+        }
+    }
+    assert!(tested > 1_000, "{tested}");
+}

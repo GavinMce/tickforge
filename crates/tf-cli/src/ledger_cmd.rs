@@ -11,8 +11,61 @@ use tf_ledger::{FileStore, Journal};
 use super::runs::money;
 
 pub(crate) fn ledger(args: &[String]) -> Result<(), String> {
-    print!("{}", report(args)?);
+    match args.first().map(String::as_str) {
+        Some("apply-inbox") => print!("{}", apply_inbox(&args[1..])?),
+        _ => print!("{}", report(args)?),
+    }
     Ok(())
+}
+
+const APPLY_USAGE: &str = "usage: tf ledger apply-inbox DIR [--at NANOS]";
+
+/// What `tf ledger apply-inbox` prints: waiting budget-change requests recorded in the ledger as
+/// scheduled changes, or refused with the reason. It takes the ledger's lock, so it refuses while an
+/// engine is writing it (the engine applies its own inbox). `--at` sets the event time; without it
+/// the time of day now is used, since a person asked for the change at a real time.
+pub(crate) fn apply_inbox(args: &[String]) -> Result<String, String> {
+    let (mut dir, mut at) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--at" => {
+                let v = it.next().ok_or("--at needs a time in nanoseconds")?;
+                at = Some(
+                    v.parse::<u64>()
+                        .map_err(|_| format!("--at {v}: not a number"))?,
+                );
+            }
+            flag if flag.starts_with("--") => {
+                return Err(format!("unknown flag {flag}\n{APPLY_USAGE}"));
+            }
+            d if dir.is_none() => dir = Some(d.to_owned()),
+            extra => return Err(format!("unexpected argument {extra}\n{APPLY_USAGE}")),
+        }
+    }
+    let dir = dir.ok_or(APPLY_USAGE)?;
+    if !Path::new(&dir).join("ledger.log").exists() {
+        return Err(format!("no ledger in {dir} (no ledger.log)"));
+    }
+    let ts = at.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+    });
+    let store = FileStore::open(&dir).map_err(|e| e.to_string())?;
+    let (mut j, _) = Journal::open_recorded(store).map_err(|e| e.to_string())?;
+    let done = tf_ledger::inbox::apply(&mut j, Path::new(&dir), ts).map_err(|e| e.to_string())?;
+    let mut out = String::new();
+    for name in &done.scheduled {
+        let _ = writeln!(out, "scheduled {name}");
+    }
+    for (name, why) in &done.refused {
+        let _ = writeln!(out, "refused   {name}: {why}");
+    }
+    if done.scheduled.is_empty() && done.refused.is_empty() {
+        out.push_str("the inbox is empty\n");
+    }
+    Ok(out)
 }
 
 fn side_name(s: tf_strategy::intent::Side) -> &'static str {
@@ -28,7 +81,10 @@ pub(crate) fn report(args: &[String]) -> Result<String, String> {
     let (mut dir, mut orders) = (None, false);
     let mut it = args.iter();
     if it.next().map(String::as_str) != Some("verify") {
-        return Err("usage: tf ledger verify DIR [--orders]".to_owned());
+        return Err(
+            "usage: tf ledger verify DIR [--orders] | tf ledger apply-inbox DIR [--at NANOS]"
+                .to_owned(),
+        );
     }
     for a in it {
         match a.as_str() {
@@ -108,6 +164,16 @@ pub(crate) fn report(args: &[String]) -> Result<String, String> {
             out,
             "limits   strategy {s} crossed its soft loss limit: stopped opening"
         );
+    }
+    if let Ok((waiting, unreadable)) = tf_ledger::inbox::pending(Path::new(&dir)) {
+        if !waiting.is_empty() || !unreadable.is_empty() {
+            let _ = writeln!(
+                out,
+                "inbox    {} budget change request(s) waiting for the engine, {} unreadable (tf ledger apply-inbox)",
+                waiting.len(),
+                unreadable.len()
+            );
+        }
     }
     if let Some(tree) = j.scheduled() {
         let _ = writeln!(
@@ -363,6 +429,84 @@ mod tests {
             !text.contains("soft loss limit"),
             "listed once, at its worst: {text}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn requests_in_the_inbox_are_shown_then_applied_or_refused_by_the_command() {
+        use tf_budget::{Group, LossLimits as L, Strategy as S, Tree};
+        let dir = scratch("inbox");
+        make(&dir);
+        let d = dir.to_str().unwrap();
+        let tree = |a: u32, b: u32| {
+            Tree::new(vec![Group {
+                id: "g".into(),
+                share: 10_000,
+                loss: L::default(),
+                strategies: vec![
+                    S {
+                        id: "s".into(),
+                        share: a,
+                    },
+                    S {
+                        id: "t".into(),
+                        share: b,
+                    },
+                ],
+            }])
+            .unwrap()
+        };
+        let (mut j, _) = Journal::open_recorded(FileStore::open(&dir).unwrap()).unwrap();
+        let ids = [(1, "s".to_owned()), (2, "t".to_owned())];
+        j.set_budgets(
+            Some(tf_risk::Budgets::new(tree(5_000, 5_000), 1_000 * 1_000_000_000, ids).unwrap()),
+            9_000_000_000,
+        )
+        .unwrap();
+        drop(j);
+        assert_eq!(apply_inbox(&args(&[d])).unwrap(), "the inbox is empty\n");
+        let good = tf_ledger::inbox::submit(&dir, "alice", Some(&tree(8_000, 2_000))).unwrap();
+        let bad = tf_ledger::inbox::submit(&dir, "bob", Some(&tree(100, 100))).unwrap();
+        std::fs::write(tf_ledger::inbox::dir(&dir).join("0000000009.req"), "junk").unwrap();
+        let text = report(&args(&["verify", d])).unwrap();
+        assert!(
+            text.contains(
+                "inbox    2 budget change request(s) waiting for the engine, 1 unreadable"
+            ),
+            "{text}"
+        );
+        // An engine holding the ledger blocks it.
+        let held = FileStore::open(&dir).unwrap();
+        assert!(
+            apply_inbox(&args(&[d]))
+                .unwrap_err()
+                .contains("held by another writer")
+        );
+        drop(held);
+        let text = apply_inbox(&args(&[d, "--at", "20000000000"])).unwrap();
+        assert!(text.contains(&format!("scheduled {good}")), "{text}");
+        assert!(
+            text.contains(&format!("refused   {bad}: "))
+                || text.contains("refused   0000000009.req: "),
+            "{text}"
+        );
+        let text = report(&args(&["verify", d])).unwrap();
+        assert!(
+            text.contains("a change is scheduled for the next rebalance"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("budget change request(s) waiting for the engine, 0"),
+            "{text}"
+        );
+        // Bad invocations.
+        let err = |a: &[&str]| apply_inbox(&args(a)).unwrap_err();
+        assert!(err(&[]).starts_with("usage:"));
+        assert!(err(&[d, "--at"]).contains("needs a time"));
+        assert!(err(&[d, "--at", "x"]).contains("not a number"));
+        assert!(err(&[d, "--bogus"]).contains("unknown flag"));
+        assert!(err(&[d, "extra"]).contains("unexpected argument"));
+        assert!(err(&["/nonexistent-ledger"]).contains("no ledger in"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -2031,3 +2031,192 @@ fn a_ledger_can_be_read_while_a_writer_holds_it_without_changing_a_byte() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------- the inbox
+
+fn tree_of(a: u32, b: u32, c: u32) -> tf_budget::Tree {
+    split(a, b, c)
+}
+
+#[test]
+fn requests_wait_in_order_and_come_back_exactly_as_made() {
+    use crate::inbox::{pending, settle, submit};
+    let dir = scratch("inbox");
+    assert_eq!(
+        pending(&dir).unwrap(),
+        (vec![], vec![]),
+        "no inbox is an empty one"
+    );
+    let a = submit(&dir, "alice", Some(&tree_of(5_000, 3_000, 2_000))).unwrap();
+    let b = submit(&dir, "bob\nwith a line break", None).unwrap();
+    let c = submit(&dir, &"x".repeat(200), Some(&tree_of(1, 1, 1))).unwrap();
+    assert_eq!(
+        (a.as_str(), b.as_str()),
+        ("0000000001.req", "0000000002.req")
+    );
+    let (got, bad) = pending(&dir).unwrap();
+    assert!(bad.is_empty());
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[0].by, "alice");
+    assert_eq!(got[0].tree, Some(tree_of(5_000, 3_000, 2_000)));
+    assert_eq!(
+        got[1].by, "bobwith a line break",
+        "a request cannot smuggle in a line"
+    );
+    assert_eq!(got[1].tree, None, "a withdrawal has no tree");
+    assert_eq!(got[2].by.len(), 64, "who asked is kept short");
+    // Settled requests leave the queue; a refused one is kept apart with its reason; the numbers
+    // are never reused.
+    settle(&dir, &a, Ok(())).unwrap();
+    settle(&dir, &b, Err("too\nbig".into())).unwrap();
+    let (left, _) = pending(&dir).unwrap();
+    assert_eq!(
+        left.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        [c.as_str()]
+    );
+    let rej = std::fs::read_to_string(crate::inbox::dir(&dir).join("0000000002.rej")).unwrap();
+    assert!(
+        rej.starts_with("tfreq 1\nby bobwith a line break") && rej.ends_with("rejected: too big\n"),
+        "{rej}"
+    );
+    assert_eq!(submit(&dir, "d", None).unwrap(), "0000000004.req");
+    settle(&dir, &c, Ok(())).unwrap();
+    assert_eq!(submit(&dir, "e", None).unwrap(), "0000000005.req");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_that_is_not_a_request_is_reported_and_the_rest_still_come() {
+    use crate::inbox::{dir as inbox_dir, pending, submit};
+    let dir = scratch("inbox-bad");
+    submit(&dir, "alice", None).unwrap();
+    let d = inbox_dir(&dir);
+    std::fs::write(d.join("0000000002.req"), "hello").unwrap();
+    std::fs::write(
+        d.join("0000000003.req"),
+        "tfreq 1\nby x\nschedule\nbudgets v1\ngroup g 20000 300 600\n",
+    )
+    .unwrap();
+    std::fs::write(d.join("0000000004.req"), "tfreq 1\nby x\nmaybe\n").unwrap();
+    std::fs::write(d.join("0000000005.req"), "tfreq 1\nno by line\nwithdraw\n").unwrap();
+    std::fs::write(d.join("notes.txt"), "ignored").unwrap();
+    std::fs::write(d.join("123.tmp"), "half written").unwrap();
+    let (ok, bad) = pending(&dir).unwrap();
+    assert_eq!(ok.len(), 1);
+    let names: Vec<&str> = bad.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "0000000002.req",
+            "0000000003.req",
+            "0000000004.req",
+            "0000000005.req"
+        ]
+    );
+    assert!(bad[0].1.contains("tfreq 1"), "{bad:?}");
+    assert!(
+        bad[1].1.contains("more than the whole")
+            || bad[1].1.contains("too big")
+            || bad[1].1.contains("share"),
+        "{bad:?}"
+    );
+    assert!(bad[2].1.contains("schedule"), "{bad:?}");
+    assert!(bad[3].1.contains("by"), "{bad:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn applying_the_inbox_records_valid_changes_and_refuses_the_rest_with_the_reason() {
+    use crate::inbox::{apply, pending, submit};
+    let dir = scratch("inbox-apply");
+    let mut j = fresh(1);
+    j.set_budgets(Some(day_budgets(30_000 * P as u128)), SEC)
+        .unwrap();
+    // s1 holds 100 shares at $5 = $500 against a budget of about $9,999.
+    let mut i = buy(10, 0, 100, 5 * P);
+    i.id.strategy = StrategyId(1);
+    let Decision::Accepted(o) = j.decide(&i, 10 * SEC).unwrap() else {
+        panic!()
+    };
+    j.ack(o, 10 * SEC).unwrap();
+    j.fill(o, 100, Px::from_raw(5 * P), 10 * SEC).unwrap();
+    // Renamed strategies: the shape of the budgets in force is split(3333,3333,3334) over s1..s3.
+    let good = submit(&dir, "alice", Some(&tree_of(5_000, 2_000, 3_000))).unwrap();
+    let too_small = submit(&dir, "bob", Some(&tree_of(100, 4_000, 5_900))).unwrap(); // s1 = 1% of $30,000 = $300 < $500
+    let other_shape = submit(&dir, "carol", Some(&tf_budget::Tree::default())).unwrap();
+    let withdraw = submit(&dir, "dave", None).unwrap();
+    let before = j.records();
+    let r = apply(&mut j, &dir, 20 * SEC).unwrap();
+    assert_eq!(r.scheduled, [good.clone(), withdraw.clone()]);
+    assert_eq!(r.refused.len(), 2);
+    assert_eq!(r.refused[0].0, too_small);
+    assert!(
+        r.refused[0].1.contains("s1") && r.refused[0].1.contains("in use"),
+        "{:?}",
+        r.refused
+    );
+    assert_eq!(r.refused[1].0, other_shape);
+    assert!(r.refused[1].1.contains("same groups"), "{:?}", r.refused);
+    let rejected: Vec<String> = std::fs::read_dir(crate::inbox::dir(&dir))
+        .unwrap()
+        .flatten()
+        .map(|f| f.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".rej"))
+        .collect();
+    assert_eq!(
+        rejected.len(),
+        2,
+        "only the two refused requests are kept: {rejected:?}"
+    );
+    // Two records went into the ledger (the schedule and the withdrawal), and the inbox is empty.
+    assert_eq!(j.records(), before + 2);
+    assert_eq!(pending(&dir).unwrap().0.len(), 0);
+    assert_eq!(
+        j.scheduled(),
+        None,
+        "the later withdrawal cleared the earlier schedule"
+    );
+    same(&j, &recover(&j, 1));
+    // Alone, the good one is scheduled and survives a restart.
+    submit(&dir, "alice", Some(&tree_of(5_000, 2_000, 3_000))).unwrap();
+    apply(&mut j, &dir, 30 * SEC).unwrap();
+    assert_eq!(j.scheduled(), Some(&tree_of(5_000, 2_000, 3_000)));
+    same(&j, &recover(&j, 1));
+    // Without budgets in force there is nothing to change.
+    let mut bare = fresh(1);
+    submit(&dir, "eve", Some(&tree_of(5_000, 2_000, 3_000))).unwrap();
+    let r = apply(&mut bare, &dir, SEC).unwrap();
+    assert!(
+        r.scheduled.is_empty() && r.refused[0].1.contains("no budgets"),
+        "{r:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_number_is_never_reused_even_when_the_latest_request_was_refused() {
+    use crate::inbox::{settle, submit};
+    let dir = scratch("inbox-numbers");
+    let a = submit(&dir, "a", None).unwrap();
+    settle(&dir, &a, Err("no".into())).unwrap();
+    assert_eq!(submit(&dir, "b", None).unwrap(), "0000000002.req");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn requests_made_at_the_same_moment_all_arrive_under_different_names() {
+    use crate::inbox::{pending, submit};
+    let dir = scratch("inbox-race");
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let d = dir.clone();
+            std::thread::spawn(move || submit(&d, &format!("p{i}"), None).unwrap())
+        })
+        .collect();
+    let mut names: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 8, "{names:?}");
+    assert_eq!(pending(&dir).unwrap().0.len(), 8);
+    let _ = std::fs::remove_dir_all(&dir);
+}

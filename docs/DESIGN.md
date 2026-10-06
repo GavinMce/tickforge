@@ -164,7 +164,49 @@ API (https://databento.com/docs/api-reference-live), Alpaca WebSocket stream
 (https://docs.alpaca.markets/docs/streaming-market-data), Alpaca HTB
 (https://alpaca.markets/blog/htb-trading-api-locates/).
 
-## Back-of-envelope (to be replaced by measurement; backlog E06-S01)
+## Measured on real data (2026-10-06; Databento historical API, Friday 2026-10-02)
 
-Order 10^4 trade msgs/s sustained and 10^5 quote msgs/s in bursts if L1 quotes
-are subscribed for all 5,000 symbols. Hot state is low single-digit GB at worst.
+This replaces the earlier back-of-envelope. One day is one day: it is a sample, not a distribution.
+
+**Which feed covers the market.** Total shares in the day's `ohlcv-1d` bars, same day:
+
+| Dataset | Symbols | Shares | Dollar volume | What it is |
+|---|---|---|---|---|
+| `EQUS.SUMMARY` | 13,301 | 17,322M | $1,010B | consolidated daily summary (the reference total) |
+| `XNAS.BASIC` | 12,855 | 11,352M | $696B | Nasdaq Basic + Last Sale Plus: the widest live trade feed seen (65% of the total; why not 100% is not known) |
+| `EQUS.MINI` | 9,961 | 924M | $46B | the "mini" consolidated top of book: **5.3% of the volume** |
+| `DBEQ.BASIC` | 21,806 | 961M | $59B | similar share to `EQUS.MINI` |
+| the 17 single venues | | 7,224M (+ XNYS 1,652M) | | lit exchanges are about half of the total; the rest is off-exchange |
+
+So `EQUS.MINI` is a sample of the market, not the market: volume thresholds, relative volume against
+other sources, and premarket activity (95,673 trades from 04:00 to 09:30 ET, against 2.78M on
+`XNAS.BASIC`) will not match. Whether Databento's Standard live plan includes `XNAS.BASIC` or only
+`EQUS.MINI` is **not confirmed**; ask before relying on either.
+
+**Rates on the full-market feed (`XNAS.BASIC` trades).**
+
+| Window (ET) | Trades | Symbols | Mean /s | p99 /s | Busiest second |
+|---|---|---|---|---|---|
+| 09:30:00-09:35:00 | 2.43M | 12,184 | 8,057 | 23,973 | **337,231** (the opening cross) |
+| 13:00:00-13:05:00 | 0.67M | 8,110 | 2,226 | 4,216 | 6,151 |
+
+The whole day is 80.7M trades (3.9 GB raw), and 492M consolidated quote updates (`cmbp-1`, 39 GB
+raw). On `EQUS.MINI` the whole day is 7.9M trades and 466M quote updates. Short-window record counts
+from the metadata endpoint are rounded up to a block, so only pulled data gives exact numbers.
+
+**Skew.** At the open, 10 symbols are 16% of trades, 100 are 46%, 500 are 70% and 1,000 are 80%.
+By dollar volume over the day, the top 500 symbols are 72%, 1,000 are 85%, 2,000 are 95%. 2,798
+symbols traded at least $1M and 864 at least $10M (on `EQUS.MINI`'s subset).
+
+**Engine.** `Tier0::on_event` over the real opening five minutes, in memory and at full speed
+(`cargo run --release -p tf-bench --example real_trades -- FILE.csv.zst`): 2.4M trades in 57 ms
+(43M events/s); the busiest second, 304,321 trades, took 4.3 ms, 230 times faster than real time.
+This is the state update only: decoding, queues, the scanner (which needs quotes) and the engine
+loop are not in it.
+
+**What follows.** The engine is not the limit. The first second of the session (300,000+ events in one
+or two seconds) is what sizes the ingest queue and the backpressure policy: a drop-newest policy would
+lose the opening cross. Quotes for every symbol are the expensive part (about 6x the records of
+trades on `XNAS.BASIC`, more on `EQUS.MINI`): trades or `tcbbo`/`tbbo` (each trade with its
+prevailing bid and ask) for the whole universe, and full quotes only for promoted symbols, is the
+shape that fits Tier 0 / Tier 1.

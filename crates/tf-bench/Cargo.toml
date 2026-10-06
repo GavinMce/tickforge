@@ -17,3 +17,7 @@ tf-replay.workspace = true
 tf-synth.workspace = true
 tf-engine.workspace = true
 tf-tape.workspace = true
+
+[dev-dependencies]
+zstd = "0.13"
+tf-alpaca.workspace = true

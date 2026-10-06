@@ -5,6 +5,7 @@ mod ledger_cmd;
 mod rules_cmd;
 mod runs;
 mod serve_cmd;
+mod universe_cmd;
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -133,6 +134,16 @@ USAGE:
     approve   record a named person's approval (appended to the record). A rejected proposal
               cannot be approved, and nothing is live until a person has approved it.
     The gates test internal consistency on synthetic sessions; they are not evidence of an edge.
+
+    tf universe show SPEC [--snapshot FILE]
+    tf universe members SPEC --snapshot FILE [--out FILE]
+    tf universe diff OLD NEW [--snapshot FILE]
+
+    A universe spec says which symbols a strategy watches: static conditions on a reference
+    snapshot (CSV, `# as_of DATE`, one row per symbol), then optionally a live top-N with
+    hysteresis. `show` prints the canonical text and fingerprint; `members` lists who passes the
+    static conditions (and refuses when the snapshot lacks a column the spec uses); `diff` lists
+    what changed between two specs and, with a snapshot, which symbols that admits or drops.
 
     tf budgets propose DIR --by NAME --reason TEXT --evidence TEXT --tree FILE [--at NANOS]
                        [--step-bp N] [--cooldown-secs N]
@@ -993,6 +1004,7 @@ fn main() -> ExitCode {
         Some("runs") => runs::runs(&args[1..]),
         Some("rules") => rules_cmd::rules(&args[1..]),
         Some("budgets") => budgets_cmd::budgets(&args[1..]),
+        Some("universe") => universe_cmd::universe(&args[1..]),
         Some("serve") => serve_cmd::serve_cmd(&args[1..]),
         Some("catalog") => catalog_cmd::catalog(&args[1..]),
         Some("ledger") => ledger_cmd::ledger(&args[1..]),

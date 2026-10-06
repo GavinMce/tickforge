@@ -378,6 +378,7 @@ dependencies = [
  "tf-risk",
  "tf-strategy",
  "tf-synth",
+ "tf-universe",
  "tf-workspace",
 ]
 
@@ -515,6 +516,15 @@ dependencies = [
  "tf-replay",
  "tf-synth",
  "zstd 0.13.3",
+]
+
+[[package]]
+name = "tf-universe"
+version = "0.1.0"
+dependencies = [
+ "tf-core",
+ "tf-engine",
+ "tf-synth",
 ]
 
 [[package]]

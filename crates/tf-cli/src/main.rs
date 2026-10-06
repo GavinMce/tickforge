@@ -3,6 +3,7 @@ mod explore;
 mod ledger_cmd;
 mod rules_cmd;
 mod runs;
+mod serve_cmd;
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -140,6 +141,15 @@ USAGE:
     the strategy's realised profit that day; trades are the orders that opened a position and
     got a fill. Only stored backtests can be opened with `tf explore`. --latest shows only
     each strategy's newest run. Read-only.
+
+    tf serve --token-file FILE [--ledger DIR --kind paper|live] [--store DIR] [--addr HOST:PORT]
+
+    Serve the workspace read-only over HTTP (default 127.0.0.1:8787): /api/overview (balance,
+    groups, strategies with budget, use, day P&L, loss limits and state), /api/runs[?strategy=S],
+    /health. The ledger is read without its lock, so it works while an engine writes it. Sign in
+    with the token in FILE (at least 16 letters, digits, - or _) as `Authorization: Bearer ...`,
+    or on the login page at /. Nothing it serves can place an order or change a budget. It speaks
+    plain HTTP: put TLS and a real identity provider in front of it before exposing it.
 
     tf ledger verify DIR [--orders]
 
@@ -960,6 +970,7 @@ fn main() -> ExitCode {
         Some("explore") => explore::explore(&args[1..]),
         Some("runs") => runs::runs(&args[1..]),
         Some("rules") => rules_cmd::rules(&args[1..]),
+        Some("serve") => serve_cmd::serve_cmd(&args[1..]),
         Some("catalog") => catalog_cmd::catalog(&args[1..]),
         Some("ledger") => ledger_cmd::ledger(&args[1..]),
         Some("help" | "--help" | "-h") | None => {

@@ -1030,12 +1030,13 @@ epics:
           - The most recent run is one lookup and any run opens in the trade explorer
       - id: E17-S09
         jira: TIC-128
-        title: "Workspace service: read API, hosting and sign-in"
-        status: todo
-        deps: [E17-S05, E17-S08, E13-S02]
+        title: "Workspace service: read API and sign-in"
+        status: done
+        evidence: "tf-workspace + `tf serve --token-file F [--ledger D --kind paper|live] [--store D] [--addr]`: GET /api/overview (balance, groups and strategies with budget, use, day P&L, loss limits, state active|no new entries|flatten|killed, run count, latest run), /api/runs[?strategy=], /health; the ledger is read without its lock or repair (tf_ledger::ReadOnlyStore) so it works under a running engine; every method but GET (and the login form) is a 405 on every route, tested; bearer token or HttpOnly SameSite=Strict cookie sign-in with constant-time compare, 401 without; 14 workspace tests incl. a real socket, 20+ mutations tried; ADR 0034. Limits: plain HTTP on loopback by default with one shared token, no per-user identity and no failed-login rate limit; hosting for real moved to E17-S17"
+        deps: [E17-S05, E17-S08]
         ac:
           - A read-only API serves balance, groups, strategies, budgets, use, day P&L and runs
-          - The UI is hosted behind sign-in and no screen can place an order
+          - Requests need a sign-in token and nothing the service serves can place an order or change a budget
       - id: E17-S10
         jira: TIC-129
         title: "Overview screen (totals, allocation bar, group cards, strategies)"
@@ -1091,3 +1092,12 @@ epics:
         deps: [E17-S02, E17-S05]
         ac:
           - Deferred by decision. An opt-in setting lets a sibling use idle budget temporarily, returned at the rebalance
+      - id: E17-S17
+        jira: TIC-136
+        title: "Host the workspace behind real sign-in (TLS, identity provider, deployment)"
+        status: todo
+        deps: [E17-S09, E13-S02]
+        ac:
+          - Served over TLS behind the existing GitOps flow, reachable only after signing in through an identity provider, with per-user identity
+          - Failed sign-ins are rate limited and the shared token is retired or kept only for programs
+          - No route can place an order or change a budget (the S09 tests still pass)

@@ -19,7 +19,9 @@ pub mod store;
 
 pub use codec::{CodecError, Input, Record};
 pub use journal::{Journal, JournalError, Recovery};
-pub use store::{FileStore, Harness, LedgerStore, Loaded, MemStore, StoreError, conformance};
+pub use store::{
+    FileStore, Harness, LedgerStore, Loaded, MemStore, ReadOnlyStore, StoreError, conformance,
+};
 
 #[cfg(test)]
 mod tests;

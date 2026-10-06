@@ -10,10 +10,12 @@
 //! - [`rules`]: entry conditions as data, with the per-decision evidence.
 //! - [`report`]: what a backtest earned, risked and paid, overall and per scenario.
 //! - [`sim`]: a simulated broker (fills against recorded quotes, latency, slippage, borrow cost).
+//! - [`cross`]: strategies over many symbols (periodic review of a member view).
 //! - [`strategy`]: the [`Strategy`] trait, its [`Ctx`] and the [`Host`] that drives it.
 
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
+pub mod cross;
 pub mod intent;
 pub mod lifecycle;
 pub mod momentum;
@@ -24,6 +26,7 @@ pub mod sim;
 pub mod strategy;
 pub mod trend;
 
+pub use cross::{CrossRunner, CrossStrategy, Market, MemberView, Members};
 pub use intent::{
     Intent, IntentError, IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif,
 };
@@ -41,6 +44,8 @@ pub use tf_engine::{MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe};
 pub use tf_params::{ParamStore, Proposal, Target};
 pub use trend::{TrendLong, TrendParams, TrendStats};
 
+#[cfg(test)]
+mod cross_tests;
 #[cfg(test)]
 mod momentum_tests;
 #[cfg(test)]

@@ -14,6 +14,7 @@ workspace = true
 tf-core.workspace = true
 tf-engine.workspace = true
 tf-params.workspace = true
+tf-universe.workspace = true
 
 [dev-dependencies]
 tf-manifest.workspace = true

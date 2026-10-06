@@ -57,19 +57,19 @@ pub struct Request {
 
 /// Pending timers, fired in `(time, id)` order.
 #[derive(Debug, Default)]
-struct Timers {
+pub(crate) struct Timers {
     by_time: BTreeSet<(Nanos, TimerId)>,
     by_id: BTreeMap<TimerId, Nanos>,
 }
 
 impl Timers {
-    fn set(&mut self, id: TimerId, at: Nanos) {
+    pub(crate) fn set(&mut self, id: TimerId, at: Nanos) {
         self.cancel(id);
         self.by_time.insert((at, id));
         self.by_id.insert(id, at);
     }
 
-    fn cancel(&mut self, id: TimerId) -> bool {
+    pub(crate) fn cancel(&mut self, id: TimerId) -> bool {
         match self.by_id.remove(&id) {
             Some(at) => self.by_time.remove(&(at, id)),
             None => false,
@@ -77,7 +77,16 @@ impl Timers {
     }
 
     /// The earliest timer due at or before `limit`, removed.
-    fn pop_due(&mut self, limit: Nanos) -> Option<(Nanos, TimerId)> {
+    /// The time of the earliest pending timer.
+    pub(crate) fn first_at(&self) -> Option<Nanos> {
+        self.by_time.first().map(|t| t.0)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    pub(crate) fn pop_due(&mut self, limit: Nanos) -> Option<(Nanos, TimerId)> {
         let first = *self.by_time.first()?;
         if first.0 > limit {
             return None;
@@ -108,6 +117,42 @@ pub enum BarsError {
     /// The host was built without a bar aggregator ([`Host::with_bars`]).
     NotConfigured,
     Track(TrackError),
+}
+
+impl<'a> Ctx<'a> {
+    /// A context for a strategy that has no bars, parameters or promoter of its own (the
+    /// cross-sectional runner, which shares the engine's Tier 0).
+    pub(crate) fn shared(
+        now: Nanos,
+        strategy: StrategyId,
+        tier0: &'a Tier0,
+        state: &'a mut CtxState,
+    ) -> Ctx<'a> {
+        Ctx {
+            now,
+            strategy,
+            tier0,
+            next_seq: &mut state.next_seq,
+            out: &mut state.out,
+            invalid: &mut state.invalid,
+            timers: &mut state.timers,
+            bars: &mut state.bars,
+            params: &state.params,
+            promoter: &mut state.promoter,
+        }
+    }
+}
+
+/// What a context borrows from its owner, for owners outside this module.
+#[derive(Default)]
+pub(crate) struct CtxState {
+    pub(crate) next_seq: u64,
+    pub(crate) out: Vec<Intent>,
+    pub(crate) invalid: u64,
+    pub(crate) timers: Timers,
+    bars: Option<MtfBars>,
+    params: Option<ParamStore>,
+    promoter: Option<Promoter>,
 }
 
 impl Ctx<'_> {

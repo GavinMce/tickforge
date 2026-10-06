@@ -15,8 +15,9 @@
 //! triggers one review (a gap of several periods gives one review, not a catch-up burst), so a replay
 //! of the same events reviews at the same instants. Timers behave as in [`crate::Host`].
 
+use tf_core::TierChange;
 use tf_core::{Event, InstrumentId, Nanos, SymbolTable};
-use tf_engine::{SymbolState, Tier0};
+use tf_engine::{Promoter, SymbolState, Tier0};
 use tf_universe::{Change, LiveFeature, LiveView, RefInfo, Selection, Tier0View};
 
 use crate::intent::{Intent, StrategyId};
@@ -252,6 +253,10 @@ pub trait CrossStrategy: Send {
     fn on_timer(&mut self, _ctx: &mut Ctx<'_>, _view: &MemberView<'_>, _timer: TimerId) {}
 
     fn on_order_update(&mut self, _ctx: &mut Ctx<'_>, _update: &OrderUpdate) {}
+
+    /// The strategy's interest in `id` (a `request_tier1` that was granted) was lost: the symbol was
+    /// evicted for a strategy of higher priority or demoted. Its holds are never lost this way.
+    fn on_tier1_revoked(&mut self, _ctx: &mut Ctx<'_>, _view: &MemberView<'_>, _id: InstrumentId) {}
 }
 
 /// Drives one [`CrossStrategy`] from events the engine has already applied to the shared Tier 0.
@@ -298,14 +303,15 @@ impl<S: CrossStrategy> CrossRunner<S> {
     fn call<R>(
         &mut self,
         tier0: &Tier0,
+        promoter: Option<&mut Promoter>,
         now: Nanos,
         f: impl FnOnce(&mut S, &mut Ctx<'_>) -> R,
     ) -> R {
-        let mut ctx = Ctx::shared(now, self.strategy.id(), tier0, &mut self.state);
+        let mut ctx = Ctx::shared(now, self.strategy.id(), tier0, &mut self.state, promoter);
         f(&mut self.strategy, &mut ctx)
     }
 
-    fn fire_timers(&mut self, m: Market<'_>, limit: Nanos) {
+    fn fire_timers(&mut self, m: Market<'_>, mut promoter: Option<&mut Promoter>, limit: Nanos) {
         let mut fires = 0;
         while let Some((at, id)) = self.state.timers.pop_due(limit) {
             if fires == MAX_TIMER_FIRES_PER_STEP {
@@ -320,12 +326,18 @@ impl<S: CrossStrategy> CrossRunner<S> {
                 market: m,
                 members: &self.members,
             };
-            let mut ctx = Ctx::shared(when, self.strategy.id(), m.tier0, &mut self.state);
+            let mut ctx = Ctx::shared(
+                when,
+                self.strategy.id(),
+                m.tier0,
+                &mut self.state,
+                promoter.as_deref_mut(),
+            );
             self.strategy.on_timer(&mut ctx, &view, id);
         }
     }
 
-    fn review_if_due(&mut self, m: Market<'_>) {
+    fn review_if_due(&mut self, m: Market<'_>, promoter: Option<&mut Promoter>) {
         let now = self.now;
         match self.next_review {
             None => self.next_review = Some((now / self.period + 1) * self.period),
@@ -336,7 +348,8 @@ impl<S: CrossStrategy> CrossRunner<S> {
                     market: m,
                     members: &self.members,
                 };
-                let mut ctx = Ctx::shared(now, self.strategy.id(), m.tier0, &mut self.state);
+                let mut ctx =
+                    Ctx::shared(now, self.strategy.id(), m.tier0, &mut self.state, promoter);
                 self.strategy.on_review(&mut ctx, &view);
             }
             Some(_) => {}
@@ -346,16 +359,22 @@ impl<S: CrossStrategy> CrossRunner<S> {
     /// One event the engine has applied to `market.tier0`: due timers fire first, then a member's
     /// event is delivered, then a review if one is due.
     #[inline]
-    pub fn on_event(&mut self, market: Market<'_>, ev: &Event) {
+    pub fn on_event(&mut self, market: Market<'_>, promoter: Option<&mut Promoter>, ev: &Event) {
         let ts = ev.ts_recv();
         if S::WANTS_MEMBER_EVENTS || ts >= self.wake {
-            self.on_event_slow(market, ev, ts);
+            self.on_event_slow(market, promoter, ev, ts);
         } else {
             self.now = self.now.max(ts);
         }
     }
 
-    fn on_event_slow(&mut self, market: Market<'_>, ev: &Event, ts: Nanos) {
+    fn on_event_slow(
+        &mut self,
+        market: Market<'_>,
+        mut promoter: Option<&mut Promoter>,
+        ev: &Event,
+        ts: Nanos,
+    ) {
         let delivers = S::WANTS_MEMBER_EVENTS
             && !matches!(ev, Event::ParamChange(_) | Event::TierChange(_))
             && self.members.contains(ev.instrument());
@@ -363,7 +382,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
             self.now = self.now.max(ts);
             return;
         }
-        self.fire_timers(market, ts);
+        self.fire_timers(market, promoter.as_deref_mut(), ts);
         self.now = self.now.max(ts);
         if delivers {
             self.events += 1;
@@ -371,10 +390,16 @@ impl<S: CrossStrategy> CrossRunner<S> {
                 market,
                 members: &self.members,
             };
-            let mut ctx = Ctx::shared(self.now, self.strategy.id(), market.tier0, &mut self.state);
+            let mut ctx = Ctx::shared(
+                self.now,
+                self.strategy.id(),
+                market.tier0,
+                &mut self.state,
+                promoter.as_deref_mut(),
+            );
             self.strategy.on_member_event(&mut ctx, &view, ev);
         }
-        self.review_if_due(market);
+        self.review_if_due(market, promoter);
         self.rewake();
     }
 
@@ -384,17 +409,56 @@ impl<S: CrossStrategy> CrossRunner<S> {
     }
 
     /// Let time pass with no event: timers and a due review fire.
-    pub fn advance_to(&mut self, market: Market<'_>, ts: Nanos) {
-        self.fire_timers(market, ts);
+    pub fn advance_to(
+        &mut self,
+        market: Market<'_>,
+        mut promoter: Option<&mut Promoter>,
+        ts: Nanos,
+    ) {
+        self.fire_timers(market, promoter.as_deref_mut(), ts);
         self.now = self.now.max(ts);
-        self.review_if_due(market);
+        self.review_if_due(market, promoter);
         self.rewake();
     }
 
-    pub fn on_order_update(&mut self, tier0: &Tier0, update: &OrderUpdate) {
+    pub fn on_order_update(
+        &mut self,
+        tier0: &Tier0,
+        promoter: Option<&mut Promoter>,
+        update: &OrderUpdate,
+    ) {
         let now = self.now;
-        self.call(tier0, now, |s, c| s.on_order_update(c, update));
+        self.call(tier0, promoter, now, |s, c| s.on_order_update(c, update));
         self.rewake();
+    }
+
+    /// Tell the strategy its interest in `id` was lost because the symbol left Tier 1 (the host takes
+    /// these from [`Promoter::drain_revoked`]).
+    pub fn on_tier1_revoked(
+        &mut self,
+        market: Market<'_>,
+        promoter: Option<&mut Promoter>,
+        id: InstrumentId,
+    ) {
+        let now = self.now;
+        let view = MemberView {
+            market,
+            members: &self.members,
+        };
+        let mut ctx = Ctx::shared(
+            now,
+            self.strategy.id(),
+            market.tier0,
+            &mut self.state,
+            promoter,
+        );
+        self.strategy.on_tier1_revoked(&mut ctx, &view, id);
+        self.rewake();
+    }
+
+    /// The tier changes this strategy's requests caused, for the tape.
+    pub fn drain_tier_events(&mut self) -> Vec<TierChange> {
+        std::mem::take(&mut self.state.tier_out)
     }
 
     pub fn drain_intents(&mut self) -> Vec<Intent> {
@@ -403,6 +467,10 @@ impl<S: CrossStrategy> CrossRunner<S> {
 
     pub fn strategy(&self) -> &S {
         &self.strategy
+    }
+
+    pub fn strategy_mut(&mut self) -> &mut S {
+        &mut self.strategy
     }
 
     pub fn reviews(&self) -> u64 {

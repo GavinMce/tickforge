@@ -1262,12 +1262,39 @@ epics:
       - id: E18-S04
         jira: TIC-143
         title: "Shared Tier 1 capacity: refcounted pins, priority, denial counters"
-        status: todo
+        status: done
         deps: [E18-S03]
+        evidence: >
+          tf-engine claims (ADR 0044). Holds (`pin`) are now counted per strategy (the old single flag
+          let one strategy's unpin release another's; tests show both strategies pinning one symbol and
+          one letting go leave it pinned). A symbol with any hold is never demoted by the sweep nor
+          evicted. `request` asks for a symbol to be in Tier 1: already there (interest recorded),
+          promoted when there is room, or promoted by evicting under one written rule: candidates are the
+          promoted symbols nobody holds that have dwelt the minimum; each has a level (0 if only the
+          scanner wanted it, else the highest priority of the interested strategies); a request may evict
+          only a level strictly below its priority; the victim is the lowest level, then fewest
+          interested, then longest since hot, then lowest id (each tie-break has a test that fails if the
+          order is swapped). Equal priorities never evict each other. Interested symbols are not demoted
+          by the cool-down sweep and leave it a cool-down after the last interest is released. Eviction
+          and promotion are TierChange events (new reasons STRATEGY_REQUEST, EVICTED) for the tape, a
+          follower applies them and ends in the same membership (tested), and a follower refuses to decide.
+          Every outcome is counted per strategy (requests, already, promoted, evicted_for, denied_full,
+          denied_other, lost) and exported as `tier1_*{strategy="N"}` lines by Promoter::metrics_text;
+          interests lost to an eviction are listed by drain_revoked and reach the strategy through
+          CrossRunner::on_tier1_revoked. Ctx gained request_tier1/release_tier1/wants_tier1; pin_tier1
+          and unpin_tier1 are per strategy. 11 new engine tests and 3 strategy tests; 27 mutants of the
+          rule, tie-breaks, dwell, holds, sweep, revocation, follower and counters killed (two equivalent
+          ones left: a guard in set_hold, and an interest filter I removed as dead code). Narrowed: a
+          hold exists when a strategy pins; the momentum strategy already pins while it has a position or
+          working order, and the multi-strategy host (E18-S05) is where holds will also be derived from
+          the gateway's order and position state for cross strategies. Known limit: in a replay the
+          follower applies a strategy-caused eviction before the event that caused it, live applies it
+          inside that event's callback, so a strategy that looks at the evicted symbol after requesting,
+          in the same callback, can see different state; E18-S06 (replay equivalence) is to probe it.
         ac:
-          - A symbol stays in Tier 1 while any strategy pins it; the Tier 1 cap is shared with a documented priority rule when strategies compete
+          - A symbol stays in Tier 1 while any strategy holds or wants it; the Tier 1 cap is shared with a documented priority rule when strategies compete
           - A request that cannot be granted is counted per strategy and exported as a metric, never silently lost
-          - Demotion never takes a symbol a strategy has an open position or working order in
+          - Demotion and eviction never take a symbol a strategy holds (pins for a position or working order); deriving holds from the gateway is E18-S05
       - id: E18-S05
         jira: TIC-144
         title: Multi-strategy live host with sub-accounts, simulated broker and staged rollout

@@ -39,6 +39,7 @@ use tf_core::{
     Event, Header, InstrumentId, NANOS_PER_SEC, Nanos, ProviderId, TierAction, TierChange,
 };
 
+use crate::claims::{Claims, Denied, Grant, Owner, OwnerStats};
 use crate::{
     BASE_SECS, Hit, PromoteError, Scanner, ScannerConfig, ScannerError, Tier0, Tier1, Tier1Symbol,
 };
@@ -49,6 +50,10 @@ pub mod reason {
     pub const SCANNER_HIT: u8 = 1;
     /// Demoted after `cooldown_secs` without being hot.
     pub const COOLED_OFF: u8 = 2;
+    /// Promoted because a strategy asked for it.
+    pub const STRATEGY_REQUEST: u8 = 3;
+    /// Demoted to make room for a request from a strategy of higher priority.
+    pub const EVICTED: u8 = 4;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,7 +113,6 @@ struct State {
     demoted_sec: Option<u64>,
     first_hit_sec: u64,
     hits: u32,
-    pinned: bool,
 }
 
 enum Mode {
@@ -126,6 +130,7 @@ pub struct Promoter {
     next_seq: u64,
     last_sweep_sec: u64,
     refused_full: u64,
+    claims: Claims,
 }
 
 impl Promoter {
@@ -177,6 +182,7 @@ impl Promoter {
             next_seq: 0,
             last_sweep_sec: 0,
             refused_full: 0,
+            claims: Claims::default(),
         }
     }
 
@@ -191,21 +197,148 @@ impl Promoter {
         }
     }
 
-    /// Never demote `id` while it is pinned (a strategy holds a position in it).
-    pub fn pin(&mut self, id: InstrumentId) {
-        if let Some(s) = self.state.get_mut(id as usize) {
-            s.pinned = true;
+    /// `owner` holds `id` (it has a position or a working order there): the symbol is never demoted or
+    /// evicted while anyone holds it. Holds are counted per owner.
+    pub fn pin(&mut self, owner: Owner, id: InstrumentId) {
+        if (id as usize) < self.state.len() {
+            self.claims.set_hold(owner, id, true);
         }
     }
 
-    pub fn unpin(&mut self, id: InstrumentId) {
-        if let Some(s) = self.state.get_mut(id as usize) {
-            s.pinned = false;
-        }
+    pub fn unpin(&mut self, owner: Owner, id: InstrumentId) {
+        self.claims.set_hold(owner, id, false);
     }
 
+    /// Whether anyone holds `id`.
     pub fn is_pinned(&self, id: InstrumentId) -> bool {
-        self.state.get(id as usize).is_some_and(|s| s.pinned)
+        self.claims.has_hold(id)
+    }
+
+    pub fn is_pinned_by(&self, owner: Owner, id: InstrumentId) -> bool {
+        self.claims.is_held_by(owner, id)
+    }
+
+    /// Whether `owner` is interested in `id`.
+    pub fn is_wanted_by(&self, owner: Owner, id: InstrumentId) -> bool {
+        self.claims.has_interest_of(owner, id)
+    }
+
+    /// Set a strategy's priority for evictions (see the `claims` module for the rule).
+    pub fn set_priority(&mut self, owner: Owner, priority: u8) {
+        self.claims.set_priority(owner, priority);
+    }
+
+    /// `owner` asks for `id` to be in Tier 1. A promotion (and an eviction, if Tier 1 is full) is
+    /// applied now and appended to `out` for the tape. A denial is counted for `owner`.
+    pub fn request(
+        &mut self,
+        owner: Owner,
+        id: InstrumentId,
+        ts: Nanos,
+        out: &mut Vec<TierChange>,
+    ) -> Grant {
+        self.claims.stat(owner).requests += 1;
+        let Some(st) = self.state.get(id as usize) else {
+            self.claims.stat(owner).denied_other += 1;
+            return Grant::Denied(Denied::Unknown);
+        };
+        if st.promoted {
+            self.claims.set_interest(owner, id, true);
+            self.claims.stat(owner).already += 1;
+            return Grant::Already;
+        }
+        if matches!(self.mode, Mode::Follow) {
+            self.claims.stat(owner).denied_other += 1;
+            return Grant::Denied(Denied::Following);
+        }
+        let sec = ts / NANOS_PER_SEC;
+        let mut evicted = None;
+        if self.promoted.len() >= self.cfg.max_tier1 {
+            let Some(victim) = self.victim(owner, sec) else {
+                self.claims.stat(owner).denied_full += 1;
+                return Grant::Denied(Denied::Full);
+            };
+            let ev = self.event(victim, ts, TierAction::Demote, reason::EVICTED, 0);
+            if self.apply(&ev).is_err() {
+                self.claims.stat(owner).denied_other += 1;
+                return Grant::Denied(Denied::Full);
+            }
+            out.push(ev);
+            evicted = Some(victim);
+        }
+        let ev = self.event(id, ts, TierAction::Promote, reason::STRATEGY_REQUEST, 0);
+        if self.apply(&ev).is_err() {
+            self.claims.stat(owner).denied_other += 1;
+            return Grant::Denied(Denied::Full);
+        }
+        out.push(ev);
+        self.claims.set_interest(owner, id, true);
+        let s = self.claims.stat(owner);
+        s.promoted += 1;
+        match evicted {
+            Some(evicted) => {
+                s.evicted_for += 1;
+                Grant::PromotedByEviction { evicted }
+            }
+            None => Grant::Promoted,
+        }
+    }
+
+    /// `owner` no longer wants `id`. The symbol stays until nobody does and it has cooled off.
+    pub fn release(&mut self, owner: Owner, id: InstrumentId) {
+        self.claims.set_interest(owner, id, false);
+    }
+
+    /// Interests lost since the last call because their symbol left Tier 1, as `(owner, symbol)`.
+    pub fn drain_revoked(&mut self) -> Vec<(Owner, InstrumentId)> {
+        self.claims.drain_revoked()
+    }
+
+    /// Per strategy counts of requests and their outcomes.
+    pub fn owner_stats(&self) -> Vec<(Owner, OwnerStats)> {
+        self.claims.stats()
+    }
+
+    /// The counts as text, one `name{strategy="N"} value` line each (the shape a metrics scrape reads),
+    /// and the totals for the promoter as a whole.
+    pub fn metrics_text(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        let _ = writeln!(s, "tier1_symbols {}", self.promoted.len());
+        let _ = writeln!(s, "tier1_capacity {}", self.cfg.max_tier1);
+        let _ = writeln!(s, "tier1_scanner_refused_full {}", self.refused_full);
+        for (o, st) in self.claims.stats() {
+            for (name, v) in [
+                ("requests", st.requests),
+                ("already", st.already),
+                ("promoted", st.promoted),
+                ("evicted_for", st.evicted_for),
+                ("denied_full", st.denied_full),
+                ("denied_other", st.denied_other),
+                ("lost", st.lost),
+            ] {
+                let _ = writeln!(s, "tier1_{name}{{strategy=\"{o}\"}} {v}");
+            }
+        }
+        s
+    }
+
+    /// The symbol to demote for a request from `owner`, by the rule in the `claims` module.
+    fn victim(&self, owner: Owner, sec: u64) -> Option<InstrumentId> {
+        let mine = self.claims.priority(owner);
+        self.promoted
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let st = &self.state[id as usize];
+                !self.claims.has_hold(id)
+                    && sec >= st.promoted_sec + self.cfg.min_dwell_secs
+                    && self.claims.level(id).0 < mine
+            })
+            .min_by_key(|&id| {
+                let (level, n) = self.claims.level(id);
+                (level, n, self.state[id as usize].last_hot_sec, id)
+            })
     }
 
     pub fn is_promoted(&self, id: InstrumentId) -> bool {
@@ -252,6 +385,7 @@ impl Promoter {
                 s.demoted_sec = Some(sec);
                 s.hits = 0;
                 self.promoted.retain(|&p| p != id);
+                self.claims.revoke_interests(id);
             }
         }
         self.next_seq = self.next_seq.max(c.hdr.seq.saturating_add(1));
@@ -366,7 +500,7 @@ impl Promoter {
             }
             let cold = sec >= st.last_hot_sec + self.cfg.cooldown_secs;
             let dwelt = sec >= st.promoted_sec + self.cfg.min_dwell_secs;
-            if cold && dwelt && !st.pinned {
+            if cold && dwelt && !self.claims.is_claimed(id) {
                 let ev = self.event(
                     id,
                     ts,

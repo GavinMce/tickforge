@@ -17,6 +17,5 @@ tf-risk.workspace = true
 tf-budget.workspace = true
 tf-catalog.workspace = true
 tf-manifest.workspace = true
-
-[dev-dependencies]
 tf-strategy.workspace = true
+

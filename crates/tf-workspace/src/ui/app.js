@@ -4,9 +4,23 @@
   "use strict";
   var COLORS = ["#2C63B8", "#0E7C6B", "#8A4FB0", "#B26A0B", "#B33A5B", "#4A6B1E"];
   var app = document.getElementById("app");
-  var data = null;
-  var selected = null;
+  var data = null;      // /api/overview
+  var selected = null;  // selected group on the overview
   var failed = false;
+  var runView = null;   // {strategy, id, runs, detail} for the run screen
+  var REASONS = {
+    invalid: "the order itself was malformed", kill_switch: "the kill switch was on",
+    max_notional: "the order was larger than the order limit", max_position: "it would exceed the position limit",
+    daily_loss_limit: "the day's loss limit was reached", order_rate: "too many orders too quickly",
+    not_shortable: "the stock cannot be shorted", short_sale_restricted: "short sales were restricted",
+    halted: "the stock was halted", outside_luld_band: "the price was outside the limit-up/limit-down band",
+    spread_too_wide: "the spread was too wide", run_up_too_large: "the run-up was too large to chase",
+    broker: "the broker refused it", opposing_position: "it opposed an existing position",
+    gap_risk: "a gap against a short would risk too much", nothing_to_close: "there was nothing to close",
+    unknown_instrument: "the instrument is not known", no_budget: "the strategy has no budget",
+    strategy_budget: "it would exceed the strategy's budget", group_budget: "it would exceed the group's budget",
+    strategy_loss_limit: "the strategy had reached its loss limit", other: "another limit"
+  };
 
   function h(tag, props) {
     var el = document.createElement(tag);
@@ -106,14 +120,14 @@
       var fill = h("div", { "class": "fill" + (used > budget ? " hot" : "") });
       fill.style.width = (ratio(used, budget) * 100).toFixed(1) + "%";
       var track = h("div", { "class": "track", style: "height:6px" }, fill);
-      return h("div", { "class": "trow", role: "row" },
+      return h("a", { "class": "trow link", role: "row", href: "#/s/" + encodeURIComponent(s.name), "aria-label": "Open " + s.name + ", " + s.runs + (s.runs === 1 ? " run" : " runs") },
         h("span", { style: "font-weight:500" }, s.name),
         h("span", { "class": "mono" }, pct(s.share_bp)),
         h("span", { "class": "mono" }, usd(s.budget)),
         h("span", null, track, h("span", { "class": "small mute mono" }, usd(s.used) + " · " + pctOf(used, budget))),
         h("span", { "class": pnlClass(s.day_pnl) }, usd(s.day_pnl)),
         h("span", null, h("span", { "class": "state" + (s.state === "active" ? "" : " bad") }, s.state)),
-        h("span", { "class": "small" }, s.runs + (s.runs === 1 ? " run" : " runs")));
+        h("span", { "class": "small", style: "color:var(--link)" }, s.runs + (s.runs === 1 ? " run ›" : " runs ›")));
     });
     if (assigned < 10000) {
       var gb = num(g.budget) * (10000 - assigned) / 10000;
@@ -158,7 +172,7 @@
       h.apply(null, ["ul", null].concat(items)));
   }
 
-  function draw() {
+  function drawOverview() {
     var a = data.account;
     var kids = [];
     var head = h("header", { "class": "between", style: "align-items:flex-end;flex-wrap:wrap" },
@@ -186,14 +200,180 @@
     app.replaceChildren.apply(app, kids.filter(Boolean));
   }
 
-  function load() {
-    fetch("/api/overview", { credentials: "same-origin", cache: "no-store" }).then(function (r) {
+  // ---- the run view -------------------------------------------------------------------------
+
+  function goRun(strategy, id, latest) {
+    location.hash = "#/s/" + encodeURIComponent(strategy) + (latest ? "" : "/" + encodeURIComponent(id));
+  }
+
+  function chart(curve) {
+    var NS = "http://www.w3.org/2000/svg";
+    var vals = curve.map(num);
+    var lo = Math.min.apply(null, vals.concat([0])), hi = Math.max.apply(null, vals.concat([0]));
+    if (hi === lo) { hi += 1; lo -= 1; }
+    function y(v) { return (150 - ((v - lo) / (hi - lo)) * 140).toFixed(1); }
+    function x(i) { return vals.length === 1 ? 300 : (10 + (i / (vals.length - 1)) * 580).toFixed(1); }
+    var svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 600 160");
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("class", "chart");
+    svg.setAttribute("aria-label", "Realised profit after each fill, from " + usd(curve[0]) + " to " + usd(curve[curve.length - 1]));
+    var zero = document.createElementNS(NS, "line");
+    zero.setAttribute("x1", "0"); zero.setAttribute("x2", "600"); zero.setAttribute("y1", y(0)); zero.setAttribute("y2", y(0));
+    zero.setAttribute("class", "zero");
+    svg.appendChild(zero);
+    if (vals.length > 1) {
+      var line = document.createElementNS(NS, "polyline");
+      line.setAttribute("points", vals.map(function (v, i) { return x(i) + "," + y(v); }).join(" "));
+      line.setAttribute("class", "curve");
+      svg.appendChild(line);
+    }
+    // A dot is a zero-length line with round caps: unlike a circle it stays round when the chart is
+    // stretched to the width of the screen.
+    vals.forEach(function (v, i) {
+      var c = document.createElementNS(NS, "line");
+      c.setAttribute("x1", x(i)); c.setAttribute("x2", x(i)); c.setAttribute("y1", y(v)); c.setAttribute("y2", y(v));
+      c.setAttribute("class", "pt");
+      svg.appendChild(c);
+    });
+    return svg;
+  }
+
+  function summaryBox(label, value, note, cls) {
+    return h("div", { "class": "card", style: "padding:12px 14px" },
+      h("div", { "class": "small mute" }, label),
+      h("div", { "class": "mono " + (cls || ""), style: "font-size:20px;font-weight:500;margin-top:2px;overflow-wrap:anywhere" }, value),
+      note ? h("div", { "class": "small mute" }, note) : null);
+  }
+
+  function noTradeText(d) {
+    if (!d.refused || d.refused.length === 0) return "No entry: the strategy's rules found nothing to enter this session.";
+    var parts = d.refused.map(function (r) { return (REASONS[r.reason] || REASONS.other) + (r.count > 1 ? " (" + r.count + " times)" : ""); });
+    return "No entry. Every order the strategy proposed was refused: " + parts.join("; ") + ".";
+  }
+
+  function tradesTable(d) {
+    var head = h("div", { "class": "tr6 thead", role: "row" },
+      h("span", null, "Time"), h("span", null, "Action"), h("span", null, "Qty"), h("span", null, "Instrument"), h("span", null, "Price"), h("span", null, "P&L"));
+    var rows = d.trades.map(function (t) {
+      return h("div", { "class": "tr6 mono", role: "row", style: "font-size:13px;border-bottom:1px solid var(--soft)" },
+        h("span", null, t.time), h("span", null, t.side + " (" + t.purpose + ")"), h("span", null, String(t.qty)),
+        h("span", null, "#" + t.instrument), h("span", null, "$" + t.price),
+        h("span", { "class": t.purpose === "close" ? pnlClass(t.pnl) : "mute" }, t.purpose === "close" ? usd(t.pnl) : "—"));
+    });
+    return h("div", { "class": "table" }, h.apply(null, ["div", { role: "table", style: "min-width:560px" }, head].concat(rows)));
+  }
+
+  function drawRun() {
+    var rv = runView;
+    var st = data && data.strategies ? data.strategies.filter(function (s) { return s.name === rv.strategy; })[0] : null;
+    var runs = rv.runs;
+    var back = h("a", { "class": "btn", href: "#" }, "‹ Overview");
+    var crumbs = h("nav", { "class": "row small mute", "aria-label": "Breadcrumb" }, back,
+      h("span", null, "Workspace"), h("span", { "aria-hidden": "true" }, "/"),
+      st ? h("span", null, st.group) : null, st ? h("span", { "aria-hidden": "true" }, "/") : null,
+      h("b", { style: "color:var(--ink)" }, rv.strategy));
+    if (runs.length === 0) {
+      app.replaceChildren(crumbs, h("h1", null, rv.strategy), h("div", { "class": "card empty" }, "This strategy has no runs yet."));
+      return;
+    }
+    var idx = 0;
+    runs.forEach(function (r, i) { if (r.id === rv.id) idx = i; });
+    var run = runs[idx];
+    var isLatest = idx === 0;
+    function nav(label, to, off) {
+      var b = h("button", { "class": "btn", "aria-label": label.label }, label.text);
+      if (off) b.disabled = true; else b.addEventListener("click", function () { goRun(rv.strategy, runs[to].id, to === 0); });
+      return b;
+    }
+    var meta = st ? "Budget " + usd(st.budget) + " (" + pct(st.share_bp) + " of " + st.group + ") · " + st.state + " · " + runs.length + (runs.length === 1 ? " run" : " runs")
+      : runs.length + (runs.length === 1 ? " run" : " runs");
+    var header = h("header", { "class": "between", style: "align-items:flex-end;flex-wrap:wrap" },
+      h("div", null, h("h1", null, rv.strategy), h("div", { "class": "small mute" }, meta)),
+      h("div", { "class": "row" },
+        nav({ text: "‹ Older", label: "Older run" }, idx + 1, idx === runs.length - 1),
+        h("span", { "class": "mono small", style: "min-width:96px;text-align:center" }, (idx + 1) + " of " + runs.length + (isLatest ? " · latest" : "")),
+        nav({ text: "Newer ›", label: "Newer run" }, idx - 1, isLatest),
+        nav({ text: "Latest", label: "Latest run" }, 0, isLatest)));
+    var list = runs.map(function (r, i) {
+      var b = h("button", { "class": "runitem", "aria-current": String(i === idx) },
+        h("span", null, h("span", { style: "font-weight:500;display:block" }, r.started),
+          h("span", { "class": "small mute" }, r.kind + " · " + (r.trades === null ? "?" : r.trades) + (r.trades === 1 ? " trade" : " trades"))),
+        h("span", { style: "text-align:right" }, h("span", { "class": pnlClass(r.net_pnl || "0") }, r.net_pnl === null ? "—" : usd(r.net_pnl)),
+          i === 0 ? h("span", { "class": "badge" }, "Latest") : null));
+      b.addEventListener("click", function () { goRun(rv.strategy, r.id, i === 0); });
+      return b;
+    });
+    var side = h("section", { "class": "card", "aria-label": "Runs", style: "flex:1 1 250px;max-width:360px;overflow:hidden" },
+      h("h2", { style: "padding:12px 16px;border-bottom:1px solid var(--soft)" }, "Runs, newest first"),
+      h.apply(null, ["div", { style: "max-height:560px;overflow-y:auto" }].concat(list)));
+    var d = rv.detail;
+    var main = [];
+    main.push(h("section", { "class": "summary", "aria-label": "Run summary" },
+      summaryBox(run.started, run.net_pnl === null ? "—" : usd(run.net_pnl), "net P&L", run.net_pnl === null ? "" : pnlClass(run.net_pnl).replace("mono ", "")),
+      summaryBox("Trades", run.trades === null ? "—" : String(run.trades), run.kind + (run.explorable ? " · stored" : "")),
+      summaryBox("Budget that session", run.budget ? usd(run.budget) : "—", null),
+      summaryBox("Entry rules", run.rules ? run.rules.slice(0, 12) : "—", run.rules ? "" : "not recorded for this kind of run")));
+    if (!d) {
+      main.push(h("div", { "class": "card empty" }, "Loading the run…"));
+    } else if (d.trades === null) {
+      main.push(h("div", { "class": "card panel" }, d.note));
+    } else {
+      main.push(h("section", { "class": "card panel", "aria-label": "Run chart" },
+        h("h2", null, "Realised profit through the session"),
+        d.curve.length ? chart(d.curve) : h("div", { "class": "mute" }, "Nothing to draw: there were no fills."),
+        h("div", { "class": "small mute" }, d.curve.length ? "Each point is a fill; the line is realised profit after it. A price chart is not available for ledger sessions." : "")));
+      main.push(h("section", { "class": "card", "aria-label": "Trades", style: "overflow:hidden" },
+        h("div", { "class": "between", style: "padding:12px 16px;border-bottom:1px solid var(--soft)" }, h("h2", null, "Trades"),
+          h("span", { "class": "small mute" }, d.trades.length + (d.trades.length === 1 ? " fill" : " fills"))),
+        d.trades.length ? tradesTable(d) : h("div", { style: "padding:16px" }, noTradeText(d))));
+      if (d.trades.length && d.refused.length) {
+        main.push(h("div", { "class": "small mute" }, "Refused this session: " + d.refused.map(function (r) { return (REASONS[r.reason] || REASONS.other) + " ×" + r.count; }).join("; ") + "."));
+      }
+    }
+    app.replaceChildren(crumbs, header,
+      h("div", { "class": "split" }, side, h.apply(null, ["div", { "class": "mainc", style: "gap:16px;flex:999 1 560px" }].concat(main))));
+  }
+
+  // ---- routing and loading ------------------------------------------------------------------
+
+  function route() {
+    var m = /^#\/s\/([^/]+)(?:\/(.+))?$/.exec(location.hash);
+    if (m) return { strategy: decodeURIComponent(m[1]), id: m[2] ? decodeURIComponent(m[2]) : null };
+    return null;
+  }
+
+  function get(url) {
+    return fetch(url, { credentials: "same-origin", cache: "no-store" }).then(function (r) {
       if (r.status === 401) { location.href = "/"; return null; }
       if (!r.ok) throw new Error(String(r.status));
       return r.json();
-    }).then(function (d) {
-      if (!d) return;
-      data = d; failed = false; draw();
+    });
+  }
+
+  function draw() {
+    if (route() && runView) drawRun(); else if (data) drawOverview();
+  }
+
+  function load() {
+    var want = route();
+    var jobs = [get("/api/overview")];
+    if (want) jobs.push(get("/api/runs?strategy=" + encodeURIComponent(want.strategy)));
+    Promise.all(jobs).then(function (res) {
+      if (!res[0]) return null;
+      data = res[0]; failed = false;
+      if (!want) { runView = null; drawOverview(); return null; }
+      var runs = res[1] ? res[1].runs : [];
+      var id = want.id || (runs.length ? runs[0].id : null);
+      if (id && !runs.some(function (r) { return r.id === id; })) id = runs.length ? runs[0].id : null;
+      var keep = runView && runView.strategy === want.strategy && runView.id === id ? runView.detail : null;
+      runView = { strategy: want.strategy, id: id, runs: runs, detail: keep };
+      drawRun();
+      if (!id) return null;
+      return get("/api/run?strategy=" + encodeURIComponent(want.strategy) + "&id=" + encodeURIComponent(id)).then(function (d) {
+        if (runView && runView.id === id) { runView.detail = d; drawRun(); }
+      });
     }).catch(function () {
       failed = true;
       if (data) draw(); else app.replaceChildren(h("p", { "class": "err" }, "Could not load the overview."));
@@ -202,6 +382,11 @@
 
   var m = /g=([^&]+)/.exec(location.hash);
   if (m) selected = decodeURIComponent(m[1]);
+  window.addEventListener("hashchange", function () {
+    var g = /g=([^&]+)/.exec(location.hash);
+    if (g) selected = decodeURIComponent(g[1]);
+    load();
+  });
   load();
   setInterval(load, 15000);
 })();

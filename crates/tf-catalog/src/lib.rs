@@ -15,10 +15,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tf_core::Nanos;
+use tf_core::{InstrumentId, Nanos};
 use tf_ledger::{Input, Journal, JournalError, LedgerStore, Record};
 use tf_manifest::RunResult;
 use tf_strategy::Purpose;
+use tf_strategy::intent::Side;
+use tf_strategy::lifecycle::Decision;
 
 /// What kind of run it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -176,9 +178,33 @@ pub fn from_results(results: &[RunResult]) -> Catalog {
     Catalog::new(results.iter().map(run_of).collect())
 }
 
+/// One fill in a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FillLine {
+    pub ts: Nanos,
+    pub instrument: InstrumentId,
+    pub side: Side,
+    pub purpose: Purpose,
+    pub qty: u32,
+    /// Raw price (1e-9 dollars).
+    pub px: i64,
+    /// Realised profit this fill made (zero for a fill that opens), raw units.
+    pub pnl: i128,
+}
+
+/// What a ledger session did beyond its summary: every fill in order, and why the gateway refused
+/// what it refused (by reason, with how many times).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Detail {
+    pub fills: Vec<FillLine>,
+    pub refused: Vec<(String, u64)>,
+}
+
 /// One strategy's activity within one session while it is being read.
 #[derive(Default)]
 struct Acc {
+    fills: Vec<FillLine>,
+    refused: BTreeMap<String, u64>,
     /// Realised profit when the session began.
     base: i128,
     /// Orders that opened a position and got at least one fill.
@@ -194,7 +220,19 @@ pub fn sessions<S: LedgerStore>(
     name: &str,
     kind: Kind,
 ) -> Result<Vec<Run>, JournalError> {
-    let mut out: Vec<Run> = Vec::new();
+    Ok(sessions_detailed(store, name, kind)?
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect())
+}
+
+/// [`sessions`], each with what it did.
+pub fn sessions_detailed<S: LedgerStore>(
+    store: S,
+    name: &str,
+    kind: Kind,
+) -> Result<Vec<(Run, Detail)>, JournalError> {
+    let mut out: Vec<(Run, Detail)> = Vec::new();
     let mut day = 1u32;
     let mut first: Option<Nanos> = None;
     let mut acc: BTreeMap<u16, Acc> = BTreeMap::new();
@@ -208,9 +246,13 @@ pub fn sessions<S: LedgerStore>(
                   first: Option<Nanos>,
                   acc: &mut BTreeMap<u16, Acc>,
                   names: &BTreeMap<u16, String>,
-                  out: &mut Vec<Run>| {
+                  out: &mut Vec<(Run, Detail)>| {
         for (n, a) in std::mem::take(acc) {
-            out.push(Run {
+            let detail = Detail {
+                fills: a.fills,
+                refused: a.refused.into_iter().collect(),
+            };
+            let run = Run {
                 strategy: names.get(&n).cloned().unwrap_or_else(|| format!("s{n}")),
                 kind,
                 started: first.unwrap_or(0),
@@ -222,12 +264,13 @@ pub fn sessions<S: LedgerStore>(
                     ledger: name.to_owned(),
                     session: day,
                 },
-            });
+            };
+            out.push((run, detail));
         }
     };
 
     let (journal, _) = Journal::open_recorded_observed(store, &mut |j, rec| {
-        let Record::Event { input, .. } = rec else {
+        let Record::Event { input, outcome } = rec else {
             return;
         };
         if let Some(b) = j.gateway().budgets() {
@@ -250,8 +293,13 @@ pub fn sessions<S: LedgerStore>(
                     ..Acc::default()
                 });
                 a.budget = j.gateway().budgets().and_then(|b| b.strategy_budget(n));
+                if let Some(Decision::Rejected(why)) = outcome {
+                    *a.refused
+                        .entry(tf_risk::reason_name(why).to_owned())
+                        .or_insert(0) += 1;
+                }
             }
-            Input::Fill { order, ts, .. } => {
+            Input::Fill { order, ts, qty, px } => {
                 first.get_or_insert(*ts);
                 if let Some(o) = j.order(*order) {
                     let n = o.intent.id.strategy.0;
@@ -262,7 +310,17 @@ pub fn sessions<S: LedgerStore>(
                     if o.intent.purpose == Purpose::Open {
                         a.opened.insert(order.0);
                     }
-                    last.insert(n, j.gateway().strategy_realized(n));
+                    let now = j.gateway().strategy_realized(n);
+                    a.fills.push(FillLine {
+                        ts: *ts,
+                        instrument: o.intent.instrument,
+                        side: o.intent.side,
+                        purpose: o.intent.purpose,
+                        qty: *qty,
+                        px: *px,
+                        pnl: now - last.get(&n).copied().unwrap_or(0),
+                    });
+                    last.insert(n, now);
                 }
             }
             _ => {}

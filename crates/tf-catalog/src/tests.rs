@@ -365,3 +365,104 @@ fn kinds_have_names_and_only_paper_and_live_are_ledger_kinds() {
     assert_eq!(Kind::parse_session("live"), Some(Kind::Live));
     assert_eq!(Kind::parse_session("backtest"), None);
 }
+
+fn detailed(j: &Journal<MemStore>) -> Vec<(Run, Detail)> {
+    sessions_detailed(
+        MemStore::from_records(j.store().records().to_vec()),
+        "paper-1",
+        Kind::Paper,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_session_lists_its_fills_with_the_profit_each_made_and_what_was_refused() {
+    let mut j = journal();
+    j.set_budgets(Some(budgets()), SEC).unwrap();
+    open(&mut j, 1, 10);
+    // Refused twice: far too big.
+    for at in [15, 16] {
+        let mut big = intent(1, at, Side::Buy, Purpose::Open, 5 * P);
+        big.qty = 100_000;
+        assert!(matches!(
+            j.decide(&big, big.ts).unwrap(),
+            Decision::Rejected(RejectReason::MaxNotional)
+        ));
+    }
+    close(&mut j, 1, 20, 7);
+    open(&mut j, 2, 30);
+    j.new_day(60 * SEC).unwrap();
+    close(&mut j, 2, 100, 3); // beta, next day: -$200 from yesterday's buy
+
+    // alpha trades again the next day, so its profit then is measured from yesterday's.
+    open(&mut j, 1, 110);
+    close(&mut j, 1, 120, 8);
+    let runs = detailed(&j);
+    let get = |name: &str, day: u32| {
+        runs.iter()
+            .find(|(r, _)| {
+                r.strategy == name
+                    && matches!(&r.source, Source::Ledger { session, .. } if *session == day)
+            })
+            .unwrap()
+    };
+    let (a, ad) = get("alpha", 1);
+    assert_eq!(
+        ad.fills,
+        [
+            FillLine {
+                ts: 10 * SEC,
+                instrument: 0,
+                side: Side::Buy,
+                purpose: Purpose::Open,
+                qty: 100,
+                px: 5 * P,
+                pnl: 0
+            },
+            FillLine {
+                ts: 20 * SEC,
+                instrument: 0,
+                side: Side::Sell,
+                purpose: Purpose::Close,
+                qty: 100,
+                px: 7 * P,
+                pnl: 200 * P as i128
+            },
+        ]
+    );
+    assert_eq!(ad.refused, [("max_notional".to_owned(), 2)]);
+    assert_eq!(
+        ad.fills.iter().map(|f| f.pnl).sum::<i128>(),
+        a.net_pnl.unwrap(),
+        "the fills add up to the session"
+    );
+    let (b2, bd2) = get("beta", 2);
+    assert_eq!(bd2.fills.len(), 1);
+    assert_eq!(bd2.fills[0].pnl, -200 * P as i128);
+    assert_eq!(b2.net_pnl, Some(-200 * P as i128));
+    assert!(bd2.refused.is_empty());
+    assert_eq!(get("beta", 1).1.fills.len(), 1);
+    let (a2, ad2) = get("alpha", 2);
+    assert_eq!(
+        ad2.fills.iter().map(|f| f.pnl).collect::<Vec<_>>(),
+        [0, 300 * P as i128]
+    );
+    assert_eq!(a2.net_pnl, Some(300 * P as i128));
+    // `sessions` is the same runs without the detail.
+    assert_eq!(
+        read(&j, Kind::Paper),
+        runs.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_strategy_that_only_passed_has_no_fills_and_says_why() {
+    let mut j = journal();
+    let mut big = intent(1, 10, Side::Buy, Purpose::Open, 5 * P);
+    big.qty = 100_000;
+    j.decide(&big, big.ts).unwrap();
+    let runs = detailed(&j);
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].1.fills.is_empty());
+    assert_eq!(runs[0].1.refused, [("max_notional".to_owned(), 1)]);
+}

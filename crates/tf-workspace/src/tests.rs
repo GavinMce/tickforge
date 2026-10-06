@@ -11,7 +11,7 @@ use tf_strategy::intent::{Intent, IntentId, Pricing, Protective, Purpose, Side, 
 use tf_strategy::lifecycle::Decision;
 
 use crate::http::{Request, decode, handle, serve, valid_token};
-use crate::{Source, dollars, js, overview, runs};
+use crate::{Source, dollars, js, overview, run_detail, runs};
 
 const P: i64 = 1_000_000_000;
 const SEC: Nanos = 1_000_000_000;
@@ -604,7 +604,10 @@ fn percentages_are_written_the_short_way() {
 #[test]
 fn the_page_only_reads_fields_the_api_sends_and_never_writes_markup_from_data() {
     let dir = scratch("contract");
-    let j = account(&dir, true);
+    let mut j = account(&dir, true);
+    let mut big = intent(2, 70, Side::Buy, Purpose::Open, 5 * P);
+    big.qty = 100_000;
+    j.decide(&big, big.ts).unwrap();
     let api = overview(&src(&dir)).unwrap();
     let app = include_str!("ui/app.js");
     // Every field the script reads is one the overview sends.
@@ -636,6 +639,54 @@ fn the_page_only_reads_fields_the_api_sends_and_never_writes_markup_from_data() 
         assert!(
             api.contains(&format!("\"{key}\":")),
             "the API does not send {key}"
+        );
+    }
+    // The same for the run view: the runs list and a run's detail.
+    let runs_json = runs(&src(&dir), Some("beta")).unwrap();
+    let detail = run_detail(&src(&dir), "beta", "session-1")
+        .unwrap()
+        .unwrap();
+    for key in [
+        "started",
+        "net_pnl",
+        "trades",
+        "rules",
+        "budget",
+        "explorable",
+        "id",
+        "kind",
+    ] {
+        assert!(
+            app.contains(&format!(".{key}")),
+            "the page does not use {key}"
+        );
+        assert!(
+            runs_json.contains(&format!("\"{key}\":")),
+            "/api/runs does not send {key}"
+        );
+    }
+    for key in [
+        "trades",
+        "curve",
+        "refused",
+        "note",
+        "time",
+        "side",
+        "purpose",
+        "qty",
+        "instrument",
+        "price",
+        "pnl",
+        "reason",
+        "count",
+    ] {
+        assert!(
+            app.contains(&format!(".{key}")),
+            "the page does not use {key}"
+        );
+        assert!(
+            detail.contains(&format!("\"{key}\":")),
+            "/api/run does not send {key}"
         );
     }
     // Text from the ledger goes in as text, and the page cannot send anything but GETs.
@@ -695,4 +746,104 @@ fn a_change_to_a_groups_share_is_listed_with_the_group_added() {
     assert!(text.contains("\"add group swing\""), "{text}");
     drop(j);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_comes_with_its_trades_a_running_profit_and_what_was_refused() {
+    let dir = scratch("detail");
+    let mut j = account(&dir, true);
+    let mut big = intent(1, 70, Side::Buy, Purpose::Open, 5 * P);
+    big.qty = 100_000;
+    j.decide(&big, big.ts).unwrap();
+    let s = src(&dir);
+    let beta = run_detail(&s, "beta", "session-1").unwrap().unwrap();
+    assert!(beta.contains("\"trades\":[{\"time\":\"00:00:20\",\"instrument\":0,\"side\":\"buy\",\"purpose\":\"open\",\"qty\":100,\"price\":\"5.0000\",\"pnl\":\"0.00\"},{\"time\":\"00:00:30\",\"instrument\":0,\"side\":\"sell\",\"purpose\":\"close\",\"qty\":100,\"price\":\"4.0000\",\"pnl\":\"-100.00\"}]"), "{beta}");
+    assert!(beta.contains("\"curve\":[\"0.00\",\"-100.00\"]"), "{beta}");
+    assert!(
+        beta.contains("\"refused\":[]") && beta.contains("\"note\":null"),
+        "{beta}"
+    );
+    assert!(beta.contains("\"id\":\"session-1\""), "{beta}");
+    assert!(
+        !beta.contains(dir.to_str().unwrap()),
+        "the ledger's path is not given out"
+    );
+    // alpha only opened, and had an order refused.
+    let alpha = run_detail(&s, "alpha", "session-1").unwrap().unwrap();
+    assert!(alpha.contains("\"curve\":[\"0.00\"]"), "{alpha}");
+    assert!(
+        alpha.contains("\"refused\":[{\"reason\":\"max_notional\",\"count\":1}]"),
+        "{alpha}"
+    );
+    assert_eq!(run_detail(&s, "alpha", "session-9").unwrap(), None);
+    assert_eq!(run_detail(&s, "nobody", "session-1").unwrap(), None);
+    assert_eq!(run_detail(&s, "beta", "../../etc").unwrap(), None);
+    // Over HTTP: needs sign-in and both parameters.
+    let q = |query: &str, signed_in: bool| {
+        let r = Request {
+            query: query.into(),
+            ..if signed_in {
+                signed("/api/run")
+            } else {
+                get("/api/run")
+            }
+        };
+        handle(&s, TOKEN, &r)
+    };
+    assert_eq!(q("strategy=beta&id=session-1", false).status, 401);
+    assert_eq!(q("strategy=beta&id=session-1", true).status, 200);
+    assert_eq!(q("strategy=beta", true).status, 400);
+    assert_eq!(q("id=session-1", true).status, 400);
+    assert_eq!(q("strategy=beta&id=nope", true).status, 404);
+    drop(j);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn prices_keep_four_places_and_the_clock_is_the_time_of_day() {
+    assert_eq!(crate::price(5 * P), "5.0000");
+    assert_eq!(crate::price(1_234_560_000), "1.2346");
+    assert_eq!(crate::price(49_999), "0.0000");
+    assert_eq!(crate::price(50_000), "0.0001");
+    assert_eq!(crate::price(-2 * P), "-2.0000");
+    assert_eq!(crate::price(-10_000), "0.0000");
+    assert_eq!(crate::clock(0), "00:00:00");
+    assert_eq!(crate::clock((13 * 3600 + 5 * 60 + 9) * SEC), "13:05:09");
+    assert_eq!(crate::clock((86_400 + 61) * SEC), "00:01:01");
+}
+
+#[test]
+fn a_stored_backtest_has_no_trades_here_and_points_to_the_explorer() {
+    use tf_manifest::{DataRange, DirStore, Manifest, RunResult};
+    let store = scratch("storedrun");
+    let m = Manifest::new(
+        "abc1234",
+        "backtest",
+        1,
+        DataRange {
+            source: "synth:universe".into(),
+            from: 5 * SEC,
+            to: 9 * SEC,
+        },
+    )
+    .unwrap()
+    .with_config("strategy", "momentum")
+    .unwrap();
+    let r = RunResult::new(m, 1, 2).with_metric("trades", 4).unwrap();
+    DirStore::new(&store).put(&r).unwrap();
+    let s = Source {
+        ledger: None,
+        store: Some(store.clone()),
+    };
+    let id = r.key().hex();
+    let d = run_detail(&s, "momentum", &id).unwrap().unwrap();
+    assert!(
+        d.contains("\"trades\":null,\"curve\":null") && d.contains("explorer"),
+        "{d}"
+    );
+    assert!(
+        d.contains(&format!("\"id\":\"{id}\"")) && d.contains("\"explorable\":true"),
+        "{d}"
+    );
+    let _ = std::fs::remove_dir_all(&store);
 }

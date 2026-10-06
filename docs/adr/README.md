@@ -61,3 +61,4 @@ How:
 | [0042](0042-reference-rows-come-from-dated-daily-bars-and-an-asset-list-and-say-what-they-lack.md) | Reference rows come from dated daily bars and an asset list, and say what they lack | Accepted |
 | [0043](0043-a-strategy-over-many-symbols-reviews-a-member-view-on-a-grid-of-event-time.md) | A strategy over many symbols reviews a member view on a grid of event time | Accepted |
 | [0044](0044-tier-1-is-shared-by-claims-with-holds-that-cannot-be-taken-and-interests-that-can.md) | Tier 1 is shared by claims, with holds that cannot be taken and interests that can | Accepted |
+| [0045](0045-brokers-speak-one-interface-and-their-events-are-checked-by-one-rule.md) | Brokers speak one interface, and their events are checked by one rule | Accepted |

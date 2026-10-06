@@ -6,6 +6,7 @@
 //!   intent says.
 //! - [`events`]: reads the `trade_updates` stream and the order objects of REST responses, and says
 //!   what each means for the ledger (acknowledged, filled for so many shares at what price, ended).
+//! - [`broker`]: the adapter as a `tf_strategy::broker::Broker`, so a host runs against it or the simulator alike.
 //! - [`client`]: the conversation with Alpaca over a [`client::Transport`], including the
 //!   outcome-unknown case (a request that timed out must be looked up by its client order id, never
 //!   sent again blind).
@@ -15,6 +16,7 @@
 
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
+pub mod broker;
 pub mod client;
 pub mod drive;
 pub mod events;

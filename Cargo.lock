@@ -98,12 +98,14 @@ dependencies = [
 name = "tf-bench"
 version = "0.1.0"
 dependencies = [
+ "tf-alpaca",
  "tf-core",
  "tf-engine",
  "tf-provider",
  "tf-replay",
  "tf-synth",
  "tf-tape",
+ "zstd",
 ]
 
 [[package]]

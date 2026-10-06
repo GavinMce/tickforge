@@ -376,12 +376,22 @@ epics:
           - Shards symbols across sessions within the plan limit
       - id: E06-S04
         jira: TIC-52
-        title: Raw DBN tape capture to MinIO
-        status: todo
-        deps: [E06-S02, E04-S03]
+        title: Raw DBN capture to rolling, crash-safe files, replayable through the Provider interface
+        status: done
+        evidence: "crates/tf-capture: RawWriter writes the provider's own DBN records byte for byte to rolling raw-<first ts_recv>-<n>.dbn.zst segments (every 900 s of receive time; zstd with frame checksums) via NAME.part, sync() (flush to a decodable point + fsync, about once a second) and close (finish, fsync, rename, fsync the directory); opening a capture repairs it (a .part is read as far as it decodes and rewritten as a clean segment marked recovered; a finished segment the manifest lost is listed as late); append-only manifest.tfcap with records, first/last ts_recv, bytes and checksum per segment; verify() finds a missing, stray, unfinished, resized, corrupted, recounted or re-timed segment; CaptureReplay is a tf_provider::Provider (subscription filter, paging, End, ids carried across segments); to_tape() writes the normalized tf-tape; `tf-databento` gained the reusable Mapper so the live adapter maps the records it captures. ADR 0040. 14 tests incl. an unfinished file cut at every one of its last 300 bytes and every 37th before (always a clean prefix, never fewer records for more bytes); about 45 mutations tried, the real gaps closed. Real data (local): 788,740 records (a midday trade window, a premarket quote window, a day of status) written at 1.1M records/s including an fsync per 100k, 16.4 MB on disk for 18.2 MB of input, verified clean, replay equal event for event to decoding the files directly. NOT done: shipping segments to MinIO (E06-S08) and the live feed that calls it (E06-S02); a capture is of what the feed delivered, not of what the engine was handed under pressure (ADR 0039/0040)"
+        deps: [E06-S07]
         ac:
-          - Provider-native stream stored alongside normalized data
-          - Replayable through the tape driver
+          - The provider-native records of a session are stored exactly, in files that are complete or recoverable after a crash, with a manifest that can be checked
+          - A capture replays through the Provider interface and converts to the normalized tape, which the tape driver replays at any pace
+      - id: E06-S08
+        jira: TIC-150
+        title: Ship finished raw capture segments to MinIO and keep them verified
+        status: todo
+        deps: [E06-S04, E04-S03]
+        ac:
+          - Finished segments of a raw capture (manifest-listed, never a .part) are copied to a MinIO bucket by date, with the manifest line and checksum, and a second verify pass compares the stored object with the manifest
+          - A failed or partial upload is retried and never removes the local copy; local segments are deleted only after the stored copy is verified and a retention period has passed
+          - The upload runs off the feed path: capturing never waits on the network
       - id: E06-S05
         jira: TIC-53
         title: Symbology mapping and daily instrument definitions

@@ -337,6 +337,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-capture"
+version = "0.1.0"
+dependencies = [
+ "dbn",
+ "tf-core",
+ "tf-databento",
+ "tf-provider",
+ "tf-tape",
+ "zstd 0.13.3",
+]
+
+[[package]]
 name = "tf-catalog"
 version = "0.1.0"
 dependencies = [

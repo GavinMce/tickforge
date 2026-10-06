@@ -1,0 +1,21 @@
+[package]
+name = "tf-capture"
+description = "Raw capture of a provider's own records to rolling, crash-safe files, and replay of a capture through the Provider trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+tf-databento.workspace = true
+tf-provider.workspace = true
+tf-tape.workspace = true
+dbn = { version = "0.71" }
+zstd = "0.13"
+
+[dev-dependencies]

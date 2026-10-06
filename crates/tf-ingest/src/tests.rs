@@ -621,3 +621,69 @@ fn a_lost_trade_and_a_lost_control_event_are_marked_apart_even_when_both_wait() 
         ]
     );
 }
+
+#[test]
+fn a_skip_the_gateway_reports_is_a_marker_in_order_apart_from_trades_and_control_losses() {
+    let (mut p, mut c) = channel(small()).unwrap();
+    p.push(trade(1, 10));
+    p.note_skip(11);
+    p.note_skip(12);
+    p.push(trade(1, 13));
+    assert_eq!(
+        drain(&mut c),
+        [
+            Delivery::Event(trade(1, 10)),
+            Delivery::Gap(Gap {
+                lost: Lost::Skipped,
+                count: 1,
+                first_ts: 11,
+                last_ts: 11
+            }),
+            Delivery::Gap(Gap {
+                lost: Lost::Skipped,
+                count: 1,
+                first_ts: 12,
+                last_ts: 12
+            }),
+            Delivery::Event(trade(1, 13)),
+        ],
+        "each notice is a marker at once when there is room"
+    );
+    assert_eq!(p.stats().gaps, 2);
+    // With no room the notices gather into one marker, kept apart from the losses of trades and of control
+    // events, and are delivered when there is room.
+    let (mut p, mut c) = channel(small()).unwrap();
+    for i in 0..200u64 {
+        p.push(trade(1, i));
+    }
+    for i in 0..10u64 {
+        p.push(halt(1, 1_000 + i));
+    }
+    assert_eq!(c.depth(), 100, "full");
+    p.note_skip(2_000);
+    p.note_skip(2_001);
+    assert!(!p.is_settled());
+    assert_eq!(drain(&mut c).len(), 100);
+    p.tick();
+    assert!(p.is_settled());
+    let rest = drain(&mut c);
+    assert!(
+        rest.contains(&Delivery::Gap(Gap {
+            lost: Lost::Skipped,
+            count: 2,
+            first_ts: 2_000,
+            last_ts: 2_001
+        })),
+        "{rest:?}"
+    );
+    assert!(
+        rest.iter()
+            .any(|d| matches!(d, Delivery::Gap(g) if g.lost == Lost::Control))
+    );
+    assert_eq!(
+        rest.iter()
+            .filter(|d| matches!(d, Delivery::Gap(g) if g.lost == Lost::Trades))
+            .count(),
+        0
+    );
+}

@@ -41,6 +41,9 @@ use tf_core::{Event, InstrumentId, Nanos, Quote};
 pub enum Lost {
     Trades,
     Control,
+    /// The gateway skipped records because it could not send them as fast as they came (we read too
+    /// slowly). Neither the kind nor the number is known; `count` is the number of such notices.
+    Skipped,
 }
 
 /// A break in the stream: `count` events of one kind were dropped between `first_ts` and `last_ts`
@@ -199,8 +202,8 @@ pub struct Producer {
     waiting: usize,
     /// Whether a symbol is in `dirty`.
     listed: Vec<bool>,
-    /// One open marker per kind of loss: trades, then control.
-    gaps: [Option<GapAcc>; 2],
+    /// One open marker per kind of loss: trades, control, then the gateway's skips.
+    gaps: [Option<GapAcc>; 3],
 }
 
 pub struct Consumer {
@@ -228,7 +231,7 @@ pub fn channel(cfg: Config) -> Result<(Producer, Consumer), ConfigError> {
         dirty: VecDeque::new(),
         waiting: 0,
         listed: vec![false; cfg.instruments],
-        gaps: [None, None],
+        gaps: [None, None, None],
     };
     Ok((p, Consumer { rx, depth, shared }))
 }
@@ -269,7 +272,7 @@ impl Producer {
 
     /// Deliver the pending gap markers, if there is room for them.
     fn flush_gap(&mut self) {
-        for i in 0..2 {
+        for i in 0..3 {
             let Some(g) = self.gaps[i] else { continue };
             let d = Delivery::Gap(Gap {
                 lost: g.lost,
@@ -288,6 +291,7 @@ impl Producer {
         let slot = match lost {
             Lost::Trades => 0,
             Lost::Control => 1,
+            Lost::Skipped => 2,
         };
         match &mut self.gaps[slot] {
             Some(g) => {
@@ -415,6 +419,13 @@ impl Producer {
     pub fn tick(&mut self) {
         self.flush_gap();
         self.flush_some(usize::MAX);
+        self.flush_gap();
+    }
+
+    /// The gateway told us it skipped records after we read too slowly. A marker is queued (now, or as
+    /// soon as there is room) in order with the events.
+    pub fn note_skip(&mut self, ts: Nanos) {
+        self.note_loss(Lost::Skipped, ts);
         self.flush_gap();
     }
 

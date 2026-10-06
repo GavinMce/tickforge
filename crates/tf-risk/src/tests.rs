@@ -868,3 +868,324 @@ fn a_snapshot_shows_every_part_of_the_state_that_decisions_depend_on() {
     g.engage_kill_switch();
     assert_ne!(g.snapshot(), empty);
 }
+
+// ---- strategies sharing one broker account ----
+
+fn by(strategy: u16, mut i: Intent) -> Intent {
+    i.id.strategy = StrategyId(strategy);
+    i
+}
+
+fn roomy() -> Limits {
+    Limits::new(
+        100_000 * D,
+        500,
+        10_000_000 * D,
+        1_000_000 * D,
+        1000,
+        10 * SEC,
+    )
+    .unwrap()
+    .with_gap_rule(generous())
+}
+
+/// An opening order from `strategy` through the gateway, filled in full at its price.
+fn fill_open(g: &mut Gateway, strategy: u16, seq: u64, i: Intent) -> OrderId {
+    let id = accepted(g.decide(
+        &by(
+            strategy,
+            Intent {
+                id: IntentId {
+                    strategy: StrategyId(strategy),
+                    seq,
+                },
+                ..i
+            },
+        ),
+        seq * SEC,
+    ));
+    g.on_fill(id, i.qty, i.pricing.reference_price()).unwrap();
+    id
+}
+
+#[test]
+fn two_strategies_in_one_symbol_keep_their_own_cost_and_profit_and_the_broker_sees_the_sum() {
+    let mut g = Gateway::new(roomy(), 2);
+    fill_open(&mut g, 1, 1, open(0, 100, 500));
+    fill_open(&mut g, 2, 2, open(0, 50, 600));
+    assert_eq!(g.position(0), 150, "what the broker holds");
+    assert_eq!(
+        (g.strategy_position(1, 0), g.strategy_position(2, 0)),
+        (100, 50)
+    );
+    assert_eq!(g.strategy_position(3, 0), 0);
+    g.mark(0, px(700));
+    // Each at its own average cost, not the blend.
+    assert_eq!(
+        g.strategy_positions(1),
+        vec![(0, 100, px(500).raw(), px(700).raw())]
+    );
+    assert_eq!(
+        g.strategy_positions(2),
+        vec![(0, 50, px(600).raw(), px(700).raw())]
+    );
+    assert_eq!(g.strategy_unrealized(1), 200 * D as i128);
+    assert_eq!(g.strategy_unrealized(2), 50 * D as i128);
+    assert_eq!(
+        g.daily_pnl(),
+        250 * D as i128,
+        "the account's profit is the sum"
+    );
+    // Strategy 1 sells out at the mark: its profit is realised, strategy 2's is not touched.
+    let c = accepted(g.decide(&by(1, close(3, 100, 700)), 3 * SEC));
+    g.on_fill(c, 100, px(700)).unwrap();
+    assert_eq!(
+        (g.strategy_realized(1), g.strategy_realized(2)),
+        (200 * D as i128, 0)
+    );
+    assert_eq!(g.strategy_position(1, 0), 0);
+    assert!(
+        g.strategy_positions(1).is_empty(),
+        "a closed position is not kept"
+    );
+    assert_eq!(g.position(0), 50);
+    assert_eq!(g.strategy_unrealized(1), 0);
+    assert_eq!(g.strategy_unrealized(2), 50 * D as i128);
+    assert_eq!(
+        g.daily_pnl(),
+        250 * D as i128,
+        "moving profit from paper to realised changes nothing"
+    );
+    let snap = g.snapshot();
+    assert_eq!(
+        snap.positions,
+        vec![(2, 0, 50, px(600).raw(), px(700).raw())],
+        "a flat position is not kept"
+    );
+    assert_eq!(snap.strategy_realized, vec![(1, 200 * D as i128), (2, 0)]);
+    assert_eq!(snap.realized, 200 * D as i128);
+}
+
+#[test]
+fn a_strategy_can_close_only_what_it_holds_and_not_what_another_strategy_holds() {
+    let mut g = Gateway::new(roomy(), 1);
+    fill_open(&mut g, 1, 1, open(0, 100, 500));
+    fill_open(&mut g, 2, 2, open(0, 50, 500));
+    // The broker holds 150, but strategy 2 holds 50.
+    assert_eq!(
+        rejected(g.decide(&by(2, close(3, 100, 500)), 3 * SEC)),
+        RejectReason::NothingToClose
+    );
+    assert_eq!(
+        rejected(g.decide(&by(3, close(4, 1, 500)), 3 * SEC)),
+        RejectReason::NothingToClose,
+        "a strategy with nothing"
+    );
+    // Strategy 1 has a working close of 60; its own remaining 40 is all it can add, and strategy 2's
+    // closing room is its own.
+    accepted(g.decide(&by(1, close(5, 60, 500)), 4 * SEC));
+    assert_eq!(
+        rejected(g.decide(&by(1, close(6, 41, 500)), 4 * SEC)),
+        RejectReason::NothingToClose
+    );
+    accepted(g.decide(&by(1, close(7, 40, 500)), 4 * SEC));
+    accepted(g.decide(&by(2, close(8, 50, 500)), 4 * SEC));
+}
+
+#[test]
+fn opposing_positions_are_checked_per_strategy() {
+    let mut g = Gateway::new(roomy(), 1);
+    fill_open(&mut g, 1, 1, open(0, 100, 500));
+    // Another strategy may go the other way in the same symbol: each has its own sub-account.
+    let short = |seq, st, qty| by(st, intent(seq, 0, Side::SellShort, Purpose::Open, qty, 500));
+    accepted(g.decide(&short(2, 2, 40), 2 * SEC));
+    // But not the strategy that is long, and not a long that holds a short.
+    assert_eq!(
+        rejected(g.decide(&short(3, 1, 10), 3 * SEC)),
+        RejectReason::OpposingPosition
+    );
+    let id = accepted(g.decide(&short(4, 2, 10), 3 * SEC));
+    g.on_fill(id, 10, px(500)).unwrap();
+    assert_eq!(
+        rejected(g.decide(&by(2, open(5, 10, 500)), 4 * SEC)),
+        RejectReason::OpposingPosition
+    );
+    assert_eq!(g.strategy_position(2, 0), -10);
+}
+
+#[test]
+fn the_cap_on_a_symbol_counts_every_strategy_on_that_side_but_not_the_other_side() {
+    let mut g = Gateway::new(roomy(), 1); // 500 shares
+    fill_open(&mut g, 1, 1, open(0, 300, 200));
+    fill_open(&mut g, 2, 2, open(0, 150, 200));
+    assert_eq!(
+        rejected(g.decide(&by(3, open(3, 51, 200)), 3 * SEC)),
+        RejectReason::MaxPosition,
+        "500 - 450 = 50 left"
+    );
+    accepted(g.decide(&by(3, open(4, 50, 200)), 3 * SEC));
+    // Working orders count too: strategy 4 cannot add one more share on the long side.
+    assert_eq!(
+        rejected(g.decide(&by(4, open(5, 1, 200)), 4 * SEC)),
+        RejectReason::MaxPosition
+    );
+    // Shorts are a different side: 500 of them fit even with 500 long.
+    let short = by(5, intent(6, 0, Side::SellShort, Purpose::Open, 500, 200));
+    accepted(g.decide(&short, 5 * SEC));
+}
+
+#[test]
+fn shorts_count_toward_the_gap_rule_even_when_the_broker_is_flat() {
+    // $10,000 equity, 10% may be lost if every short doubles: $1,000 of short notional.
+    let l = Limits::new(
+        100_000 * D,
+        5_000,
+        10_000_000 * D,
+        1_000_000 * D,
+        1000,
+        10 * SEC,
+    )
+    .unwrap()
+    .with_gap_rule(GapRule::new(10_000 * D, 100_000, 1000).unwrap());
+    let mut g = Gateway::new(l, 1);
+    fill_open(&mut g, 1, 1, open(0, 100, 500)); // long $500
+    let short = |seq, st, qty| by(st, intent(seq, 0, Side::SellShort, Purpose::Open, qty, 500));
+    let id = accepted(g.decide(&short(2, 2, 100), 2 * SEC)); // short $500: fits
+    g.on_fill(id, 100, px(500)).unwrap();
+    assert_eq!(g.position(0), 0, "the broker nets to flat");
+    // Another $600 of short notional: $1,100 of virtual shorts, over the $1,000 allowed. A rule that
+    // looked at the broker's net (flat) would let it through.
+    assert_eq!(
+        rejected(g.decide(&short(3, 3, 120), 3 * SEC)),
+        RejectReason::GapRisk
+    );
+    accepted(g.decide(&short(4, 3, 100), 3 * SEC));
+}
+
+#[test]
+fn a_strategys_working_opens_are_its_own() {
+    let mut g = Gateway::new(roomy(), 1);
+    accepted(g.decide(&by(1, open(1, 100, 500)), SEC));
+    accepted(g.decide(&by(2, open(2, 50, 400)), SEC));
+    assert_eq!(g.strategy_working_open_notional(1), 500 * D);
+    assert_eq!(g.strategy_working_open_notional(2), 200 * D);
+    assert_eq!(g.strategy_working_open_notional(3), 0);
+    let snap = g.snapshot();
+    assert_eq!(
+        snap.working.iter().map(|w| (w.1, w.3)).collect::<Vec<_>>(),
+        vec![(1, 100), (2, 50)]
+    );
+}
+
+#[test]
+fn across_random_trading_by_several_strategies_the_parts_always_add_up_to_the_account() {
+    let mut rng = SplitMix64::new(21);
+    let l = Limits::new(
+        1_000_000 * D,
+        100_000,
+        100_000_000 * D,
+        100_000_000 * D,
+        100_000,
+        SEC,
+    )
+    .unwrap()
+    .with_gap_rule(GapRule::new(100_000_000 * D, 1_000_000, 1000).unwrap());
+    let mut g = Gateway::new(l, 3);
+    // A shadow account: signed shares and cash per instrument, from every fill the gateway took.
+    let (mut net, mut cash) = ([0i64; 3], [0i128; 3]);
+    let mut marks = [px(500).raw(); 3];
+    for (i, m) in marks.iter().enumerate() {
+        g.mark(i as u32, Px::from_raw(*m));
+    }
+    let (mut seq, mut fills) = (0u64, 0i128);
+    for step in 0..1500u64 {
+        let now = step * SEC;
+        let inst = rng.below(3) as u32;
+        let strat = 1 + rng.below(3) as u16;
+        match rng.below(10) {
+            0..=4 => {
+                seq += 1;
+                let qty = 10 + rng.below(90) as u32;
+                let cents = 400 + rng.below(200) as i64;
+                let held = g.strategy_position(strat, inst);
+                let i = match rng.below(3) {
+                    0 => intent(seq, inst, Side::SellShort, Purpose::Open, qty, cents),
+                    1 if held > 0 => intent(
+                        seq,
+                        inst,
+                        Side::Sell,
+                        Purpose::Close,
+                        (held as u32).min(qty),
+                        cents,
+                    ),
+                    2 if held < 0 => intent(
+                        seq,
+                        inst,
+                        Side::Buy,
+                        Purpose::Close,
+                        ((-held) as u32).min(qty),
+                        cents,
+                    ),
+                    _ => intent(seq, inst, Side::Buy, Purpose::Open, qty, cents),
+                };
+                let _ = g.decide(&by(strat, i), now);
+            }
+            5..=7 => {
+                // Fill part or all of a random working order, at a price near the market.
+                let snap = g.snapshot();
+                if !snap.working.is_empty() {
+                    let w = snap.working[rng.below(snap.working.len() as u64) as usize];
+                    let qty = 1 + rng.below(u64::from(w.3)) as u32;
+                    let cents = 400 + rng.below(200) as i64;
+                    let buy = g.working_is_buy(w.0);
+                    g.on_fill(w.0, qty, px(cents)).unwrap();
+                    let signed = if buy { i64::from(qty) } else { -i64::from(qty) };
+                    net[w.2 as usize] += signed;
+                    cash[w.2 as usize] -= i128::from(signed) * i128::from(px(cents).raw());
+                    fills += 1;
+                }
+            }
+            8 => {
+                let snap = g.snapshot();
+                if !snap.working.is_empty() {
+                    let w = snap.working[rng.below(snap.working.len() as u64) as usize];
+                    g.on_closed(w.0).unwrap();
+                }
+            }
+            _ => {
+                marks[inst as usize] = px(400 + rng.below(200) as i64).raw();
+                g.mark(inst, Px::from_raw(marks[inst as usize]));
+            }
+        }
+        // The strategies' positions add up to the broker's, in every instrument, at every step.
+        for i in 0..3u32 {
+            let sum: i64 = (1..=3).map(|s| g.strategy_position(s, i)).sum();
+            assert_eq!(sum, g.position(i), "step {step} instrument {i}");
+            assert_eq!(sum, net[i as usize], "and to what the fills said");
+        }
+        // And their profit adds up to the account's: cash plus the broker's shares at the marks.
+        // (Average costs round to a raw unit, so allow a unit per share per fill.)
+        let account: i128 = (0..3)
+            .map(|i| cash[i] + i128::from(net[i]) * i128::from(marks[i]))
+            .sum();
+        let parts: i128 = (1..=3u16)
+            .map(|s| g.strategy_realized(s) + g.strategy_unrealized(s))
+            .sum();
+        assert!(
+            (account - parts).abs() <= fills * 100,
+            "step {step}: account {account} parts {parts}"
+        );
+        assert_eq!(
+            g.daily_pnl(),
+            parts,
+            "the gateway's own total is the sum of the parts"
+        );
+        let snap = g.snapshot();
+        assert!(snap.positions.iter().all(|p| p.2 != 0));
+        assert_eq!(
+            snap.realized,
+            snap.strategy_realized.iter().map(|x| x.1).sum::<i128>()
+        );
+    }
+    assert!(fills > 200, "{fills} fills");
+}

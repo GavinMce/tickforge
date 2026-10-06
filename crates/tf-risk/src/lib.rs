@@ -278,12 +278,15 @@ pub struct Audit {
 /// A gateway's state as comparable data (see [`Gateway::snapshot`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewaySnapshot {
-    /// Instrument, signed shares, average cost, mark: for each instrument holding a position.
-    pub positions: Vec<(InstrumentId, i64, i64, i64)>,
-    /// Order, instrument, shares remaining, limit, reference: for each working order.
-    pub working: Vec<(OrderId, InstrumentId, u32, i64, i64)>,
+    /// Strategy, instrument, signed shares, average cost, mark: for each position a strategy holds.
+    pub positions: Vec<(u16, InstrumentId, i64, i64, i64)>,
+    /// Order, strategy, instrument, shares remaining, limit, reference: for each working order.
+    pub working: Vec<(OrderId, u16, InstrumentId, u32, i64, i64)>,
     pub next_order: u64,
+    /// Realised profit over all strategies.
     pub realized: i128,
+    /// Realised profit of each strategy that has had a fill (zero until it closes something).
+    pub strategy_realized: Vec<(u16, i128)>,
     pub day_base: i128,
     pub killed: bool,
     pub loss_latched: bool,
@@ -309,6 +312,7 @@ struct Position {
 #[derive(Clone, Copy)]
 struct Working {
     id: OrderId,
+    strategy: u16,
     instrument: InstrumentId,
     side: Side,
     purpose: Purpose,
@@ -320,11 +324,15 @@ struct Working {
 
 pub struct Gateway {
     limits: Limits,
-    pos: Vec<Position>,
+    instruments: usize,
+    /// Each strategy's own position in each instrument (virtual sub-accounts): what the broker holds
+    /// is their sum, but costs, profit and limits are kept per strategy.
+    pos: BTreeMap<(u16, InstrumentId), Position>,
     marks: Vec<i64>,
     working: Vec<Working>,
     next_order: u64,
-    realized: i128,
+    /// Realised profit by strategy.
+    realized: BTreeMap<u16, i128>,
     day_base: i128,
     killed: bool,
     loss_latched: bool,
@@ -362,11 +370,12 @@ impl Gateway {
     pub fn new(limits: Limits, instruments: usize) -> Gateway {
         Gateway {
             limits,
-            pos: vec![Position::default(); instruments],
+            instruments,
+            pos: BTreeMap::new(),
             marks: vec![0; instruments],
             working: Vec::new(),
             next_order: 0,
-            realized: 0,
+            realized: BTreeMap::new(),
             day_base: 0,
             killed: false,
             loss_latched: false,
@@ -415,6 +424,7 @@ impl Gateway {
                 self.recent.push_back(now);
                 self.working.push(Working {
                     id,
+                    strategy: intent.id.strategy.0,
                     instrument: intent.instrument,
                     side: intent.side,
                     purpose: intent.purpose,
@@ -440,7 +450,7 @@ impl Gateway {
     fn check(&mut self, intent: &Intent, now: Nanos) -> Result<(), RejectReason> {
         intent.validate().map_err(RejectReason::Invalid)?;
         let inst = intent.instrument;
-        if inst as usize >= self.pos.len() {
+        if inst as usize >= self.instruments {
             return Err(RejectReason::UnknownInstrument);
         }
         let opening = intent.purpose == Purpose::Open;
@@ -464,7 +474,9 @@ impl Gateway {
         if self.recent.len() >= self.limits.max_orders_per_window as usize {
             return Err(RejectReason::OrderRate);
         }
-        let held = self.pos[inst as usize].qty;
+        // What this strategy holds of the instrument, and what working orders it has.
+        let me = intent.id.strategy.0;
+        let held = self.pos.get(&(me, inst)).map_or(0, |p| p.qty);
         if !opening {
             // A sell closes a long, a buy covers a short.
             let closable = if intent.side.is_buy() { -held } else { held }.max(0);
@@ -472,7 +484,8 @@ impl Gateway {
                 .working
                 .iter()
                 .filter(|w| {
-                    w.instrument == inst
+                    w.strategy == me
+                        && w.instrument == inst
                         && w.purpose == Purpose::Close
                         && w.side.is_buy() == intent.side.is_buy()
                 })
@@ -485,11 +498,13 @@ impl Gateway {
             };
         }
         let long = intent.side.is_buy();
-        let working_open = |want_long: bool| -> i64 {
+        // `mine` limits it to this strategy's working orders; otherwise all strategies'.
+        let working_open = |want_long: bool, mine: bool| -> i64 {
             self.working
                 .iter()
                 .filter(|w| {
-                    w.instrument == inst
+                    (!mine || w.strategy == me)
+                        && w.instrument == inst
                         && w.purpose == Purpose::Open
                         && w.side.is_buy() == want_long
                 })
@@ -497,14 +512,22 @@ impl Gateway {
                 .sum()
         };
         let against = if long { held < 0 } else { held > 0 };
-        if against || working_open(!long) > 0 {
+        if against || working_open(!long, true) > 0 {
             return Err(RejectReason::OpposingPosition);
         }
         let notional = intent.notional_at_limit();
         if notional > self.limits.max_order_notional {
             return Err(RejectReason::MaxNotional);
         }
-        let same = held.abs() + working_open(long) + i64::from(intent.qty);
+        // The cap on a symbol is over what every strategy holds or has working in this direction,
+        // not the broker's net: two strategies on one side of a name are still that much exposure.
+        let same_held: i64 = self
+            .pos
+            .iter()
+            .filter(|((_, i), p)| *i == inst && (p.qty > 0) == long && p.qty != 0)
+            .map(|(_, p)| p.qty.abs())
+            .sum();
+        let same = same_held + working_open(long, false) + i64::from(intent.qty);
         if same > i64::from(self.limits.max_position_shares) {
             return Err(RejectReason::MaxPosition);
         }
@@ -527,10 +550,10 @@ impl Gateway {
         let held: u128 = self
             .pos
             .iter()
-            .zip(&self.marks)
-            .filter(|(p, _)| p.qty < 0)
-            .map(|(p, m)| {
-                u128::from(p.qty.unsigned_abs()) * u128::try_from(p.avg.max(*m)).unwrap_or(0)
+            .filter(|(_, p)| p.qty < 0)
+            .map(|((_, i), p)| {
+                u128::from(p.qty.unsigned_abs())
+                    * u128::try_from(p.avg.max(self.marks[*i as usize])).unwrap_or(0)
             })
             .sum();
         let working: u128 = self
@@ -556,9 +579,9 @@ impl Gateway {
         let held: u128 = self
             .pos
             .iter()
-            .zip(&self.marks)
-            .map(|(p, &m)| {
-                u128::from(p.qty.unsigned_abs()) * u128::try_from(p.avg.max(m)).unwrap_or(0)
+            .map(|((_, i), p)| {
+                u128::from(p.qty.unsigned_abs())
+                    * u128::try_from(p.avg.max(self.marks[*i as usize])).unwrap_or(0)
             })
             .sum();
         let working: u128 = self
@@ -573,14 +596,13 @@ impl Gateway {
     fn unrealized(&self) -> i128 {
         self.pos
             .iter()
-            .zip(&self.marks)
-            .filter(|(p, m)| p.qty != 0 && **m > 0)
-            .map(|(p, &m)| i128::from(m - p.avg) * i128::from(p.qty))
+            .filter(|((_, i), p)| p.qty != 0 && self.marks[*i as usize] > 0)
+            .map(|((_, i), p)| i128::from(self.marks[*i as usize] - p.avg) * i128::from(p.qty))
             .sum()
     }
 
     fn total_pnl(&self) -> i128 {
-        self.realized + self.unrealized()
+        self.realized.values().sum::<i128>() + self.unrealized()
     }
 
     /// Profit and loss since the day began, raw units (negative = loss).
@@ -604,12 +626,20 @@ impl Gateway {
             return Err(GatewayError::BadFill(order));
         }
         w.remaining -= qty;
-        let (inst, buy) = (w.instrument, w.side.is_buy());
+        let (inst, buy, strategy) = (w.instrument, w.side.is_buy(), w.strategy);
         if w.remaining == 0 {
             self.working.remove(i);
         }
         let signed = if buy { i64::from(qty) } else { -i64::from(qty) };
-        self.realized += apply(&mut self.pos[inst as usize], signed, px.raw());
+        let gained = apply(
+            self.pos.entry((strategy, inst)).or_default(),
+            signed,
+            px.raw(),
+        );
+        *self.realized.entry(strategy).or_insert(0) += gained;
+        if self.pos.get(&(strategy, inst)).is_some_and(|p| p.qty == 0) {
+            self.pos.remove(&(strategy, inst));
+        }
         Ok(())
     }
 
@@ -631,18 +661,26 @@ impl Gateway {
             positions: self
                 .pos
                 .iter()
-                .zip(&self.marks)
-                .enumerate()
-                .filter(|(_, (p, _))| p.qty != 0)
-                .map(|(i, (p, m))| (i as InstrumentId, p.qty, p.avg, *m))
+                .filter(|(_, p)| p.qty != 0)
+                .map(|((s, i), p)| (*s, *i, p.qty, p.avg, self.marks[*i as usize]))
                 .collect(),
             working: self
                 .working
                 .iter()
-                .map(|w| (w.id, w.instrument, w.remaining, w.limit, w.reference))
+                .map(|w| {
+                    (
+                        w.id,
+                        w.strategy,
+                        w.instrument,
+                        w.remaining,
+                        w.limit,
+                        w.reference,
+                    )
+                })
                 .collect(),
             next_order: self.next_order,
-            realized: self.realized,
+            realized: self.realized.values().sum(),
+            strategy_realized: self.realized.iter().map(|(s, v)| (*s, *v)).collect(),
             day_base: self.day_base,
             killed: self.killed,
             loss_latched: self.loss_latched,
@@ -656,6 +694,13 @@ impl Gateway {
         }
     }
 
+    /// Whether a working order buys. For tests and reconciliation; `false` if there is no such order.
+    pub fn working_is_buy(&self, order: OrderId) -> bool {
+        self.working
+            .iter()
+            .any(|w| w.id == order && w.side.is_buy())
+    }
+
     /// The last mark given for an instrument, raw (0 if none).
     pub fn mark_of(&self, instrument: InstrumentId) -> i64 {
         self.marks.get(instrument as usize).copied().unwrap_or(0)
@@ -663,12 +708,52 @@ impl Gateway {
 
     /// How many instruments the gateway knows.
     pub fn instruments(&self) -> usize {
-        self.pos.len()
+        self.instruments
     }
 
-    /// Signed position in shares.
+    /// Signed position in shares across all strategies: what the broker holds.
     pub fn position(&self, instrument: InstrumentId) -> i64 {
-        self.pos.get(instrument as usize).map_or(0, |p| p.qty)
+        self.pos
+            .iter()
+            .filter(|((_, i), _)| *i == instrument)
+            .map(|(_, p)| p.qty)
+            .sum()
+    }
+
+    /// Signed position of one strategy in an instrument.
+    pub fn strategy_position(&self, strategy: u16, instrument: InstrumentId) -> i64 {
+        self.pos.get(&(strategy, instrument)).map_or(0, |p| p.qty)
+    }
+
+    /// Everything one strategy holds, as (instrument, signed shares, average cost, mark).
+    pub fn strategy_positions(&self, strategy: u16) -> Vec<(InstrumentId, i64, i64, i64)> {
+        self.pos
+            .range((strategy, 0)..=(strategy, InstrumentId::MAX))
+            .map(|((_, i), p)| (*i, p.qty, p.avg, self.marks[*i as usize]))
+            .collect()
+    }
+
+    /// Profit a strategy has realised, raw units.
+    pub fn strategy_realized(&self, strategy: u16) -> i128 {
+        self.realized.get(&strategy).copied().unwrap_or(0)
+    }
+
+    /// Profit a strategy holds on paper at the current marks, raw units.
+    pub fn strategy_unrealized(&self, strategy: u16) -> i128 {
+        self.strategy_positions(strategy)
+            .iter()
+            .filter(|(_, _, _, m)| *m > 0)
+            .map(|(_, q, avg, m)| i128::from(m - avg) * i128::from(*q))
+            .sum()
+    }
+
+    /// What a strategy's working opening orders could add, at their limits, raw units.
+    pub fn strategy_working_open_notional(&self, strategy: u16) -> u128 {
+        self.working
+            .iter()
+            .filter(|w| w.strategy == strategy && w.purpose == Purpose::Open)
+            .map(|w| u128::from(w.remaining) * u128::try_from(w.limit).unwrap_or(0))
+            .sum()
     }
 
     pub fn working_orders(&self) -> usize {

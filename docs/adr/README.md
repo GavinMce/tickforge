@@ -48,3 +48,4 @@ How:
 | [0029](0029-rule-edits-are-reviewed-before-anything-uses-them.md) | Rule edits are reviewed before anything uses them | Accepted |
 | [0030](0030-the-order-ledger-is-an-append-only-log-of-gateway-inputs.md) | The order ledger is an append-only log of gateway inputs | Accepted |
 | [0031](0031-budgets-are-reserved-hierarchical-and-enforced-by-the-gateway.md) | Budgets are reserved, hierarchical, and enforced by the gateway | Accepted |
+| [0032](0032-the-gateway-keeps-a-sub-account-per-strategy.md) | The gateway keeps a sub-account per strategy | Accepted |

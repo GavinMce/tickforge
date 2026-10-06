@@ -833,7 +833,7 @@ fn marks_are_written_only_when_a_decision_needs_them_and_decisions_see_them_afte
     // the loss latch it set.
     let r = recover(&j, 2);
     same(&j, &r);
-    assert_eq!(r.snapshot().positions, vec![(0, 100, 5 * P, P)]);
+    assert_eq!(r.snapshot().positions, vec![(1, 0, 100, 5 * P, P)]);
     assert!(r.snapshot().loss_latched);
     // A new day starts with the marks written first, and clears the latch.
     j.new_day(10 * SEC).unwrap();
@@ -1067,8 +1067,9 @@ fn random_day(
             0..=29 => {
                 seq += 1;
                 let qty = (10 + rng.below(300)) as u32;
-                let held = j.gateway().position(inst);
-                let i = match rng.below(4) {
+                let strat = 1 + rng.below(3) as u16;
+                let held = j.gateway().strategy_position(strat, inst);
+                let mut i = match rng.below(4) {
                     0 => intent(seq, inst, Side::SellShort, Purpose::Open, qty, px),
                     1 if held > 0 => sell(seq, inst, (held as u32).min(qty), px),
                     2 if held < 0 => intent(
@@ -1081,6 +1082,7 @@ fn random_day(
                     ),
                     _ => buy(seq, inst, qty, px),
                 };
+                i.id.strategy = StrategyId(strat);
                 let _ = j.decide(&i, now);
             }
             30..=44 => {
@@ -1317,4 +1319,41 @@ fn a_new_day_is_based_on_the_marks_it_saw_even_when_no_decision_came_first() {
     let r = recover(&j, 2);
     same(&j, &r);
     assert_eq!(r.snapshot().day_base, 100 * P as i128);
+}
+
+#[test]
+fn two_strategies_in_one_symbol_come_back_from_the_ledger_as_two_sub_accounts() {
+    let mut j = fresh(1);
+    let mk = |strategy: u16, seq: u64, qty: u32, px: i64| {
+        let mut i = buy(seq, 0, qty, px);
+        i.id.strategy = StrategyId(strategy);
+        i
+    };
+    let Decision::Accepted(a) = j.decide(&mk(1, 1, 100, 5 * P), SEC).unwrap() else {
+        panic!()
+    };
+    let Decision::Accepted(b) = j.decide(&mk(2, 2, 50, 6 * P), 2 * SEC).unwrap() else {
+        panic!()
+    };
+    for (o, q, px) in [(a, 100, 5 * P), (b, 50, 6 * P)] {
+        j.ack(o, 3 * SEC).unwrap();
+        j.fill(o, q, Px::from_raw(px), 3 * SEC).unwrap();
+    }
+    let mut close = sell(3, 0, 100, 7 * P);
+    close.id.strategy = StrategyId(1);
+    let Decision::Accepted(c) = j.decide(&close, 4 * SEC).unwrap() else {
+        panic!()
+    };
+    j.ack(c, 4 * SEC).unwrap();
+    j.fill(c, 100, Px::from_raw(7 * P), 4 * SEC).unwrap();
+    let r = recover(&j, 1);
+    same(&j, &r);
+    let snap = r.snapshot();
+    assert_eq!(
+        snap.positions,
+        vec![(2, 0, 50, 6 * P, 0)],
+        "strategy 1 is flat, strategy 2 kept its own cost"
+    );
+    assert_eq!(snap.strategy_realized, vec![(1, 200 * P as i128), (2, 0)]);
+    assert_eq!(r.gateway().position(0), 50);
 }

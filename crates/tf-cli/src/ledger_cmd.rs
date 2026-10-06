@@ -80,6 +80,13 @@ pub(crate) fn report(args: &[String]) -> Result<String, String> {
         money(clamp(snap.realized)),
         money(clamp(snap.day_base))
     );
+    for (strategy, r) in &snap.strategy_realized {
+        let _ = writeln!(
+            out,
+            "pnl      strategy {strategy} realised {}",
+            money(clamp(*r))
+        );
+    }
     let _ = writeln!(
         out,
         "state    kill switch {}  loss limit latched {}",
@@ -89,10 +96,10 @@ pub(crate) fn report(args: &[String]) -> Result<String, String> {
     if snap.positions.is_empty() {
         let _ = writeln!(out, "positions none");
     }
-    for (i, qty, avg, mark) in &snap.positions {
+    for (strategy, i, qty, avg, mark) in &snap.positions {
         let _ = writeln!(
             out,
-            "position instrument {i}: {qty} @ {} (mark {})",
+            "position strategy {strategy} instrument {i}: {qty} @ {} (mark {})",
             money(*avg),
             money(*mark)
         );
@@ -199,7 +206,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("refused  max_notional"), "{text}");
-        assert!(text.contains("position instrument 1: 60 @ $5.00"), "{text}");
+        assert!(
+            text.contains("position strategy 1 instrument 1: 60 @ $5.00"),
+            "{text}"
+        );
         assert!(
             text.contains("open     order 0 instrument 1 buy 60 of 100 PartiallyFilled"),
             "{text}"

@@ -978,7 +978,8 @@ epics:
       - id: E17-S03
         jira: TIC-122
         title: "Per-strategy position attribution (virtual sub-accounts over one broker account)"
-        status: todo
+        status: done
+        evidence: "tf-risk Gateway keeps a position, average cost and realised profit per (strategy, instrument); position() is the broker-side sum; closes and opposing positions per strategy, the symbol cap over every strategy on that side, the gap rule and gross exposure over every strategy; strategy_positions / strategy_realized / strategy_unrealized / strategy_working_open_notional; snapshot and tf ledger verify show the split; replay needs no new records. 72 single-strategy backtest reports byte-identical to before; across 1,500 random steps with three strategies the parts sum to the broker position and to the account profit; 15 mutations tried: 13 caught at once, one gap found and closed, one equivalent; ADR 0032"
         deps: [E09-S04, E09-S01]
         ac:
           - Two strategies holding one symbol keep separate lots and P&L; only the net reaches the broker

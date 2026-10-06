@@ -1067,7 +1067,8 @@ epics:
       - id: E17-S13
         jira: TIC-132
         title: "Budget editor (clamped sliders, loss limits, scheduled changes)"
-        status: todo
+        status: done
+        evidence: "#/edit: a slider and a percent box per group and strategy, held to the range the server gives with its reason (lowest: what is in use; highest: what is not yet assigned in the parent; already over budget: cannot be cut), loss limits per group, a live list of the changes in dollars, an error when the draft is not allowed, Schedule / Discard, the requests waiting, and Ask to cancel what is scheduled. Rules in one place: tf_budget::check_edit (same shape, valid tree, no strategy below its use) agrees with strategy_range/group_range over 300 random trees; the page asks POST /api/budgets/preview on every edit and the server checks again on /schedule and when the engine applies the request. Writes go to an inbox beside the ledger (tf_ledger::inbox) which the engine, or `tf ledger apply-inbox`, records as a scheduled change (applies at the next rebalance); the service never writes ledger.log (tested byte for byte). POST needs sign-in and X-Requested-With; every other write is still 405; ADR 0035. Looked at in headless Chromium at 1100 and 390 px: edit, clamp message at the limit, schedule, inbox file written, overview shows the waiting request, then `tf ledger apply-inbox` makes it a scheduled change shown in dollars. 29 workspace, 5 budget-edit, 5 inbox tests; about 40 mutations tried, equivalents noted. Limits: nothing in an engine calls inbox::apply yet (no live engine); groups and strategies cannot be added or removed; no identity on requests until E17-S17; a draft is lost on reload; the browser check was manual"
         deps: [E17-S01, E17-S05, E17-S09]
         ac:
           - Each share shows its legal range and why, and edits are clamped to it

@@ -51,3 +51,4 @@ How:
 | [0032](0032-the-gateway-keeps-a-sub-account-per-strategy.md) | The gateway keeps a sub-account per strategy | Accepted |
 | [0033](0033-the-rebalance-moves-realised-profit-into-the-strategy-that-made-it.md) | The rebalance moves realised profit into the strategy that made it | Accepted |
 | [0034](0034-the-workspace-service-only-reads-and-reads-the-ledger-without-its-lock.md) | The workspace service only reads, and reads the ledger without its lock | Accepted |
+| [0035](0035-budget-edits-are-requests-in-an-inbox-that-the-engine-records.md) | Budget edits are requests in an inbox that the engine records | Accepted |

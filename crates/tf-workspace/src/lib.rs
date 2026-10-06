@@ -13,13 +13,14 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use tf_budget::{Change, diff};
+use tf_budget::{Change, Tree, diff};
 use tf_catalog::{Catalog, Kind, Run, Source as RunSource, when};
 use tf_core::Nanos;
 use tf_ledger::{Journal, ReadOnlyStore};
 use tf_strategy::Purpose;
 use tf_strategy::intent::Side;
 
+pub mod budgets;
 pub mod http;
 
 /// Why a stored run was not opened in the explorer.
@@ -259,14 +260,42 @@ fn pct(bp: u32) -> String {
     }
 }
 
-/// One difference between the budgets in force and a scheduled tree, in words.
-fn change_text(c: &Change) -> String {
+/// `$12,345.67` from raw 1e-9 dollars.
+pub(crate) fn money(raw: i128) -> String {
+    let d = dollars(raw);
+    let (sign, d) = d.strip_prefix('-').map_or(("", d.as_str()), |r| ("-", r));
+    let (whole, cents) = d.split_once('.').unwrap_or((d, "00"));
+    let mut grouped = String::new();
+    for (i, c) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    format!("{sign}${grouped}.{cents}")
+}
+
+/// One difference between the budgets `a` in force and a tree `b` to be, in words, with what a
+/// change in a share means in dollars of `balance`.
+pub(crate) fn change_text(c: &Change, a: &Tree, b: &Tree, balance: u128) -> String {
+    let dollars = |t: &Tree, id: &str, group: bool| {
+        let v = if group {
+            t.group_budget(balance, id)
+        } else {
+            t.strategy_budget(balance, id)
+        };
+        money(v.unwrap_or(0) as i128)
+    };
     match c {
         Change::GroupAdded(id) => format!("add group {id}"),
         Change::GroupRemoved(id) => format!("remove group {id}"),
-        Change::GroupShare { id, from, to } => {
-            format!("{id}: {} → {} of the balance", pct(*from), pct(*to))
-        }
+        Change::GroupShare { id, from, to } => format!(
+            "{id}: {} → {} of the balance ({} → {})",
+            pct(*from),
+            pct(*to),
+            dollars(a, id, true),
+            dollars(b, id, true)
+        ),
         Change::Loss { id, from, to } => format!(
             "{id} loss limits: stop opening {} → {}, flatten {} → {}",
             pct(from.soft),
@@ -281,7 +310,13 @@ fn change_text(c: &Change) -> String {
             id,
             from,
             to,
-        } => format!("{id}: {} → {} of {group}", pct(*from), pct(*to)),
+        } => format!(
+            "{id}: {} → {} of {group} ({} → {})",
+            pct(*from),
+            pct(*to),
+            dollars(a, id, false),
+            dollars(b, id, false)
+        ),
     }
 }
 
@@ -322,11 +357,16 @@ pub fn overview(src: &Source) -> Result<String, String> {
         .map(|t| {
             diff(b.tree(), t)
                 .iter()
-                .map(|c| js(&change_text(c)))
+                .map(|c| js(&change_text(c, b.tree(), t, b.balance())))
                 .collect()
         })
         .unwrap_or_default();
-    let _ = write!(head, ",\"scheduled\":[{}]", changes.join(","));
+    let waiting = tf_ledger::inbox::pending(dir).map_or(0, |(w, _)| w.len());
+    let _ = write!(
+        head,
+        ",\"scheduled\":[{}],\"requests_waiting\":{waiting}",
+        changes.join(",")
+    );
     let mut total_used = 0u128;
     let mut total_pnl = 0i128;
     let mut groups = Vec::new();

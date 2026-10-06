@@ -284,6 +284,7 @@ fn get(path: &str) -> Request {
         query: String::new(),
         authorization: None,
         cookie: None,
+        requested_with: None,
         body: String::new(),
     }
 }
@@ -506,7 +507,7 @@ fn over_a_socket_the_server_answers_reads_refuses_writes_and_survives_garbage() 
     );
     let big = exchange(
         addr,
-        b"POST /login HTTP/1.1\r\nContent-Length: 5000\r\n\r\ntoken=",
+        b"POST /login HTTP/1.1\r\nContent-Length: 20000\r\n\r\ntoken=",
     );
     assert!(big.starts_with("HTTP/1.1 413"), "{big}");
     let junk = exchange(addr, b"this is not http\r\n\r\n");
@@ -583,9 +584,9 @@ fn a_scheduled_change_is_listed_in_words_until_the_rebalance_applies_it() {
     assert!(text.contains("\"scheduled_change\":true"), "{text}");
     for line in [
         "day loss limits: stop opening 3% → 2.5%, flatten 6% → 6%",
-        "alpha: 50% → 60% of day",
-        "beta: 30% → 20.5% of day",
-        "gamma: 20% → 19.5% of day",
+        "alpha: 50% → 60% of day ($15,000.00 → $18,000.00)",
+        "beta: 30% → 20.5% of day ($9,000.00 → $6,150.00)",
+        "gamma: 20% → 19.5% of day ($6,000.00 → $5,850.00)",
     ] {
         assert!(text.contains(&format!("\"{line}\"")), "{line} in {text}");
     }
@@ -693,6 +694,49 @@ fn the_page_only_reads_fields_the_api_sends_and_never_writes_markup_from_data() 
             "/api/run does not send {key}"
         );
     }
+    // And for the editor: what the page reads from /api/budgets, and what it sends back is the text
+    // form the server parses.
+    let budgets_json = crate::budgets::view(&src(&dir), None).unwrap();
+    let waiting = {
+        crate::budgets::request(&src(&dir), &tree_text(5_000, 3_500, 1_500, 300, 600), "t")
+            .unwrap();
+        crate::budgets::view(&src(&dir), None).unwrap()
+    };
+    for key in [
+        "valid",
+        "error",
+        "text",
+        "changes",
+        "groups",
+        "pending",
+        "range",
+        "min",
+        "max",
+        "min_why",
+        "max_why",
+        "share_bp",
+        "loss_soft_bp",
+        "loss_hard_bp",
+        "budget",
+        "used",
+        "id",
+        "name",
+        "by",
+    ] {
+        assert!(
+            app.contains(&format!(".{key}")),
+            "the editor does not use {key}"
+        );
+        assert!(
+            budgets_json.contains(&format!("\"{key}\":"))
+                || waiting.contains(&format!("\"{key}\":")),
+            "/api/budgets does not send {key}"
+        );
+    }
+    assert!(
+        app.contains("\"budgets v1\\n\"") && app.contains("\"group \""),
+        "the page writes the text form"
+    );
     // Text from the ledger goes in as text, and the page cannot send anything but GETs.
     for banned in [
         "innerHTML",
@@ -704,10 +748,22 @@ fn the_page_only_reads_fields_the_api_sends_and_never_writes_markup_from_data() 
     ] {
         assert!(!app.contains(banned), "{banned}");
     }
-    assert!(
-        !app.contains("method:"),
-        "the page makes no request but a GET"
+    // The page writes nothing itself: its one way to send a request that is not a GET is the
+    // helper that always carries the header, and it is only pointed at the budget routes.
+    assert_eq!(
+        app.matches("method:").count(),
+        1,
+        "one place makes non-GET requests"
     );
+    assert!(app.contains("\"X-Requested-With\": \"workspace\""));
+    let posts: Vec<&str> = app
+        .match_indices("post(\"")
+        .map(|(i, _)| &app[i + 6..])
+        .collect();
+    assert_eq!(posts.len(), 3, "preview, schedule and withdraw");
+    for p in posts {
+        assert!(p.starts_with("/api/budgets/"), "{}", &p[..30]);
+    }
     assert!(
         !include_str!("ui/index.html").contains("<script>"),
         "no inline script: the CSP forbids it"
@@ -744,7 +800,7 @@ fn a_change_to_a_groups_share_is_listed_with_the_group_added() {
     j.schedule_budgets(Some(want), 80 * SEC).unwrap();
     let text = overview(&src(&dir)).unwrap();
     assert!(
-        text.contains("\"day: 100% → 80% of the balance\""),
+        text.contains("\"day: 100% → 80% of the balance ($30,000.00 → $24,000.00)\""),
         "{text}"
     );
     assert!(text.contains("\"add group swing\""), "{text}");
@@ -967,4 +1023,313 @@ fn the_explorer_page_asks_nobody_else_for_anything() {
     for outside in ["https://", "http://", "//fonts", "@import", "src=\"http"] {
         assert!(!viewer.contains(outside), "the viewer refers to {outside}");
     }
+}
+
+fn tree_text(alpha: u32, beta: u32, gamma: u32, soft: u32, hard: u32) -> String {
+    format!(
+        "budgets v1\ngroup day 10000 {soft} {hard}\nstrategy day alpha {alpha}\nstrategy day beta {beta}\nstrategy day gamma {gamma}\n"
+    )
+}
+
+#[test]
+fn the_editor_view_gives_each_share_its_range_and_the_reason() {
+    let dir = scratch("editor");
+    let j = account(&dir, true);
+    let v = crate::budgets::view(&src(&dir), None).unwrap();
+    let has = |s: &str| assert!(v.contains(s), "missing {s} in {v}");
+    has("\"balance\":\"30000.00\",\"valid\":true,\"error\":null,\"unassigned_bp\":0");
+    has("\"changes\":[]");
+    has("\"pending\":[]");
+    // The group may not go below what alpha's $500 needs (3.34% of $30,000 gives alpha 50% = $501), nor above the whole;
+    // alpha itself needs 1.67% of its group.
+    has(
+        "\"id\":\"day\",\"share_bp\":10000,\"budget\":\"$30,000.00\",\"used\":\"$500.00\",\"loss_soft_bp\":300,\"loss_hard_bp\":600,\"range\":{\"min\":334,\"max\":10000,\"min_why\":\"alpha has $500.00 in use\",\"max_why\":\"what is not yet assigned of the balance\"}",
+    );
+    // alpha: floor from its use; ceiling is what is unassigned in the group (nothing).
+    has(
+        "\"id\":\"alpha\",\"share_bp\":5000,\"budget\":\"$15,000.00\",\"used\":\"$500.00\",\"range\":{\"min\":167,\"max\":5000,\"min_why\":\"alpha has $500.00 in use\",\"max_why\":\"what is not yet assigned in day\"}",
+    );
+    has(
+        "\"id\":\"beta\",\"share_bp\":3000,\"budget\":\"$9,000.00\",\"used\":\"$0.00\",\"range\":{\"min\":0,\"max\":3000,\"min_why\":\"nothing is in use, so it can go to zero\"",
+    );
+    // Lowering gamma frees room, so the others' ceilings rise in the next view.
+    let v =
+        crate::budgets::view(&src(&dir), Some(&tree_text(5_000, 3_000, 1_000, 300, 600))).unwrap();
+    assert!(
+        v.contains("\"valid\":true") && v.contains("\"unassigned_bp\":0"),
+        "{v}"
+    );
+    assert!(
+        v.contains("\"id\":\"alpha\",\"share_bp\":5000") && v.contains("\"min\":167,\"max\":6000"),
+        "{v}"
+    );
+    assert!(
+        v.contains("\"changes\":[\"gamma: 20% → 10% of day ($6,000.00 → $3,000.00)\"]"),
+        "{v}"
+    );
+    drop(j);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_draft_that_is_not_allowed_says_why_and_keeps_the_ranges_of_what_is_in_force() {
+    let dir = scratch("editor-bad");
+    let j = account(&dir, true);
+    let bad = |draft: &str| crate::budgets::view(&src(&dir), Some(draft)).unwrap();
+    // alpha cut below its $500 in use.
+    let v = bad(&tree_text(100, 3_000, 2_000, 300, 600));
+    assert!(
+        v.contains("\"valid\":false") && v.contains("\"error\":\"alpha: the edit leaves a budget"),
+        "{v}"
+    );
+    assert!(
+        v.contains("\"share_bp\":5000"),
+        "the groups shown are the ones in force: {v}"
+    );
+    assert!(v.contains("\"changes\":[]"));
+    // Over 100%, soft above hard, a new strategy, text that is not a tree.
+    assert!(bad(&tree_text(6_000, 3_000, 2_000, 300, 600)).contains("add up to 11000"));
+    assert!(bad(&tree_text(5_000, 3_000, 2_000, 600, 300)).contains("loss limits need"));
+    assert!(
+        bad("budgets v1\ngroup day 10000 300 600\nstrategy day alpha 5000\n")
+            .contains("same groups and strategies")
+    );
+    assert!(bad("not a tree").contains("\"valid\":false"));
+    // Loss limits can be edited.
+    let v = bad(&tree_text(5_000, 3_000, 2_000, 250, 500));
+    assert!(
+        v.contains("\"valid\":true")
+            && v.contains("day loss limits: stop opening 3% → 2.5%, flatten 6% → 5%"),
+        "{v}"
+    );
+    // Nothing to edit without budgets or a ledger.
+    let nob = scratch("editor-nob");
+    let jn = account(&nob, false);
+    assert!(matches!(
+        crate::budgets::view(&src(&nob), None),
+        Err(crate::budgets::Refusal::NothingToEdit(_))
+    ));
+    assert!(matches!(
+        crate::budgets::view(&Source::default(), None),
+        Err(crate::budgets::Refusal::NothingToEdit(_))
+    ));
+    drop((j, jn));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&nob);
+}
+
+fn post(path: &str, body: &str, header: Option<&str>) -> Request {
+    Request {
+        method: "POST".into(),
+        body: body.into(),
+        requested_with: header.map(str::to_owned),
+        ..signed(path)
+    }
+}
+
+#[test]
+fn a_change_is_requested_through_the_inbox_and_the_ledger_is_not_touched() {
+    let dir = scratch("editor-post");
+    let j = account(&dir, true);
+    let s = src(&dir);
+    let log = std::fs::read(dir.join("ledger.log")).unwrap();
+    let draft = tree_text(5_000, 3_500, 1_500, 300, 600);
+    // Sign-in and the header are both needed.
+    let anon = Request {
+        method: "POST".into(),
+        body: draft.clone(),
+        requested_with: Some("workspace".into()),
+        ..get("/api/budgets/schedule")
+    };
+    assert_eq!(handle(&s, TOKEN, &anon).status, 401);
+    assert_eq!(
+        handle(&s, TOKEN, &post("/api/budgets/schedule", &draft, None)).status,
+        403
+    );
+    assert_eq!(
+        handle(
+            &s,
+            TOKEN,
+            &post("/api/budgets/schedule", &draft, Some("other"))
+        )
+        .status,
+        403
+    );
+    assert!(
+        !dir.join("inbox").exists(),
+        "nothing was written by the refused requests"
+    );
+    // Preview writes nothing either.
+    let p = handle(
+        &s,
+        TOKEN,
+        &post("/api/budgets/preview", &draft, Some("workspace")),
+    );
+    assert_eq!(p.status, 200);
+    assert!(
+        p.body.contains("\"valid\":true")
+            && p.body
+                .contains("beta: 30% → 35% of day ($9,000.00 → $10,500.00)"),
+        "{}",
+        p.body
+    );
+    assert!(!dir.join("inbox").exists());
+    // Scheduling puts one file in the inbox.
+    let r = handle(
+        &s,
+        TOKEN,
+        &post("/api/budgets/schedule", &draft, Some("workspace")),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        r.body.contains("\"requested\":\"0000000001.req\"")
+            && r.body
+                .contains("gamma: 20% → 15% of day ($6,000.00 → $4,500.00)"),
+        "{}",
+        r.body
+    );
+    let (waiting, _) = tf_ledger::inbox::pending(&dir).unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].by, "the workspace app (shared token)");
+    assert_eq!(waiting[0].tree.as_ref().unwrap().render(), draft);
+    assert_eq!(
+        std::fs::read(dir.join("ledger.log")).unwrap(),
+        log,
+        "the ledger was not written"
+    );
+    // The request shows in the editor and in what the overview says is waiting.
+    let v = crate::budgets::view(&s, None).unwrap();
+    assert!(v.contains("\"pending\":[{\"name\":\"0000000001.req\",\"by\":\"the workspace app (shared token)\",\"changes\":[\"beta:"), "{v}");
+    // Refused: not allowed (422), no different (422), and the refusals leave the inbox alone.
+    let no = handle(
+        &s,
+        TOKEN,
+        &post(
+            "/api/budgets/schedule",
+            &tree_text(100, 3_000, 2_000, 300, 600),
+            Some("workspace"),
+        ),
+    );
+    assert_eq!(no.status, 422);
+    assert!(no.body.contains("in use"), "{}", no.body);
+    let same = handle(
+        &s,
+        TOKEN,
+        &post(
+            "/api/budgets/schedule",
+            &tree_text(5_000, 3_000, 2_000, 300, 600),
+            Some("workspace"),
+        ),
+    );
+    assert_eq!(
+        (
+            same.status,
+            same.body.contains("same as the budgets in force")
+        ),
+        (422, true),
+        "{}",
+        same.body
+    );
+    assert_eq!(
+        handle(
+            &s,
+            TOKEN,
+            &post("/api/budgets/schedule", "junk", Some("workspace"))
+        )
+        .status,
+        422
+    );
+    assert_eq!(tf_ledger::inbox::pending(&dir).unwrap().0.len(), 1);
+    // Withdrawing is a request too.
+    let w = handle(
+        &s,
+        TOKEN,
+        &post("/api/budgets/withdraw", "", Some("workspace")),
+    );
+    assert_eq!(
+        (w.status, w.body.as_str()),
+        (200, "{\"requested\":\"0000000002.req\"}")
+    );
+    assert_eq!(tf_ledger::inbox::pending(&dir).unwrap().0[1].tree, None);
+    let v = crate::budgets::view(&s, None).unwrap();
+    assert!(
+        v.contains("\"changes\":[\"withdraw the scheduled change\"]"),
+        "{v}"
+    );
+    // Only the three routes under /api/budgets/ take a POST.
+    assert_eq!(
+        handle(&s, TOKEN, &post("/api/budgets", &draft, Some("workspace"))).status,
+        405
+    );
+    // No budgets: nothing to change (409). Unknown route: 404. GET of the write routes: 404.
+    let nob = scratch("editor-post-nob");
+    let jn = account(&nob, false);
+    assert_eq!(
+        handle(
+            &src(&nob),
+            TOKEN,
+            &post("/api/budgets/schedule", &draft, Some("workspace"))
+        )
+        .status,
+        409
+    );
+    assert_eq!(
+        handle(
+            &s,
+            TOKEN,
+            &post("/api/budgets/other", "", Some("workspace"))
+        )
+        .status,
+        404
+    );
+    assert_eq!(
+        handle(&s, TOKEN, &signed("/api/budgets/schedule")).status,
+        404
+    );
+    assert_eq!(handle(&s, TOKEN, &signed("/api/budgets")).status, 200);
+    assert_eq!(
+        handle(&src(&nob), TOKEN, &signed("/api/budgets")).status,
+        409
+    );
+    assert_eq!(handle(&s, TOKEN, &get("/api/budgets")).status, 401);
+    drop((j, jn));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&nob);
+}
+
+#[test]
+fn money_is_grouped_in_thousands() {
+    assert_eq!(crate::money(0), "$0.00");
+    assert_eq!(crate::money(999 * P as i128), "$999.00");
+    assert_eq!(crate::money(1_000 * P as i128), "$1,000.00");
+    assert_eq!(
+        crate::money(1_234_567 * P as i128 + 5 * P as i128 / 10),
+        "$1,234,567.50"
+    );
+    assert_eq!(crate::money(-12_345 * P as i128), "-$12,345.00");
+    assert_eq!(crate::money(100_000 * P as i128), "$100,000.00");
+}
+
+#[test]
+fn a_strategy_already_over_its_budget_is_told_it_cannot_be_cut() {
+    let dir = scratch("editor-over");
+    let mut j = account(&dir, false);
+    // alpha holds $500; give the account a balance so small that alpha's half is $400.
+    let ids = [(1, "alpha"), (2, "beta"), (3, "gamma")].map(|(n, id)| (n, id.to_owned()));
+    j.set_budgets(
+        Some(tf_risk::Budgets::new(budgets().tree().clone(), 800 * P as u128, ids).unwrap()),
+        90 * SEC,
+    )
+    .unwrap();
+    let v = crate::budgets::view(&src(&dir), None).unwrap();
+    assert!(v.contains("\"id\":\"alpha\",\"share_bp\":5000,\"budget\":\"$400.00\",\"used\":\"$500.00\",\"range\":{\"min\":5000,\"max\":5000,\"min_why\":\"it is already over its budget, so it cannot be cut\""), "{v}");
+    // Cutting it is refused; raising it is not.
+    let cut = tree_text(4_000, 4_000, 2_000, 300, 600);
+    let v = crate::budgets::view(&src(&dir), Some(&cut)).unwrap();
+    assert!(
+        v.contains("\"valid\":false") && v.contains("alpha: the edit leaves a budget"),
+        "{v}"
+    );
+    drop(j);
+    let _ = std::fs::remove_dir_all(&dir);
 }

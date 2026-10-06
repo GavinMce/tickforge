@@ -169,6 +169,12 @@ pub enum BudgetError {
     },
     /// A rebalance given a tree whose shape (groups and strategies) differs from the targets'.
     ShapeMismatch,
+    /// An edit that would leave a strategy with less budget than it has in use.
+    BelowUse {
+        what: String,
+        budget: u128,
+        used: u128,
+    },
     /// Rebalance bounds that do not satisfy `0 < floor <= FULL <= ceiling`.
     BadBounds {
         floor: Bp,
@@ -203,6 +209,10 @@ impl std::fmt::Display for BudgetError {
             BudgetError::ShapeMismatch => write!(
                 f,
                 "the budgets and their targets do not have the same groups and strategies"
+            ),
+            BudgetError::BelowUse { what, budget, used } => write!(
+                f,
+                "{what}: the edit leaves a budget of {budget} (1e-9 dollars) below the {used} it has in use"
             ),
             BudgetError::BadBounds { floor, ceiling } => write!(
                 f,
@@ -623,6 +633,48 @@ pub enum Change {
         from: Bp,
         to: Bp,
     },
+}
+
+/// Whether `wanted` is an edit of the budgets `current` that the rules allow, given the balance and
+/// what each strategy has in use. It must have the same groups and strategies (an edit moves shares
+/// and loss limits; it does not add or remove anything), be a valid tree, and leave no strategy
+/// with less budget than it uses. A strategy already over its budget may not be cut further.
+pub fn check_edit(
+    current: &Tree,
+    wanted: &Tree,
+    balance: u128,
+    usage: &Usage,
+) -> Result<(), BudgetError> {
+    let shape = |t: &Tree| -> Vec<(String, Vec<String>)> {
+        t.groups
+            .iter()
+            .map(|g| {
+                (
+                    g.id.clone(),
+                    g.strategies.iter().map(|s| s.id.clone()).collect(),
+                )
+            })
+            .collect()
+    };
+    if shape(current) != shape(wanted) {
+        return Err(BudgetError::ShapeMismatch);
+    }
+    wanted.validate()?;
+    for g in &wanted.groups {
+        for s in &g.strategies {
+            let used = usage.strategy(&s.id);
+            let now = current.strategy_budget(balance, &s.id).unwrap_or(0);
+            let new = wanted.strategy_budget(balance, &s.id).unwrap_or(0);
+            if new < used && new < now {
+                return Err(BudgetError::BelowUse {
+                    what: s.id.clone(),
+                    budget: new,
+                    used,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What changed from `a` to `b`: groups in `a`'s order, then groups only in `b`.

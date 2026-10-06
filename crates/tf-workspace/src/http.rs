@@ -10,10 +10,11 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
+use crate::budgets::{self, Refusal};
 use crate::{ExplorerError, Source, js, overview, run_detail, runs};
 
 const MAX_HEAD: usize = 16 * 1024;
-const MAX_BODY: usize = 1024;
+const MAX_BODY: usize = 16 * 1024;
 const COOKIE: &str = "tf_session";
 const PAGE_CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 /// The explorer is one self-contained page with its own inline script and style, and the data it
@@ -27,6 +28,8 @@ pub struct Request {
     pub query: String,
     pub authorization: Option<String>,
     pub cookie: Option<String>,
+    /// The `X-Requested-With` header: a request that changes anything must carry it.
+    pub requested_with: Option<String>,
     pub body: String,
 }
 
@@ -216,6 +219,48 @@ fn explorer(src: &Source, run: &str) -> Response {
     }
 }
 
+/// The requests that ask for something to change: a budget edit previewed, scheduled or withdrawn.
+/// Nothing is changed here: a scheduled edit is put in the ledger's inbox for the engine. The caller
+/// must be signed in and must send `X-Requested-With: workspace`, which a page on another site cannot
+/// do (on top of the cookie being SameSite=Strict).
+fn budget_change(src: &Source, token: &str, req: &Request) -> Response {
+    if !signed_in(req, token) {
+        return Response::error(401, "sign in").with("WWW-Authenticate", "Bearer");
+    }
+    if req.requested_with.as_deref() != Some("workspace") {
+        return Response::error(403, "send the header X-Requested-With: workspace");
+    }
+    const BY: &str = "the workspace app (shared token)";
+    let refuse = |r: Refusal| match r {
+        Refusal::NothingToEdit(m) => Response::error(409, &m),
+        Refusal::NotAllowed(m) => Response::error(422, &m),
+        Refusal::NoChange => Response::error(422, &r.to_string()),
+        Refusal::Failed(m) => Response::error(500, &m),
+    };
+    match req.path.as_str() {
+        "/api/budgets/preview" => match budgets::view(src, Some(&req.body)) {
+            Ok(body) => Response::json(200, body),
+            Err(r) => refuse(r),
+        },
+        "/api/budgets/schedule" => match budgets::request(src, &req.body, BY) {
+            Ok((name, changes)) => Response::json(
+                200,
+                format!(
+                    "{{\"requested\":{},\"changes\":[{}]}}",
+                    js(&name),
+                    changes.iter().map(|c| js(c)).collect::<Vec<_>>().join(",")
+                ),
+            ),
+            Err(r) => refuse(r),
+        },
+        "/api/budgets/withdraw" => match budgets::withdraw(src, BY) {
+            Ok(name) => Response::json(200, format!("{{\"requested\":{}}}", js(&name))),
+            Err(r) => refuse(r),
+        },
+        _ => Response::error(404, "no such route"),
+    }
+}
+
 /// Answers one request. Reads the ledger and run store named by `src`; writes nothing.
 pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     if req.method == "POST" && req.path == "/login" {
@@ -235,6 +280,9 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
             Response::new(401, "text/html", LOGIN)
         };
     }
+    if req.method == "POST" && req.path.starts_with("/api/budgets/") {
+        return budget_change(src, token, req);
+    }
     if req.method != "GET" {
         return Response::error(405, "this service only reads").with("Allow", "GET");
     }
@@ -249,7 +297,7 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     }
     let known = matches!(
         req.path.as_str(),
-        "/" | "/app.js" | "/api/overview" | "/api/runs" | "/api/run"
+        "/" | "/app.js" | "/api/overview" | "/api/runs" | "/api/run" | "/api/budgets"
     );
     if !known {
         return Response::error(404, "no such route");
@@ -265,6 +313,11 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
         "/" => return Response::new(200, "text/html", HOME),
         "/app.js" => return Response::new(200, "text/javascript", APP_JS),
         "/api/overview" => overview(src),
+        "/api/budgets" => match budgets::view(src, None) {
+            Ok(body) => Ok(body),
+            Err(Refusal::NothingToEdit(m)) => return Response::error(409, &m),
+            Err(r) => Err(r.to_string()),
+        },
         "/api/run" => {
             let (Some(strategy), Some(id)) = (
                 query_value(&req.query, "strategy"),
@@ -315,7 +368,8 @@ fn read_request(s: &mut TcpStream) -> Result<Request, Response> {
         return Err(Response::error(400, "bad request line"));
     }
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let (mut authorization, mut cookie, mut length) = (None, None, 0usize);
+    let (mut authorization, mut cookie, mut requested_with, mut length) =
+        (None, None, None, 0usize);
     for l in lines {
         let Some((k, v)) = l.split_once(':') else {
             return Err(Response::error(400, "bad header"));
@@ -323,6 +377,7 @@ fn read_request(s: &mut TcpStream) -> Result<Request, Response> {
         match k.trim().to_ascii_lowercase().as_str() {
             "authorization" => authorization = Some(v.trim().to_owned()),
             "cookie" => cookie = Some(v.trim().to_owned()),
+            "x-requested-with" => requested_with = Some(v.trim().to_owned()),
             "content-length" => {
                 length = v
                     .trim()
@@ -349,6 +404,7 @@ fn read_request(s: &mut TcpStream) -> Result<Request, Response> {
         query: query.to_owned(),
         authorization,
         cookie,
+        requested_with,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
 }

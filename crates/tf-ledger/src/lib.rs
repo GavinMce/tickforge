@@ -9,11 +9,13 @@
 //! - [`codec`]: the text form of a record.
 //! - [`store`]: where records are kept (`LedgerStore`: a file with a lock, memory, and the
 //!   conformance suite any other store must pass).
+//! - [`inbox`]: a person's requested budget changes, waiting for the engine to record them.
 //! - [`journal`]: the gateway and order book that write the ledger and recover from it.
 
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
 pub mod codec;
+pub mod inbox;
 pub mod journal;
 pub mod store;
 

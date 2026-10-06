@@ -628,11 +628,12 @@ epics:
           - Storage sits behind a trait with a conformance suite, so another store can be proven against it
       - id: E09-S05
         jira: TIC-74
-        title: Alpaca trading adapter (paper)
-        status: todo
+        title: "Alpaca trading adapter (paper): order and event mapping"
+        status: done
+        evidence: "crates/tf-alpaca: accepted intents become `POST /v2/orders` bodies (limit orders, marketable-limit collars at the worst price allowed, `oto` for a stop alone and `bracket` with a target; exact decimal prices rounded to Alpaca's tick in the direction that cannot loosen the order; protective orders on an IOC or a close refused before sending); the trade_updates stream (auth, listen, new/fill/partial_fill/canceled/expired/rejected and the quiet events) is read into acknowledged / filled for N at P / ended events, with duplicate fills applied once, fills that do not add up reported not applied, orders we did not name reported, a fill before an ack acknowledging first, resume from the ledger after a restart; an order with no answer is looked up by its client order id and re-sent only under the same name, never closed on a guess; bracket legs recognised and reported apart; keys kept out of bodies, Debug and logs; glue into tf_ledger::Journal (an end-to-end test goes gateway -> Alpaca -> stream -> ledger -> restart). 31 tests; about 45 mutations tried, the real gaps closed, a few equivalents; ADR 0037. NOT done: no network (E09-S10 is the HTTPS/WebSocket transport and a check against the real paper account, which the hand-written fixtures have not met); protective-leg fills are not recorded in the ledger (E09-S11)"
         deps: [E09-S04]
         ac:
-          - Orders, brackets and trade_updates stream; marketable-limit collars
+          - Orders, brackets, marketable-limit collars and the trade_updates stream are translated to and from ledger inputs, tested against a scripted transport and fixtures
       - id: E09-S06
         jira: TIC-75
         title: Broker reconciliation loop
@@ -654,6 +655,24 @@ epics:
         deps: [E09-S04, E02-S02]
         ac:
           - Same adapter interface as Alpaca; fills against synthetic quotes with latency and rejects
+      - id: E09-S10
+        jira: TIC-137
+        title: "Alpaca transport: HTTPS REST and the trade_updates websocket (TLS dependency decision)"
+        status: todo
+        deps: [E09-S05]
+        ac:
+          - An ADR chooses the TLS/HTTP/WebSocket approach; keys are read from a file or environment, never from arguments, logs or images
+          - A client implements tf_alpaca::client::Transport over HTTPS with timeouts, and a stream client does the auth/listen handshake, reconnects and feeds Tracker::translate
+          - Verified against the Alpaca paper account (orders, a bracket, a cancel, fills on the stream), with differences from the fixtures written down and the fixtures corrected
+      - id: E09-S11
+        jira: TIC-138
+        title: Record fills of protective legs (stop and target) in the ledger
+        status: todo
+        deps: [E09-S04, E09-S05]
+        ac:
+          - The ledger records a protective leg's fill, with the order it protects, so replay reproduces the position, realised profit and budget charge
+          - A leg that fills closes the parent's other working protective orders, and a partly filled one is handled
+          - The adapter's LegFill events are recorded through it and a restart finds the same state
       - id: E09-S09
         jira: TIC-118
         title: Postgres-backed ledger store (same interface and conformance tests as the file log)

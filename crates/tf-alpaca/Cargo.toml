@@ -1,0 +1,19 @@
+[package]
+name = "tf-alpaca"
+description = "Alpaca trading adapter (paper): orders, brackets, collars and the trade_updates stream, behind a transport trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+tf-strategy.workspace = true
+tf-ledger.workspace = true
+
+[dev-dependencies]
+tf-risk.workspace = true

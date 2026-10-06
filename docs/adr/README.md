@@ -53,3 +53,4 @@ How:
 | [0034](0034-the-workspace-service-only-reads-and-reads-the-ledger-without-its-lock.md) | The workspace service only reads, and reads the ledger without its lock | Accepted |
 | [0035](0035-budget-edits-are-requests-in-an-inbox-that-the-engine-records.md) | Budget edits are requests in an inbox that the engine records | Accepted |
 | [0036](0036-agents-may-cut-risk-on-their-own-but-raising-it-needs-a-person.md) | Agents may cut risk on their own, but raising it needs a person | Accepted |
+| [0037](0037-the-alpaca-adapter-is-a-translation-over-a-transport-and-never-retries-an-order-blind.md) | The Alpaca adapter is a translation over a transport and never retries an order blind | Accepted |

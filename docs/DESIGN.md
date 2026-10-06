@@ -210,3 +210,10 @@ lose the opening cross. Quotes for every symbol are the expensive part (about 6x
 trades on `XNAS.BASIC`, more on `EQUS.MINI`): trades or `tcbbo`/`tbbo` (each trade with its
 prevailing bid and ask) for the whole universe, and full quotes only for promoted symbols, is the
 shape that fits Tier 0 / Tier 1.
+
+**Decoding real records (2026-10-06).** The `tf-databento` decoder reads about 12 million records a
+second including zstd. On the full-market feed, venues number their own sequences (publisher ids 81,
+82 and others interleave), about 4% of midday trades are prints of zero whole shares at sub-penny
+prices (almost all from one venue; a fifth of premarket trades), and a day of `status` has 48
+halts or pauses, 13,337 trading and 308 short-sale-restriction records. No consolidated quote was
+crossed in the sampled windows, and 184 of 93,878 were one-sided.

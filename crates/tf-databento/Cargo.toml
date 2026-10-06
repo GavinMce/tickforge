@@ -1,0 +1,19 @@
+[package]
+name = "tf-databento"
+description = "Databento DBN records decoded into canonical events, without an async runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+dbn = { version = "0.71", default-features = true }
+
+[dev-dependencies]
+zstd = "0.13"
+tf-alpaca.workspace = true

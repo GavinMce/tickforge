@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+use tf_budget::{Bounds, Tree};
 use tf_core::{InstrumentId, Nanos, Px};
 use tf_risk::{Budgets, Gateway, GatewayError, GatewaySnapshot, Limits, LossEvent};
 use tf_strategy::intent::Intent;
@@ -53,6 +54,8 @@ pub enum JournalError {
     Poisoned,
     /// The first record is not a start record, or another one is.
     Structure(String),
+    /// A budget input that cannot be applied (none in force, or a schedule that drops a strategy).
+    Budgets(String),
 }
 
 impl std::fmt::Display for JournalError {
@@ -73,6 +76,7 @@ impl std::fmt::Display for JournalError {
                 "the ledger could not be written, so this journal is stopped; restart it from the ledger",
             ),
             JournalError::Structure(m) => write!(f, "{m}"),
+            JournalError::Budgets(m) => write!(f, "{m}"),
         }
     }
 }
@@ -104,6 +108,12 @@ pub struct Journal<S: LedgerStore> {
     /// The mark last written for each instrument.
     logged: Vec<i64>,
     poisoned: bool,
+    /// The budget tree as a person last set it: what a rebalance keeps shares near.
+    targets: Option<Tree>,
+    /// A change a person has scheduled, applied at the next rebalance.
+    scheduled: Option<Tree>,
+    /// Each strategy's realised profit when budgets were last set or rebalanced.
+    rebalance_base: BTreeMap<u16, i128>,
 }
 
 fn show(r: &Record) -> String {
@@ -173,6 +183,9 @@ impl<S: LedgerStore> Journal<S> {
             seq: 0,
             logged: vec![0; instruments],
             poisoned: false,
+            targets: None,
+            scheduled: None,
+            rebalance_base: BTreeMap::new(),
         };
         if loaded.records.is_empty() {
             j.append(&start)?;
@@ -306,7 +319,73 @@ impl<S: LedgerStore> Journal<S> {
                 Ok(None)
             }
             Input::Budgets { budgets, .. } => {
+                // A person setting budgets: these are the targets, nothing is pending, and profit is
+                // counted from here.
+                self.targets = budgets.as_ref().map(|b| b.tree().clone());
+                self.scheduled = None;
+                self.rebalance_base = self.realized_now();
                 self.gw.set_budgets(budgets);
+                Ok(None)
+            }
+            Input::Schedule { tree, .. } => {
+                if let Some(t) = &tree {
+                    let b = self.gw.budgets().ok_or_else(|| {
+                        JournalError::Budgets(
+                            "there are no budgets in force to schedule a change to".to_owned(),
+                        )
+                    })?;
+                    if let Some(id) = b.ids().values().find(|id| t.strategy(id).is_none()) {
+                        return Err(JournalError::Budgets(format!(
+                            "the scheduled budgets leave out strategy `{id}`, which is in force"
+                        )));
+                    }
+                }
+                self.scheduled = tree;
+                Ok(None)
+            }
+            Input::Rebalance {
+                bounds, balance, ..
+            } => {
+                let b = self.gw.budgets().cloned().ok_or_else(|| {
+                    JournalError::Budgets("there are no budgets in force to rebalance".to_owned())
+                })?;
+                let now = self.realized_now();
+                let pnl: BTreeMap<String, i128> = b
+                    .ids()
+                    .iter()
+                    .map(|(n, id)| {
+                        (
+                            id.clone(),
+                            now.get(n).copied().unwrap_or(0)
+                                - self.rebalance_base.get(n).copied().unwrap_or(0),
+                        )
+                    })
+                    .collect();
+                let (tree, computed) = match self.scheduled.take() {
+                    // A person's scheduled split replaces the profit adjustment this time; the
+                    // profit still changes the balance.
+                    Some(t) => {
+                        let total: i128 = pnl.values().sum();
+                        let bal = (i128::try_from(b.balance()).unwrap_or(i128::MAX) + total).max(0)
+                            as u128;
+                        self.targets = Some(t.clone());
+                        (t, bal)
+                    }
+                    None => {
+                        let targets = self.targets.clone().unwrap_or_else(|| b.tree().clone());
+                        let r = tf_budget::rebalance(b.tree(), &targets, b.balance(), &pnl, bounds)
+                            .map_err(|e| JournalError::Budgets(e.to_string()))?;
+                        (r.tree, r.balance)
+                    }
+                };
+                let next = Budgets::new(
+                    tree,
+                    balance.unwrap_or(computed),
+                    b.ids().iter().map(|(n, id)| (*n, id.clone())),
+                )
+                .map_err(|e| JournalError::Budgets(format!("{e:?}")))?;
+                self.rebalance_base = now;
+                self.gw.set_budgets(Some(next));
                 Ok(None)
             }
         }
@@ -412,6 +491,44 @@ impl<S: LedgerStore> Journal<S> {
             })?;
         }
         Ok(events)
+    }
+
+    /// Schedule a change to the budget tree (or withdraw one with `None`). It takes effect at the next
+    /// [`Journal::rebalance`], not before. It must keep every strategy that is in force.
+    pub fn schedule_budgets(&mut self, tree: Option<Tree>, ts: Nanos) -> Result<(), JournalError> {
+        self.apply(Input::Schedule { tree, ts }).map(|_| ())
+    }
+
+    /// The end-of-session rebalance. A scheduled change is applied if there is one; otherwise each
+    /// strategy's realised profit since the last rebalance moves into its own budget, within `bounds`
+    /// of the targets. `balance` is the account's real balance if the broker reported one, otherwise
+    /// it is the old balance plus the profit.
+    pub fn rebalance(
+        &mut self,
+        ts: Nanos,
+        bounds: Bounds,
+        balance: Option<u128>,
+    ) -> Result<(), JournalError> {
+        self.apply(Input::Rebalance {
+            ts,
+            bounds,
+            balance,
+        })
+        .map(|_| ())
+    }
+
+    /// The budget tree as a person last set it, which rebalancing keeps shares near.
+    pub fn targets(&self) -> Option<&Tree> {
+        self.targets.as_ref()
+    }
+
+    /// The change scheduled for the next rebalance, if any.
+    pub fn scheduled(&self) -> Option<&Tree> {
+        self.scheduled.as_ref()
+    }
+
+    fn realized_now(&self) -> BTreeMap<u16, i128> {
+        self.gw.snapshot().strategy_realized.into_iter().collect()
     }
 
     pub fn new_day(&mut self, ts: Nanos) -> Result<(), JournalError> {

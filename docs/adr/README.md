@@ -49,3 +49,4 @@ How:
 | [0030](0030-the-order-ledger-is-an-append-only-log-of-gateway-inputs.md) | The order ledger is an append-only log of gateway inputs | Accepted |
 | [0031](0031-budgets-are-reserved-hierarchical-and-enforced-by-the-gateway.md) | Budgets are reserved, hierarchical, and enforced by the gateway | Accepted |
 | [0032](0032-the-gateway-keeps-a-sub-account-per-strategy.md) | The gateway keeps a sub-account per strategy | Accepted |
+| [0033](0033-the-rebalance-moves-realised-profit-into-the-strategy-that-made-it.md) | The rebalance moves realised profit into the strategy that made it | Accepted |

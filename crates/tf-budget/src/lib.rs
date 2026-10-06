@@ -167,6 +167,13 @@ pub enum BudgetError {
         line: usize,
         why: String,
     },
+    /// A rebalance given a tree whose shape (groups and strategies) differs from the targets'.
+    ShapeMismatch,
+    /// Rebalance bounds that do not satisfy `0 < floor <= FULL <= ceiling`.
+    BadBounds {
+        floor: Bp,
+        ceiling: Bp,
+    },
 }
 
 impl std::fmt::Display for BudgetError {
@@ -193,6 +200,14 @@ impl std::fmt::Display for BudgetError {
                 range.min.value, range.max.value
             ),
             BudgetError::Parse { line, why } => write!(f, "budgets line {line}: {why}"),
+            BudgetError::ShapeMismatch => write!(
+                f,
+                "the budgets and their targets do not have the same groups and strategies"
+            ),
+            BudgetError::BadBounds { floor, ceiling } => write!(
+                f,
+                "rebalance bounds need 0 < floor <= {FULL} <= ceiling, found {floor} and {ceiling}"
+            ),
         }
     }
 }
@@ -662,6 +677,187 @@ pub fn diff(a: &Tree, b: &Tree) -> Vec<Change> {
         out.push(Change::GroupAdded(gb.id.clone()));
     }
     out
+}
+
+/// How far a rebalance may move a node from its **target** share (the share a person last set), as
+/// multiples of the target in basis points: `floor` 5,000 is half of it, `ceiling` 20,000 twice it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounds {
+    pub floor: Bp,
+    pub ceiling: Bp,
+}
+
+impl Bounds {
+    pub fn new(floor: Bp, ceiling: Bp) -> Result<Bounds, BudgetError> {
+        if floor == 0 || floor > FULL || ceiling < FULL {
+            return Err(BudgetError::BadBounds { floor, ceiling });
+        }
+        Ok(Bounds { floor, ceiling })
+    }
+}
+
+impl Default for Bounds {
+    /// Half to twice the target.
+    fn default() -> Self {
+        Bounds {
+            floor: 5_000,
+            ceiling: 20_000,
+        }
+    }
+}
+
+/// The least and most a share may be around `target`: at least `floor` of it (rounded up), at most
+/// `ceiling` of it (rounded down) and never above the whole.
+fn limits_around(target: Bp, b: Bounds) -> (Bp, Bp) {
+    let lo = (u64::from(target) * u64::from(b.floor)).div_ceil(u64::from(FULL)) as Bp;
+    let hi =
+        ((u64::from(target) * u64::from(b.ceiling)) / u64::from(FULL)).min(u64::from(FULL)) as Bp;
+    (lo, hi)
+}
+
+/// Shares for siblings: each wanted share clamped into its limits, then, if together they exceed
+/// the whole, the excess is taken one basis point at a time from the sibling furthest above its
+/// floor (the lowest index on a tie). Never exceeds `FULL` in total; leaves any shortfall unassigned.
+fn fit(wanted: &[Bp], limits: &[(Bp, Bp)]) -> Vec<Bp> {
+    let mut y: Vec<Bp> = wanted
+        .iter()
+        .zip(limits)
+        .map(|(w, (lo, hi))| (*w).clamp(*lo, *hi))
+        .collect();
+    let mut excess = y.iter().sum::<u32>().saturating_sub(FULL);
+    while excess > 0 {
+        let pick = y
+            .iter()
+            .zip(limits)
+            .enumerate()
+            .filter(|(_, (v, (lo, _)))| **v > *lo)
+            .max_by_key(|(i, (v, (lo, _)))| (**v - *lo, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i);
+        let Some(i) = pick else { break };
+        y[i] -= 1;
+        excess -= 1;
+    }
+    y
+}
+
+/// The result of a rebalance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rebalanced {
+    pub tree: Tree,
+    pub balance: u128,
+}
+
+/// Move each strategy's realised profit or loss into its own budget.
+///
+/// Every strategy's dollar budget (`current`, divided over `balance`) gains its `pnl` (never below
+/// zero); what a group or the workspace holds unassigned stays as it was in dollars; the balance
+/// becomes the old one plus all of the profit. New shares are those dollars over the new balance
+/// (rounded to the nearest basis point, so with no profit and no loss nothing moves), clamped
+/// to `bounds` around the shares in `targets`, and trimmed to fit if the clamping overfilled a
+/// level. `targets` and `current` must have the same groups and strategies. A strategy not in
+/// `pnl` made nothing. Open positions are not looked at: a smaller budget only blocks new opens.
+pub fn rebalance(
+    current: &Tree,
+    targets: &Tree,
+    balance: u128,
+    pnl: &BTreeMap<String, i128>,
+    bounds: Bounds,
+) -> Result<Rebalanced, BudgetError> {
+    let shape = |t: &Tree| -> Vec<(String, Vec<String>)> {
+        t.groups()
+            .iter()
+            .map(|g| {
+                (
+                    g.id.clone(),
+                    g.strategies.iter().map(|s| s.id.clone()).collect(),
+                )
+            })
+            .collect()
+    };
+    if shape(current) != shape(targets) {
+        return Err(BudgetError::ShapeMismatch);
+    }
+    Bounds::new(bounds.floor, bounds.ceiling)?;
+    // Each strategy's dollars after its profit, and what each group keeps unassigned.
+    let mut new_balance = i128::try_from(balance).unwrap_or(i128::MAX);
+    let mut groups = Vec::new();
+    for g in current.groups() {
+        let gb = share_of(balance, g.share);
+        let mut ds = Vec::new();
+        for st in &g.strategies {
+            let sb = share_of(gb, st.share);
+            let p = pnl.get(&st.id).copied().unwrap_or(0);
+            new_balance += p;
+            ds.push((i128::try_from(sb).unwrap_or(i128::MAX) + p).max(0) as u128);
+        }
+        let kept = gb
+            - g.strategies
+                .iter()
+                .map(|st| share_of(gb, st.share))
+                .sum::<u128>();
+        groups.push((ds, kept));
+    }
+    let Ok(new_balance) = u128::try_from(new_balance) else {
+        return Ok(Rebalanced {
+            tree: current.clone(),
+            balance: 0,
+        });
+    };
+    if new_balance == 0 {
+        return Ok(Rebalanced {
+            tree: current.clone(),
+            balance: 0,
+        });
+    }
+    let nearest = |part: u128, whole: u128| -> Bp {
+        if whole == 0 {
+            return 0;
+        }
+        ((part * u128::from(FULL) * 2 + whole) / (2 * whole)).min(u128::from(FULL)) as Bp
+    };
+    let group_dollars: Vec<u128> = groups
+        .iter()
+        .map(|(ds, kept)| ds.iter().sum::<u128>() + kept)
+        .collect();
+    let wanted: Vec<Bp> = group_dollars
+        .iter()
+        .map(|d| nearest(*d, new_balance))
+        .collect();
+    let limits: Vec<(Bp, Bp)> = targets
+        .groups()
+        .iter()
+        .map(|t| limits_around(t.share, bounds))
+        .collect();
+    let group_shares = fit(&wanted, &limits);
+    let mut out = Vec::new();
+    for (gi, g) in current.groups().iter().enumerate() {
+        let (ds, _) = &groups[gi];
+        let wanted: Vec<Bp> = ds.iter().map(|d| nearest(*d, group_dollars[gi])).collect();
+        let limits: Vec<(Bp, Bp)> = targets.groups()[gi]
+            .strategies
+            .iter()
+            .map(|t| limits_around(t.share, bounds))
+            .collect();
+        let shares = fit(&wanted, &limits);
+        out.push(Group {
+            id: g.id.clone(),
+            share: group_shares[gi],
+            loss: g.loss,
+            strategies: g
+                .strategies
+                .iter()
+                .zip(shares)
+                .map(|(st, share)| Strategy {
+                    id: st.id.clone(),
+                    share,
+                })
+                .collect(),
+        });
+    }
+    Ok(Rebalanced {
+        tree: Tree::new(out)?,
+        balance: new_balance,
+    })
 }
 
 #[cfg(test)]

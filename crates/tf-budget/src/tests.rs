@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use tf_synth::SplitMix64;
 
 use crate::*;
@@ -729,4 +731,435 @@ fn a_diff_says_what_changed_in_the_order_the_screen_shows_it() {
             Change::GroupAdded("fx".into()),
         ]
     );
+}
+
+// ------------------------------------------------------------- rebalance
+
+fn pnl(items: &[(&str, i128)]) -> BTreeMap<String, i128> {
+    items
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), *v * D as i128))
+        .collect()
+}
+
+fn dollars(t: &Tree, balance: u128, id: &str) -> u128 {
+    t.strategy_budget(balance, id).unwrap()
+}
+
+#[test]
+fn with_no_profit_and_no_loss_nothing_moves_however_many_times_it_is_run() {
+    let t = mock();
+    let r = rebalance(&t, &t, BAL, &BTreeMap::new(), Bounds::default()).unwrap();
+    assert_eq!((&r.tree, r.balance), (&t, BAL));
+    let mut rng = SplitMix64::new(5);
+    for _ in 0..300 {
+        let (t, _, balance) = random_tree(&mut rng);
+        let r = rebalance(&t, &t, balance, &BTreeMap::new(), Bounds::default()).unwrap();
+        assert_eq!(
+            (&r.tree, r.balance),
+            (&t, balance),
+            "no drift from rounding"
+        );
+        let again = rebalance(&r.tree, &t, r.balance, &BTreeMap::new(), Bounds::default()).unwrap();
+        assert_eq!(again, r);
+    }
+}
+
+#[test]
+fn a_winner_takes_its_profit_into_its_own_budget_and_the_others_keep_theirs() {
+    let t = mock();
+    let r = rebalance(&t, &t, BAL, &pnl(&[("ml", 600)]), Bounds::default()).unwrap();
+    assert_eq!(
+        r.balance,
+        100_600 * D,
+        "the balance is the old one plus the profit"
+    );
+    let tol = 2 * r.balance / 10_000; // a share is whole basis points of its parent
+    let near = |got: u128, want: u128| got.abs_diff(want) <= tol;
+    assert!(
+        near(dollars(&r.tree, r.balance, "ml"), 8_100 * D),
+        "7,500 + 600"
+    );
+    for (id, want) in [
+        ("ms", 8_750),
+        ("tr", 6_250),
+        ("sw", 17_500),
+        ("nw", 17_500),
+        ("rot", 28_000),
+        ("core", 12_000),
+    ] {
+        assert!(
+            near(dollars(&r.tree, r.balance, id), want * D),
+            "{id} keeps its dollars: {}",
+            dollars(&r.tree, r.balance, id)
+        );
+    }
+    // Day trading's unassigned $2,500 is still $2,500.
+    let day = r.tree.group_budget(r.balance, "day").unwrap();
+    let assigned: u128 = ["ml", "ms", "tr"]
+        .iter()
+        .map(|s| dollars(&r.tree, r.balance, s))
+        .sum();
+    assert!(near(day - assigned, 2_500 * D));
+    // The group's share moved up, and so did the strategy's within it.
+    assert!(r.tree.group("day").unwrap().share > 2500);
+    assert!(r.tree.strategy("ml").unwrap().share > 3000);
+    assert_eq!(r.tree.group("etf").unwrap().loss, LossLimits::default());
+}
+
+#[test]
+fn a_loser_gives_up_its_loss_and_cannot_go_below_nothing() {
+    let t = mock();
+    let r = rebalance(&t, &t, BAL, &pnl(&[("sw", -700)]), Bounds::default()).unwrap();
+    assert_eq!(r.balance, 99_300 * D);
+    let tol = 2 * r.balance / 10_000;
+    assert!(
+        dollars(&r.tree, r.balance, "sw").abs_diff(16_800 * D) <= tol,
+        "17,500 - 700"
+    );
+    assert!(dollars(&r.tree, r.balance, "nw").abs_diff(17_500 * D) <= tol);
+    // A loss bigger than its budget would take it below zero: it ends at the floor of its bounds,
+    // and the balance still falls by the whole loss.
+    let big = rebalance(&t, &t, BAL, &pnl(&[("ml", -9_000)]), Bounds::default()).unwrap();
+    assert_eq!(big.balance, 91_000 * D);
+    assert_eq!(
+        big.tree.strategy("ml").unwrap().share,
+        1500,
+        "half of its 30% target"
+    );
+}
+
+#[test]
+fn the_bounds_stop_a_node_running_away_from_its_target_in_either_direction() {
+    let t = mock();
+    // ml and tr each make a fortune: left alone they would take most of the group.
+    let r = rebalance(
+        &t,
+        &t,
+        BAL,
+        &pnl(&[("ml", 90_000), ("tr", 80_000)]),
+        Bounds::default(),
+    )
+    .unwrap();
+    let day = r.tree.group("day").unwrap();
+    let shares: Vec<Bp> = day.strategies.iter().map(|s| s.share).collect();
+    assert_eq!(
+        shares.iter().sum::<u32>(),
+        FULL,
+        "the clamped shares are trimmed to fit: {shares:?}"
+    );
+    assert_eq!(
+        shares[1], 1750,
+        "ms was clamped up to half its 35% target and stays there"
+    );
+    // The two winners are trimmed evenly from their ceilings (60% and 50%).
+    assert!(shares[0] <= 6000 && shares[2] <= 5000);
+    assert!(
+        (i64::from(shares[0]) - 1500 - (i64::from(shares[2]) - 1250)).abs() <= 1,
+        "{shares:?}"
+    );
+    // The group itself is held to twice its 25% target.
+    assert!(day.share <= 5000, "{}", day.share);
+    // Every share is within bounds of its target, whatever happened.
+    let (lo, hi) = (
+        |t: Bp| (t * 5000).div_ceil(FULL),
+        |t: Bp| (t * 20_000 / FULL).min(FULL),
+    );
+    for (g, tg) in r.tree.groups().iter().zip(t.groups()) {
+        assert!(g.share >= lo(tg.share) && g.share <= hi(tg.share));
+        for (s, ts) in g.strategies.iter().zip(&tg.strategies) {
+            assert!(
+                s.share >= lo(ts.share) && s.share <= hi(ts.share),
+                "{}: {}",
+                s.id,
+                s.share
+            );
+        }
+    }
+    assert!(r.tree.unassigned() <= FULL);
+}
+
+#[test]
+fn a_node_with_no_target_share_stays_at_none_and_a_wiped_out_balance_is_reported_as_zero() {
+    let t = Tree::new(vec![
+        g("a", 5000, vec![s("x", 0), s("y", 10_000)]),
+        g("b", 5000, vec![s("z", 10_000)]),
+    ])
+    .unwrap();
+    let r = rebalance(&t, &t, BAL, &pnl(&[("y", 1_000)]), Bounds::default()).unwrap();
+    assert_eq!(
+        r.tree.strategy("x").unwrap().share,
+        0,
+        "it cannot grow from nothing"
+    );
+    let wiped = rebalance(&t, &t, BAL, &pnl(&[("y", -200_000)]), Bounds::default()).unwrap();
+    assert_eq!(
+        (wiped.balance, &wiped.tree),
+        (0, &t),
+        "nothing to divide: the tree is left as it was"
+    );
+    let exactly = rebalance(
+        &t,
+        &t,
+        BAL,
+        &pnl(&[("y", -50_000), ("z", -50_000)]),
+        Bounds::default(),
+    )
+    .unwrap();
+    assert_eq!(exactly.balance, 0);
+    assert_eq!(
+        exactly.tree, t,
+        "nothing to divide: the tree is left as it was"
+    );
+}
+
+#[test]
+fn a_rebalance_needs_matching_trees_and_sensible_bounds() {
+    let t = mock();
+    let other = Tree::new(vec![g("day", 2500, vec![s("ml", 3000)])]).unwrap();
+    assert_eq!(
+        rebalance(&t, &other, BAL, &BTreeMap::new(), Bounds::default()).unwrap_err(),
+        BudgetError::ShapeMismatch
+    );
+    let renamed = Tree::new(
+        t.groups()
+            .iter()
+            .map(|gr| Group {
+                id: format!("{}x", gr.id),
+                ..gr.clone()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(
+        rebalance(&t, &renamed, BAL, &BTreeMap::new(), Bounds::default()).unwrap_err(),
+        BudgetError::ShapeMismatch
+    );
+    for (floor, ceiling) in [(0, 20_000), (10_001, 20_000), (5_000, 9_999)] {
+        assert_eq!(
+            Bounds::new(floor, ceiling).unwrap_err(),
+            BudgetError::BadBounds { floor, ceiling }
+        );
+        assert!(rebalance(&t, &t, BAL, &BTreeMap::new(), Bounds { floor, ceiling }).is_err());
+    }
+    assert_eq!(
+        Bounds::new(10_000, 10_000).unwrap(),
+        Bounds {
+            floor: 10_000,
+            ceiling: 10_000
+        }
+    );
+    // Bounds of exactly the target pin every share: profit changes the balance and nothing else.
+    let pinned = rebalance(
+        &t,
+        &t,
+        BAL,
+        &pnl(&[("ml", 5_000), ("rot", -3_000)]),
+        Bounds::new(FULL, FULL).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pinned.tree, t);
+    assert_eq!(pinned.balance, 102_000 * D);
+}
+
+#[test]
+fn across_random_trees_profits_and_bounds_a_rebalance_always_gives_a_valid_bounded_tree() {
+    let mut rng = SplitMix64::new(99);
+    let (mut clamped, mut moved) = (0, 0);
+    for _ in 0..500 {
+        let (t, _, balance) = random_tree(&mut rng);
+        let bounds = Bounds::new(
+            1 + rng.below(u64::from(FULL)) as Bp,
+            FULL + rng.below(30_000) as Bp,
+        )
+        .unwrap();
+        let mut p = BTreeMap::new();
+        for gr in t.groups() {
+            for st in &gr.strategies {
+                let scale = i128::try_from(balance / 4).unwrap().max(1);
+                p.insert(
+                    st.id.clone(),
+                    (i128::from(rng.below(2 * scale as u64 + 1) as i64) - scale)
+                        * i128::from(rng.below(3) as i64),
+                );
+            }
+        }
+        let r = rebalance(&t, &t, balance, &p, bounds).unwrap();
+        let want = (i128::try_from(balance).unwrap() + p.values().sum::<i128>()).max(0) as u128;
+        assert_eq!(r.balance, want, "the balance is the old plus every profit");
+        let top: u128 = r
+            .tree
+            .groups()
+            .iter()
+            .map(|gr| r.tree.group_budget(r.balance, &gr.id).unwrap())
+            .sum();
+        assert!(top <= r.balance);
+        for (gr, tg) in r.tree.groups().iter().zip(t.groups()) {
+            let (lo, hi) = (
+                (u64::from(tg.share) * u64::from(bounds.floor)).div_ceil(u64::from(FULL)) as Bp,
+                ((u64::from(tg.share) * u64::from(bounds.ceiling)) / u64::from(FULL))
+                    .min(u64::from(FULL)) as Bp,
+            );
+            if r.balance > 0 {
+                assert!(
+                    gr.share >= lo && gr.share <= hi,
+                    "group {} {} not in {lo}..={hi}",
+                    gr.id,
+                    gr.share
+                );
+            }
+            clamped += usize::from(gr.share == lo || gr.share == hi);
+            moved += usize::from(gr.share != tg.share);
+            let inner: u128 = gr
+                .strategies
+                .iter()
+                .map(|x| r.tree.strategy_budget(r.balance, &x.id).unwrap())
+                .sum();
+            assert!(inner <= r.tree.group_budget(r.balance, &gr.id).unwrap());
+        }
+        // Deterministic.
+        assert_eq!(rebalance(&t, &t, balance, &p, bounds).unwrap(), r);
+    }
+    assert!(
+        clamped > 50 && moved > 100,
+        "clamped {clamped}, moved {moved}"
+    );
+}
+
+#[test]
+fn when_clamped_siblings_tie_the_trimming_starts_with_the_lowest_index() {
+    // a and b make the same fortune and c is clamped up to half its target (1,501), so the three
+    // overfill the whole by an odd number of basis points. The excess is trimmed one at a time from
+    // whichever is furthest above its floor, the first on a tie: a gives up the odd one.
+    let t = Tree::new(vec![g(
+        "g",
+        10_000,
+        vec![s("a", 3000), s("b", 3000), s("c", 3001)],
+    )])
+    .unwrap();
+    let r = rebalance(
+        &t,
+        &t,
+        BAL,
+        &pnl(&[("a", 900_000), ("b", 900_000)]),
+        Bounds::default(),
+    )
+    .unwrap();
+    let shares: Vec<Bp> = r
+        .tree
+        .group("g")
+        .unwrap()
+        .strategies
+        .iter()
+        .map(|x| x.share)
+        .collect();
+    assert_eq!(shares[2], 1501, "{shares:?}");
+    assert_eq!(shares.iter().sum::<u32>(), FULL, "{shares:?}");
+    assert_eq!(
+        shares[0] + 1,
+        shares[1],
+        "a gave up the odd basis point: {shares:?}"
+    );
+}
+
+#[test]
+fn bounds_are_measured_from_the_targets_not_from_where_the_last_rebalance_left_a_node() {
+    let t = mock(); // the targets: ml 30% of Day trading
+    let first = rebalance(&t, &t, BAL, &pnl(&[("ml", 90_000)]), Bounds::default()).unwrap();
+    assert_eq!(
+        first.tree.strategy("ml").unwrap().share,
+        6000,
+        "held to twice its target"
+    );
+    // Another fortune: still held to twice the *target*, though it is already at 60%.
+    let second = rebalance(
+        &first.tree,
+        &t,
+        first.balance,
+        &pnl(&[("ml", 90_000)]),
+        Bounds::default(),
+    )
+    .unwrap();
+    assert_eq!(second.tree.strategy("ml").unwrap().share, 6000);
+    // A big loss brings it back down, and no further than half its target.
+    let back = rebalance(
+        &second.tree,
+        &t,
+        second.balance,
+        &pnl(&[("ml", -190_000)]),
+        Bounds::default(),
+    )
+    .unwrap();
+    assert_eq!(back.tree.strategy("ml").unwrap().share, 1500);
+    // The same holds for a whole group: here g1 is held to twice its 30% target, round after round
+    // (the other group sits at its floor and the rest is unassigned, so nothing else caps it).
+    let u = Tree::new(vec![
+        g("g1", 3000, vec![s("x", 10_000)]),
+        g("g2", 3000, vec![s("y", 10_000)]),
+    ])
+    .unwrap();
+    let g1 = rebalance(&u, &u, BAL, &pnl(&[("x", 900_000)]), Bounds::default()).unwrap();
+    assert_eq!(g1.tree.group("g1").unwrap().share, 6000);
+    let g2 = rebalance(
+        &g1.tree,
+        &u,
+        g1.balance,
+        &pnl(&[("x", 900_000)]),
+        Bounds::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        g2.tree.group("g1").unwrap().share,
+        6000,
+        "not twice where it already stood"
+    );
+    // With no profit it stays where it was, inside its bounds.
+    let still = rebalance(
+        &first.tree,
+        &t,
+        first.balance,
+        &BTreeMap::new(),
+        Bounds::default(),
+    )
+    .unwrap();
+    assert_eq!(still.tree, first.tree);
+}
+
+#[test]
+fn a_rebalance_keeps_each_groups_loss_limits_and_leaves_a_zeroed_balance_alone() {
+    let custom = mock()
+        .with_loss(
+            "etf",
+            LossLimits {
+                soft: 100,
+                hard: 200,
+            },
+        )
+        .unwrap();
+    let r = rebalance(
+        &custom,
+        &custom,
+        BAL,
+        &pnl(&[("rot", 1_000)]),
+        Bounds::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        r.tree.group("etf").unwrap().loss,
+        LossLimits {
+            soft: 100,
+            hard: 200
+        }
+    );
+    assert_eq!(r.tree.group("day").unwrap().loss, LossLimits::default());
+    // A wiped-out balance gives back the same tree, not a tree of zeros.
+    let wiped = rebalance(
+        &custom,
+        &custom,
+        BAL,
+        &pnl(&[("rot", -1_000_000)]),
+        Bounds::default(),
+    )
+    .unwrap();
+    assert_eq!((wiped.balance, wiped.tree), (0, custom));
 }

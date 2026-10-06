@@ -13,6 +13,9 @@
 //! kill <ts>
 //! newday <ts>
 //! losscheck <ts>
+//! schedule <ts> off
+//! schedule <ts> <group>:<share>:<soft>:<hard>/<id>:<share>/...;...
+//! rebalance <ts> <floor> <ceiling> <balance|->
 //! budgets <ts> off
 //! budgets <ts> <balance> <number>=<id>,... <group>:<share>:<soft>:<hard>/<id>:<share>/...;...
 //! ```
@@ -21,7 +24,7 @@
 //! `collar:<reference>:<permille>`, `protect` `-` or `stop:<trigger>:<limit|->:<target|->`,
 //! `tif` day|ioc, and `outcome` `ok:<order>`, `rej:<reason>` or `invalid:<why>`.
 
-use tf_budget::{Group, LossLimits, Strategy as BudgetStrategy, Tree};
+use tf_budget::{Bounds, Group, LossLimits, Strategy as BudgetStrategy, Tree};
 use tf_core::{InstrumentId, Nanos, Px};
 use tf_risk::Budgets;
 use tf_strategy::intent::{
@@ -69,6 +72,20 @@ pub enum Input {
     /// checks are written: a check that crosses nothing changes no state).
     LossCheck {
         ts: Nanos,
+    },
+    /// A person's pending change to the budget tree: it takes effect at the next rebalance, not before
+    /// (`None` withdraws it).
+    Schedule {
+        tree: Option<Tree>,
+        ts: Nanos,
+    },
+    /// The end-of-session rebalance: applies the scheduled change if there is one, otherwise moves each
+    /// strategy's realised profit since the last rebalance into its own budget within `bounds`.
+    /// `balance` is the account's real balance if the broker reported one, else it is computed.
+    Rebalance {
+        ts: Nanos,
+        bounds: Bounds,
+        balance: Option<u128>,
     },
     /// The budgets the gateway enforces from here on (`None`: none).
     Budgets {
@@ -310,10 +327,8 @@ fn parse_intent(t: &[&str]) -> Result<Intent, CodecError> {
     })
 }
 
-fn budgets_text(b: &Budgets) -> String {
-    let ids: Vec<String> = b.ids().iter().map(|(n, id)| format!("{n}={id}")).collect();
-    let groups: Vec<String> = b
-        .tree()
+fn tree_token(tree: &Tree) -> String {
+    let groups: Vec<String> = tree
         .groups()
         .iter()
         .map(|g| {
@@ -324,6 +339,15 @@ fn budgets_text(b: &Budgets) -> String {
             t
         })
         .collect();
+    if groups.is_empty() {
+        "-".to_owned()
+    } else {
+        groups.join(";")
+    }
+}
+
+fn budgets_text(b: &Budgets) -> String {
+    let ids: Vec<String> = b.ids().iter().map(|(n, id)| format!("{n}={id}")).collect();
     format!(
         "{} {} {}",
         b.balance(),
@@ -332,15 +356,11 @@ fn budgets_text(b: &Budgets) -> String {
         } else {
             ids.join(",")
         },
-        if groups.is_empty() {
-            "-".to_owned()
-        } else {
-            groups.join(";")
-        }
+        tree_token(b.tree())
     )
 }
 
-fn parse_budgets(balance: &str, ids: &str, tree: &str) -> Result<Budgets, CodecError> {
+fn parse_tree(tree: &str) -> Result<Tree, CodecError> {
     let mut groups = Vec::new();
     if tree != "-" {
         for g in tree.split(';') {
@@ -372,7 +392,11 @@ fn parse_budgets(balance: &str, ids: &str, tree: &str) -> Result<Budgets, CodecE
             });
         }
     }
-    let tree = Tree::new(groups).map_err(|e| CodecError(format!("budgets: {e}")))?;
+    Tree::new(groups).map_err(|e| CodecError(format!("budgets: {e}")))
+}
+
+fn parse_budgets(balance: &str, ids: &str, tree: &str) -> Result<Budgets, CodecError> {
+    let tree = parse_tree(tree)?;
     let mut pairs = Vec::new();
     if ids != "-" {
         for kv in ids.split(',') {
@@ -434,6 +458,23 @@ impl Record {
                 (Input::Kill { ts }, None) => format!("kill {ts}"),
                 (Input::NewDay { ts }, None) => format!("newday {ts}"),
                 (Input::LossCheck { ts }, None) => format!("losscheck {ts}"),
+                (Input::Schedule { tree: None, ts }, None) => format!("schedule {ts} off"),
+                (Input::Schedule { tree: Some(t), ts }, None) => {
+                    format!("schedule {ts} {}", tree_token(t))
+                }
+                (
+                    Input::Rebalance {
+                        ts,
+                        bounds,
+                        balance,
+                    },
+                    None,
+                ) => format!(
+                    "rebalance {ts} {} {} {}",
+                    bounds.floor,
+                    bounds.ceiling,
+                    balance.map_or("-".to_owned(), |b| b.to_string())
+                ),
                 (Input::Budgets { budgets: None, ts }, None) => format!("budgets {ts} off"),
                 (
                     Input::Budgets {
@@ -520,6 +561,24 @@ impl Record {
             }),
             ("newday", [ts]) => ev(Input::NewDay {
                 ts: num(ts, "time")?,
+            }),
+            ("schedule", [ts, "off"]) => ev(Input::Schedule {
+                tree: None,
+                ts: num(ts, "time")?,
+            }),
+            ("schedule", [ts, tree]) => ev(Input::Schedule {
+                tree: Some(parse_tree(tree)?),
+                ts: num(ts, "time")?,
+            }),
+            ("rebalance", [ts, floor, ceiling, balance]) => ev(Input::Rebalance {
+                ts: num(ts, "time")?,
+                bounds: Bounds::new(num(floor, "floor")?, num(ceiling, "ceiling")?)
+                    .map_err(|e| CodecError(format!("rebalance: {e}")))?,
+                balance: if *balance == "-" {
+                    None
+                } else {
+                    Some(num(balance, "balance")?)
+                },
             }),
             ("losscheck", [ts]) => ev(Input::LossCheck {
                 ts: num(ts, "time")?,

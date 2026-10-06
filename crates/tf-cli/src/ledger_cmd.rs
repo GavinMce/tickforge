@@ -109,6 +109,13 @@ pub(crate) fn report(args: &[String]) -> Result<String, String> {
             "limits   strategy {s} crossed its soft loss limit: stopped opening"
         );
     }
+    if let Some(tree) = j.scheduled() {
+        let _ = writeln!(
+            out,
+            "budgets  a change is scheduled for the next rebalance (tree {:016x})",
+            tree.fingerprint()
+        );
+    }
     match &snap.budgets {
         None => {
             let _ = writeln!(out, "budgets  none in force");
@@ -356,6 +363,54 @@ mod tests {
             !text.contains("soft loss limit"),
             "listed once, at its worst: {text}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scheduled_budget_change_is_shown_until_the_rebalance_applies_it() {
+        use tf_budget::{Bounds, Group, LossLimits as L, Strategy as S, Tree};
+        let dir = scratch("scheduled");
+        make(&dir);
+        let d = dir.to_str().unwrap();
+        let tree = |a: u32, b: u32| {
+            Tree::new(vec![Group {
+                id: "g".into(),
+                share: 10_000,
+                loss: L::default(),
+                strategies: vec![
+                    S {
+                        id: "s".into(),
+                        share: a,
+                    },
+                    S {
+                        id: "t".into(),
+                        share: b,
+                    },
+                ],
+            }])
+            .unwrap()
+        };
+        let (mut j, _) = Journal::open_recorded(FileStore::open(&dir).unwrap()).unwrap();
+        let ids = [(1, "s".to_owned()), (2, "t".to_owned())];
+        j.set_budgets(
+            Some(tf_risk::Budgets::new(tree(5_000, 5_000), 1_000 * 1_000_000_000, ids).unwrap()),
+            9_000_000_000,
+        )
+        .unwrap();
+        j.schedule_budgets(Some(tree(8_000, 2_000)), 10_000_000_000)
+            .unwrap();
+        drop(j);
+        let text = report(&args(&["verify", d])).unwrap();
+        assert!(
+            text.contains("a change is scheduled for the next rebalance (tree "),
+            "{text}"
+        );
+        let (mut j, _) = Journal::open_recorded(FileStore::open(&dir).unwrap()).unwrap();
+        j.rebalance(11_000_000_000, Bounds::default(), None)
+            .unwrap();
+        drop(j);
+        let text = report(&args(&["verify", d])).unwrap();
+        assert!(!text.contains("a change is scheduled"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -6,6 +6,8 @@ use tf_strategy::intent::{Intent, IntentId, Pricing, Protective, Purpose, Side, 
 use tf_strategy::lifecycle::{Decision, OrderId, OrderState, RejectReason};
 use tf_synth::SplitMix64;
 
+use tf_budget::Bounds;
+
 use crate::codec::{Input, Record};
 use crate::journal::{Journal, JournalError};
 use crate::store::*;
@@ -685,6 +687,8 @@ fn same(a: &Journal<MemStore>, b: &Journal<MemStore>) {
     );
     assert_eq!(a.records(), b.records());
     assert_eq!(a.open_orders(), b.open_orders());
+    assert_eq!(a.targets(), b.targets());
+    assert_eq!(a.scheduled(), b.scheduled());
 }
 
 #[test]
@@ -1139,6 +1143,17 @@ fn random_day(
             }
             97 => {
                 let _ = j.new_day(now);
+                if with_budgets && rng.below(2) == 0 {
+                    // A person schedules a different split for the next rebalance.
+                    let (a, b) = (
+                        1_000 + rng.below(4_000) as u32,
+                        1_000 + rng.below(4_000) as u32,
+                    );
+                    let _ = j.schedule_budgets(Some(split(a, b, 10_000 - a - b)), now);
+                }
+            }
+            98 if with_budgets => {
+                let _ = j.rebalance(now, Bounds::default(), None);
             }
             _ => {
                 // Inputs that must be refused and change nothing.
@@ -1641,4 +1656,300 @@ fn a_loss_check_that_replays_differently_is_caught() {
     recs.retain(|r| !r.starts_with("losscheck") && !r.starts_with("mark"));
     let e = open_mem(recs, 1).err().unwrap();
     assert!(matches!(e, JournalError::Diverged { .. }), "{e}");
+}
+
+/// The one-group tree of `day_budgets` with the given shares for strategies 1, 2 and 3.
+fn split(a: u32, b: u32, c: u32) -> tf_budget::Tree {
+    use tf_budget::{Group, LossLimits, Strategy as S, Tree};
+    Tree::new(vec![Group {
+        id: "g".into(),
+        share: 10_000,
+        loss: LossLimits::default(),
+        strategies: vec![
+            S {
+                id: "s1".into(),
+                share: a,
+            },
+            S {
+                id: "s2".into(),
+                share: b,
+            },
+            S {
+                id: "s3".into(),
+                share: c,
+            },
+        ],
+    }])
+    .unwrap()
+}
+
+/// Strategy `n` buys 100 shares at $5 and sells them at `exit` dollars.
+fn round_trip(j: &mut Journal<MemStore>, strategy: u16, seq: u64, exit: i64) {
+    let mut i = buy(seq, 0, 100, 5 * P);
+    i.id.strategy = StrategyId(strategy);
+    let Decision::Accepted(o) = j.decide(&i, seq * SEC).unwrap() else {
+        panic!("{i:?}")
+    };
+    j.ack(o, seq * SEC).unwrap();
+    j.fill(o, 100, Px::from_raw(5 * P), seq * SEC).unwrap();
+    let mut c = sell(seq + 1, 0, 100, exit * P);
+    c.id.strategy = StrategyId(strategy);
+    let Decision::Accepted(o) = j.decide(&c, (seq + 1) * SEC).unwrap() else {
+        panic!("{c:?}")
+    };
+    j.ack(o, (seq + 1) * SEC).unwrap();
+    j.fill(o, 100, Px::from_raw(exit * P), (seq + 1) * SEC)
+        .unwrap();
+}
+
+#[test]
+fn schedule_and_rebalance_records_are_readable_and_refuse_nonsense() {
+    let t = split(3_000, 3_000, 4_000);
+    let ev = |input| Record::Event {
+        input,
+        outcome: None,
+    };
+    for r in [
+        ev(Input::Schedule {
+            tree: Some(t.clone()),
+            ts: 5,
+        }),
+        ev(Input::Schedule { tree: None, ts: 5 }),
+        ev(Input::Schedule {
+            tree: Some(tf_budget::Tree::default()),
+            ts: 5,
+        }),
+        ev(Input::Rebalance {
+            ts: 7,
+            bounds: Bounds::new(5_000, 20_000).unwrap(),
+            balance: None,
+        }),
+        ev(Input::Rebalance {
+            ts: 7,
+            bounds: Bounds::new(10_000, 10_000).unwrap(),
+            balance: Some(123),
+        }),
+    ] {
+        assert_eq!(rt(&r), r);
+    }
+    assert_eq!(
+        ev(Input::Schedule {
+            tree: Some(t),
+            ts: 5
+        })
+        .encode()
+        .unwrap(),
+        "schedule 5 g:10000:300:600/s1:3000/s2:3000/s3:4000"
+    );
+    assert_eq!(
+        ev(Input::Rebalance {
+            ts: 7,
+            bounds: Bounds::default(),
+            balance: None
+        })
+        .encode()
+        .unwrap(),
+        "rebalance 7 5000 20000 -"
+    );
+    for (bad, want) in [
+        ("rebalance 7 0 20000 -", "rebalance: rebalance bounds need"),
+        ("rebalance 7 5000 9999 -", "rebalance bounds need"),
+        ("rebalance 7 5000 20000", "not a record"),
+        ("rebalance 7 5000 20000 lots", "not a number"),
+        ("schedule 5 g:10000:300/s1:10000", "a budget group is"),
+        ("schedule 5 g:10001:300:600", "more than the whole"),
+        ("schedule x off", "not a number"),
+    ] {
+        let e = Record::decode(bad).unwrap_err().0;
+        assert!(e.contains(want), "wanted `{want}` in `{e}` for `{bad}`");
+    }
+}
+
+#[test]
+fn a_scheduled_change_waits_for_the_rebalance_and_profit_moves_into_the_strategy_that_made_it() {
+    let mut j = fresh(1);
+    let balance = 30_000 * P as u128;
+    let b = tf_risk::Budgets::new(
+        split(3_333, 3_333, 3_334),
+        balance,
+        [
+            (1, "s1".to_owned()),
+            (2, "s2".to_owned()),
+            (3, "s3".to_owned()),
+        ],
+    )
+    .unwrap();
+    j.set_budgets(Some(b), SEC).unwrap();
+    assert_eq!(j.targets().unwrap(), &split(3_333, 3_333, 3_334));
+    assert!(j.scheduled().is_none());
+    round_trip(&mut j, 1, 10, 7); // strategy 1: +$200
+    round_trip(&mut j, 2, 20, 4); // strategy 2: -$100
+    same(&j, &recover(&j, 1));
+    // A scheduled change is held, not applied.
+    let want = split(5_000, 2_000, 3_000);
+    j.schedule_budgets(Some(want.clone()), 30 * SEC).unwrap();
+    assert_eq!(j.scheduled(), Some(&want));
+    assert_eq!(
+        j.gateway().budgets().unwrap().tree(),
+        &split(3_333, 3_333, 3_334),
+        "still the old split"
+    );
+    same(&j, &recover(&j, 1));
+    // Withdrawn, then the rebalance is the profit one.
+    j.schedule_budgets(None, 31 * SEC).unwrap();
+    assert!(j.scheduled().is_none());
+    j.rebalance(40 * SEC, Bounds::default(), None).unwrap();
+    let after = j.gateway().budgets().unwrap();
+    assert_eq!(
+        after.balance(),
+        30_100 * P as u128,
+        "the old balance plus the net profit"
+    );
+    let (d1, d2, d3) = (
+        after.strategy_budget(1).unwrap(),
+        after.strategy_budget(2).unwrap(),
+        after.strategy_budget(3).unwrap(),
+    );
+    let tol = 3 * after.balance() / 10_000;
+    assert!(d1.abs_diff(10_199 * P as u128) <= tol, "9,999 + 200: {d1}");
+    assert!(
+        d1 > 9_999 * P as u128 && d2 < 9_999 * P as u128,
+        "the winner grew and the loser shrank: {d1} {d2}"
+    );
+    assert!(
+        d3.abs_diff(10_002 * P as u128) <= tol,
+        "an idle strategy keeps its dollars: {d3}"
+    );
+    assert_eq!(
+        j.targets().unwrap(),
+        &split(3_333, 3_333, 3_334),
+        "the targets are what a person set"
+    );
+    same(&j, &recover(&j, 1));
+    // Nothing new has been made since: another rebalance changes nothing.
+    let before = j.gateway().budgets().unwrap().clone();
+    j.rebalance(50 * SEC, Bounds::default(), None).unwrap();
+    assert_eq!(j.gateway().budgets().unwrap(), &before);
+    // Now the scheduled split goes in at the next rebalance, and becomes the targets.
+    j.schedule_budgets(Some(want.clone()), 60 * SEC).unwrap();
+    round_trip(&mut j, 3, 70, 8); // strategy 3: +$300
+    j.rebalance(80 * SEC, Bounds::default(), None).unwrap();
+    assert_eq!(j.gateway().budgets().unwrap().tree(), &want);
+    assert_eq!(
+        j.gateway().budgets().unwrap().balance(),
+        30_400 * P as u128,
+        "the profit still changes the balance"
+    );
+    assert_eq!(j.targets().unwrap(), &want);
+    assert!(j.scheduled().is_none());
+    same(&j, &recover(&j, 1));
+    // The broker's real balance wins when given.
+    j.rebalance(90 * SEC, Bounds::default(), Some(31_000 * P as u128))
+        .unwrap();
+    assert_eq!(j.gateway().budgets().unwrap().balance(), 31_000 * P as u128);
+    same(&j, &recover(&j, 1));
+}
+
+#[test]
+fn budget_changes_that_cannot_be_applied_are_refused_and_write_nothing() {
+    let mut j = fresh(1);
+    let n = j.records();
+    // No budgets in force.
+    assert!(matches!(
+        j.schedule_budgets(Some(split(3_333, 3_333, 3_334)), SEC),
+        Err(JournalError::Budgets(_))
+    ));
+    assert!(matches!(
+        j.rebalance(SEC, Bounds::default(), None),
+        Err(JournalError::Budgets(_))
+    ));
+    assert_eq!(j.records(), n);
+    j.schedule_budgets(None, SEC).unwrap(); // withdrawing nothing is fine
+    j.set_budgets(Some(day_budgets(30_000 * P as u128)), 2 * SEC)
+        .unwrap();
+    let n = j.records();
+    // A schedule that drops a strategy that is in force.
+    use tf_budget::{Group, LossLimits, Strategy as S, Tree};
+    let drops = Tree::new(vec![Group {
+        id: "g".into(),
+        share: 10_000,
+        loss: LossLimits::default(),
+        strategies: vec![
+            S {
+                id: "s1".into(),
+                share: 5_000,
+            },
+            S {
+                id: "s2".into(),
+                share: 5_000,
+            },
+        ],
+    }])
+    .unwrap();
+    let e = j.schedule_budgets(Some(drops), 3 * SEC).unwrap_err();
+    assert!(e.to_string().contains("leave out strategy `s3`"), "{e}");
+    assert_eq!(j.records(), n);
+    assert!(j.scheduled().is_none());
+}
+
+#[test]
+fn setting_budgets_again_clears_what_was_scheduled_and_counts_profit_from_there() {
+    let mut j = fresh(1);
+    j.set_budgets(Some(day_budgets(30_000 * P as u128)), SEC)
+        .unwrap();
+    round_trip(&mut j, 1, 10, 7);
+    j.schedule_budgets(Some(split(2_000, 4_000, 4_000)), 20 * SEC)
+        .unwrap();
+    j.set_budgets(Some(day_budgets(31_000 * P as u128)), 30 * SEC)
+        .unwrap();
+    assert!(j.scheduled().is_none());
+    let before = j.gateway().budgets().unwrap().clone();
+    j.rebalance(40 * SEC, Bounds::default(), None).unwrap();
+    assert_eq!(
+        j.gateway().budgets().unwrap(),
+        &before,
+        "the earlier profit was already counted when budgets were set"
+    );
+    same(&j, &recover(&j, 1));
+}
+
+#[test]
+fn rebalancing_keeps_shares_near_the_targets_a_person_set_not_near_where_it_last_left_them() {
+    let mut j = fresh(1);
+    let ids = [
+        (1, "s1".to_owned()),
+        (2, "s2".to_owned()),
+        (3, "s3".to_owned()),
+    ];
+    let b = tf_risk::Budgets::new(split(2_000, 2_000, 2_000), 30_000 * P as u128, ids).unwrap();
+    j.set_budgets(Some(b), SEC).unwrap();
+    // Strategy 1 makes a fortune, twice (each trip: 100 shares bought at $5, sold at $300).
+    round_trip(&mut j, 1, 10, 300);
+    j.rebalance(20 * SEC, Bounds::default(), None).unwrap();
+    assert_eq!(
+        j.gateway()
+            .budgets()
+            .unwrap()
+            .tree()
+            .strategy("s1")
+            .unwrap()
+            .share,
+        4_000,
+        "twice its 20% target"
+    );
+    round_trip(&mut j, 1, 30, 300);
+    j.rebalance(40 * SEC, Bounds::default(), None).unwrap();
+    assert_eq!(
+        j.gateway()
+            .budgets()
+            .unwrap()
+            .tree()
+            .strategy("s1")
+            .unwrap()
+            .share,
+        4_000,
+        "still twice the target, not twice where it stood"
+    );
+    assert_eq!(j.targets().unwrap(), &split(2_000, 2_000, 2_000));
+    same(&j, &recover(&j, 1));
 }

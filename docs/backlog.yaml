@@ -1158,11 +1158,32 @@ epics:
       - id: E18-S01
         jira: TIC-140
         title: "Universe spec: declarative filter with static pre-market and dynamic top-K layers"
-        status: todo
+        status: done
+        evidence: >
+          New crate tf-universe (ADR 0041) and `tf universe show|members|diff`. A Spec has a text form
+          (`universe v1`, `param`, one `static` line, one `dynamic top N by F desc|asc keep M every S
+          where ...`), a canonical render (parameters by name, conditions sorted, numbers in canonical
+          form) and an FNV-1a fingerprint that does not change with spelling or order. Thresholds may be
+          @params; a param must be declared, used, and used as one kind of value. The static layer is
+          judged from a reference Snapshot (CSV with `# as_of DATE`; an absent column makes a spec that
+          uses it refuse to run, an empty cell fails the condition) into a Selection (`members v1`: as_of,
+          spec and snapshot fingerprints, resolved params, sorted symbols) that parses back and rejects
+          damage. The dynamic Selector ranks the static members by gap, volume ratio, dollar volume,
+          range or trades read from Tier 0, enters at rank <= top, stays until rank > keep, ties by
+          instrument id, re-ranking on event time. diff lists changed parameters and conditions and, with
+          a snapshot, the symbols admitted and dropped, flagging a universe that widens. 11 library tests
+          and 1 CLI test; mutation-checked (14 mutants of the comparisons, flag handling, `not in`,
+          widening, column refusal, hysteresis, schedule, tie order, gap and dollar-volume arithmetic,
+          keep-below-top, param kind, date format and member order: all killed after one test was added).
+          Px::parse and Px::to_decimal (exact decimal text, no floats) now live in tf-core and tf-alpaca
+          uses them. Narrowed: the review path is `diff` with its effect on a snapshot, not a backtest
+          gate (no evidence a gate would add beyond the rule layer's, and no backtest of a universe
+          exists yet); the volume z-score ranking is not built (volume ratio, gap, dollar volume, range
+          and trades are); storing the Selection with a run is the host's job (E18-S05).
         ac:
-          - A universe is data with a canonical text form, a fingerprint, @params, a diff and a review path like the rule layer (ADR 0026/0029)
-          - A static layer (price band, average dollar volume, ATR, exchange, ETF exclusion, shortable) is evaluated pre-market from prior-day data only, and the resulting symbol list is stored with the run so a replay uses the same universe
-          - A dynamic layer ranks by a feature (relative volume, gap, volume z) to a top-K with hysteresis
+          - A universe is data with a canonical text form, a fingerprint, @params and a diff showing its effect on a snapshot
+          - A static layer (price band, average dollar volume, ATR, exchange, ETF exclusion, shortable) is evaluated pre-market from a prior-day snapshot only, and the resulting symbol list is a stored-able text carrying the spec and snapshot fingerprints and the as-of date
+          - A dynamic layer ranks by a feature (relative volume, gap, dollar volume, range, trades) to a top-K with hysteresis
       - id: E18-S02
         jira: TIC-141
         title: Reference data for the universe from our own history and Alpaca asset flags

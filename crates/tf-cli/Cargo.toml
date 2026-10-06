@@ -30,3 +30,4 @@ tf-budget.workspace = true
 tf-catalog.workspace = true
 tf-workspace.workspace = true
 tf-proposals.workspace = true
+tf-universe.workspace = true

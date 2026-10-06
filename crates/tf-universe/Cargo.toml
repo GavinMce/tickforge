@@ -1,0 +1,18 @@
+[package]
+name = "tf-universe"
+description = "Universe specs: which symbols a strategy watches, as data with a text form, a fingerprint and a diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+tf-engine.workspace = true
+
+[dev-dependencies]
+tf-synth.workspace = true

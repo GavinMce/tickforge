@@ -21,34 +21,9 @@ pub enum Round {
     Up,
 }
 
-/// Decimal text to a price, exactly. `None` for anything that is not a plain decimal, or that has
-/// digits beyond a billionth of a dollar that are not zero.
+/// Decimal text to a price, exactly (see [`Px::parse`]).
 pub fn parse_px(text: &str) -> Option<Px> {
-    let (neg, rest) = match text.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, text),
-    };
-    let (whole, frac) = rest.split_once('.').unwrap_or((rest, ""));
-    if whole.is_empty()
-        || !whole.bytes().all(|b| b.is_ascii_digit())
-        || !frac.bytes().all(|b| b.is_ascii_digit())
-    {
-        return None;
-    }
-    if frac.len() > 9 && frac[9..].bytes().any(|b| b != b'0') {
-        return None;
-    }
-    let frac9: String = frac
-        .chars()
-        .take(9)
-        .chain(std::iter::repeat('0'))
-        .take(9)
-        .collect();
-    let raw = i128::from(whole.parse::<u64>().ok()?)
-        .checked_mul(i128::from(DOLLAR))?
-        .checked_add(i128::from(frac9.parse::<u64>().ok()?))?;
-    let raw = i64::try_from(if neg { -raw } else { raw }).ok()?;
-    Some(Px::from_raw(raw))
+    Px::parse(text)
 }
 
 /// A price as Alpaca wants it: rounded to the tick in the given direction. `None` if it is not

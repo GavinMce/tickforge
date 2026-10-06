@@ -30,6 +30,11 @@ must be hosted behind sign-in, and the safest thing it can be is unable to act.
 - **Sign-in is one shared token** of at least 16 plain characters, read from a file: as a bearer
   header for programs, or typed into a login page that sets an HttpOnly, SameSite=Strict cookie.
   Comparison does not stop at the first differing byte. `/health` is open. Default bind is loopback.
+- **The page is static and cannot write.** The overview (E17-S10) is one HTML file and one script
+  served only after sign-in under a content policy of `script-src 'self'; connect-src 'self'`
+  with no inline script. The script makes GET requests only and puts everything it receives into
+  the page as text, never as markup (a test bans `innerHTML` and its relatives), so a strategy
+  or group name cannot inject script.
 - **What this is not.** It speaks plain HTTP, has no per-user identity, no rate limit on failed
   sign-ins and no TLS. The token is the cookie value, so it must only ever cross a TLS link.
   Hosting it for real (TLS, identity provider, deployment) is E17-S17, after E13-S02, and is not done here.

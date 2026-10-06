@@ -13,6 +13,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use tf_budget::{Change, diff};
 use tf_catalog::{Catalog, Kind, Run, Source as RunSource, when};
 use tf_ledger::{Journal, ReadOnlyStore};
 
@@ -115,6 +116,41 @@ pub fn runs(src: &Source, strategy: Option<&str>) -> Result<String, String> {
     Ok(format!("{{\"runs\":[{}]}}", list.join(",")))
 }
 
+fn pct(bp: u32) -> String {
+    let (w, f) = (bp / 100, bp % 100);
+    match f {
+        0 => format!("{w}%"),
+        f if f % 10 == 0 => format!("{w}.{}%", f / 10),
+        f => format!("{w}.{f:02}%"),
+    }
+}
+
+/// One difference between the budgets in force and a scheduled tree, in words.
+fn change_text(c: &Change) -> String {
+    match c {
+        Change::GroupAdded(id) => format!("add group {id}"),
+        Change::GroupRemoved(id) => format!("remove group {id}"),
+        Change::GroupShare { id, from, to } => {
+            format!("{id}: {} → {} of the balance", pct(*from), pct(*to))
+        }
+        Change::Loss { id, from, to } => format!(
+            "{id} loss limits: stop opening {} → {}, flatten {} → {}",
+            pct(from.soft),
+            pct(to.soft),
+            pct(from.hard),
+            pct(to.hard)
+        ),
+        Change::StrategyAdded { group, id } => format!("add {id} to {group}"),
+        Change::StrategyRemoved { group, id } => format!("remove {id} from {group}"),
+        Change::StrategyShare {
+            group,
+            id,
+            from,
+            to,
+        } => format!("{id}: {} → {} of {group}", pct(*from), pct(*to)),
+    }
+}
+
 /// The balance, groups and strategies as JSON: budget, use, day P&L, loss limits, state and runs.
 pub fn overview(src: &Source) -> Result<String, String> {
     let cat = catalog(src)?;
@@ -147,6 +183,16 @@ pub fn overview(src: &Source) -> Result<String, String> {
         ",\"budgets\":true,\"balance\":{}",
         js(&dollars(b.balance() as i128))
     );
+    let changes: Vec<String> = j
+        .scheduled()
+        .map(|t| {
+            diff(b.tree(), t)
+                .iter()
+                .map(|c| js(&change_text(c)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = write!(head, ",\"scheduled\":[{}]", changes.join(","));
     let mut total_used = 0u128;
     let mut total_pnl = 0i128;
     let mut groups = Vec::new();

@@ -334,7 +334,11 @@ fn nothing_but_health_and_the_login_page_answers_without_the_token() {
     assert_eq!(r(cookie(&format!("other={TOKEN}"))).status, 401);
     // The home page is the login form until signed in.
     assert!(r(get("/")).body.contains("type=password"));
-    assert!(r(signed("/")).body.contains("Read-only"));
+    assert!(r(signed("/")).body.contains("/app.js"));
+    assert_eq!(r(get("/app.js")).status, 401);
+    let js = r(signed("/app.js"));
+    assert_eq!((js.status, js.content_type), (200, "text/javascript"));
+    assert!(js.body.contains("/api/overview"));
     drop(j);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -466,6 +470,12 @@ fn over_a_socket_the_server_answers_reads_refuses_writes_and_survives_garbage() 
         "{ok}"
     );
     assert!(ok.contains("Cache-Control: no-store") && ok.contains("nosniff"));
+    assert!(
+        ok.contains("default-src 'none'; script-src 'self'; connect-src 'self';")
+            && !ok.contains("script-src 'unsafe-inline'")
+            && ok.contains("frame-ancestors 'none'"),
+        "{ok}"
+    );
     let denied = exchange(addr, b"GET /api/overview HTTP/1.1\r\n\r\n");
     assert!(denied.starts_with("HTTP/1.1 401 Unauthorized"), "{denied}");
     let signed_in = exchange(
@@ -532,6 +542,157 @@ fn a_new_day_starts_day_pnl_from_nothing() {
         "{text}"
     );
     assert!(text.contains("\"name\":\"beta\",\"number\":2,\"group\":\"day\",\"share_bp\":3000,\"budget\":\"9000.00\",\"used\":\"0.00\",\"day_pnl\":\"0.00\""), "{text}");
+    drop(j);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_scheduled_change_is_listed_in_words_until_the_rebalance_applies_it() {
+    let dir = scratch("scheduled");
+    let mut j = account(&dir, true);
+    let want = Tree::new(vec![Group {
+        id: "day".into(),
+        share: 10_000,
+        loss: LossLimits {
+            soft: 250,
+            hard: 600,
+        },
+        strategies: vec![
+            S {
+                id: "alpha".into(),
+                share: 6_000,
+            },
+            S {
+                id: "beta".into(),
+                share: 2_050,
+            },
+            S {
+                id: "gamma".into(),
+                share: 1_950,
+            },
+        ],
+    }])
+    .unwrap();
+    assert!(overview(&src(&dir)).unwrap().contains("\"scheduled\":[]"));
+    j.schedule_budgets(Some(want), 80 * SEC).unwrap();
+    let text = overview(&src(&dir)).unwrap();
+    assert!(text.contains("\"scheduled_change\":true"), "{text}");
+    for line in [
+        "day loss limits: stop opening 3% → 2.5%, flatten 6% → 6%",
+        "alpha: 50% → 60% of day",
+        "beta: 30% → 20.5% of day",
+        "gamma: 20% → 19.5% of day",
+    ] {
+        assert!(text.contains(&format!("\"{line}\"")), "{line} in {text}");
+    }
+    j.schedule_budgets(None, 81 * SEC).unwrap();
+    assert!(overview(&src(&dir)).unwrap().contains("\"scheduled\":[]"));
+    drop(j);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn percentages_are_written_the_short_way() {
+    assert_eq!(crate::pct(0), "0%");
+    assert_eq!(crate::pct(10_000), "100%");
+    assert_eq!(crate::pct(2_050), "20.5%");
+    assert_eq!(crate::pct(3_333), "33.33%");
+    assert_eq!(crate::pct(5), "0.05%");
+    assert_eq!(crate::pct(250), "2.5%");
+}
+
+#[test]
+fn the_page_only_reads_fields_the_api_sends_and_never_writes_markup_from_data() {
+    let dir = scratch("contract");
+    let j = account(&dir, true);
+    let api = overview(&src(&dir)).unwrap();
+    let app = include_str!("ui/app.js");
+    // Every field the script reads is one the overview sends.
+    for key in [
+        "kind",
+        "records",
+        "killed",
+        "budgets",
+        "balance",
+        "scheduled",
+        "used",
+        "day_pnl",
+        "share_bp",
+        "budget",
+        "loss_soft_bp",
+        "loss_hard_bp",
+        "loss_soft",
+        "loss_hard",
+        "state",
+        "runs",
+        "group",
+        "name",
+        "id",
+    ] {
+        assert!(
+            app.contains(&format!(".{key}")),
+            "the page does not use {key}"
+        );
+        assert!(
+            api.contains(&format!("\"{key}\":")),
+            "the API does not send {key}"
+        );
+    }
+    // Text from the ledger goes in as text, and the page cannot send anything but GETs.
+    for banned in [
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+        "new Function",
+    ] {
+        assert!(!app.contains(banned), "{banned}");
+    }
+    assert!(
+        !app.contains("method:"),
+        "the page makes no request but a GET"
+    );
+    assert!(
+        !include_str!("ui/index.html").contains("<script>"),
+        "no inline script: the CSP forbids it"
+    );
+    drop(j);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_change_to_a_groups_share_is_listed_with_the_group_added() {
+    let dir = scratch("groupshare");
+    let mut j = account(&dir, true);
+    let g = |id: &str, share, who: &[(&str, u32)]| Group {
+        id: id.into(),
+        share,
+        loss: LossLimits::default(),
+        strategies: who
+            .iter()
+            .map(|(n, s)| S {
+                id: (*n).into(),
+                share: *s,
+            })
+            .collect(),
+    };
+    let want = Tree::new(vec![
+        g(
+            "day",
+            8_000,
+            &[("alpha", 5_000), ("beta", 3_000), ("gamma", 2_000)],
+        ),
+        g("swing", 2_000, &[("delta", 10_000)]),
+    ])
+    .unwrap();
+    j.schedule_budgets(Some(want), 80 * SEC).unwrap();
+    let text = overview(&src(&dir)).unwrap();
+    assert!(
+        text.contains("\"day: 100% → 80% of the balance\""),
+        "{text}"
+    );
+    assert!(text.contains("\"add group swing\""), "{text}");
     drop(j);
     let _ = std::fs::remove_dir_all(&dir);
 }

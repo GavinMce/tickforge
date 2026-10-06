@@ -1040,7 +1040,8 @@ epics:
       - id: E17-S10
         jira: TIC-129
         title: "Overview screen (totals, allocation bar, group cards, strategies)"
-        status: todo
+        status: done
+        evidence: "tf serve now serves the overview at / (static page + app.js behind sign-in, CSP script-src 'self', data inserted as text only): totals (balance, day P&L, in use, free inside budgets), allocation bar of group shares with the unreserved remainder, a card per group (budget, use bar, free, day P&L), the selected group's strategies (share, budget, use, day P&L, state active|no new entries|flatten, run count, unassigned row), its loss limits (group percentages and each strategy's stop and flatten amounts), and a banner listing scheduled changes in words (new `scheduled` field of /api/overview, from tf_budget::diff); refreshes every 15 s and says when it could not. Looked at in headless Chromium at 1280 and 390 px, light and dark, with a stressed ledger (soft-latched strategy, scheduled change): no console errors, no page-level horizontal scroll (the strategy table scrolls inside its card). 18 workspace tests incl. a contract test between page and API. Not yet: strategy rows do not open anything (S11), no Edit budgets (S13) or proposals panel (S15); groups show their ids, not display names; the browser check was by hand, not in CI"
         deps: [E17-S09]
         ac:
           - Shows totals, the split of the balance, a card per group and the selected group's strategies with budget, use, P&L, state and run count

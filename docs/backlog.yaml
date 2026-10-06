@@ -340,6 +340,7 @@ epics:
         ac:
           - Bounded SPSC queue between feed and engine; feed is never blocked
           - Drops are counted and exported as metrics; policy documented
+          - Survives a replay of the real opening five minutes of 2026-10-02 (337,231 trades in one second) with no trade dropped; under pressure quotes are conflated, never trades
   - id: E06
     jira: TIC-7
     title: Databento integration
@@ -394,6 +395,16 @@ epics:
         deps: [E06-S02]
         ac:
           - Halts and LULD bands surface as Status events with correct timestamps
+      - id: E06-S07
+        jira: TIC-149
+        title: "DBN decoding (dbn crate) into canonical events: trades, tcbbo, cmbp-1, status"
+        status: done
+        evidence: "crates/tf-databento: Decoder over any Read (plain DBN, zstd DBN, zstd file) yields Items: canonical Trade/Quote/Status events, symbol mappings, gateway Notices (a skip after slow reading is recognised as a gap) and Ignored records; prices copied raw, an empty book side is price 0 / size 0, a trade with no real price is counted and dropped, a zero-share print is counted apart and dropped unless keep_zero_size; sequence = publisher<<32 | sequence, or ts_recv for the consolidated schemas. dbn 0.71 (sync, no tokio), ADR 0038. 14 synthetic-DBN tests (written with the dbn encoder, no market data committed); about 25 mutations tried, all killed. Real data, run locally (examples/check_real): all 639,143 midday XNAS.BASIC trades (2026-10-02, 17:00-17:05 UTC) agree with Databento's own CSV on instrument, price, size, ts_event, ts_recv and sequence, with the 28,734 zero-share rows counted exactly; tcbbo, cmbp-1 and a day of status decode with no crossed quote and ts_recv never going backwards; the status day has 48 halts/pauses, 13,337 trading and 308 SSR records; decode speed about 12M records/s including zstd. Found by the real data and fixed: about 4% of midday trades (a fifth before the open) are zero-share prints from one venue. Not done: LULD bands (statistics records, E06-S06), stable ids across reconnects (E06-S02/S05)"
+        deps: [E01-S06]
+        ac:
+          - Records from Databento DBN files and streams decode to canonical events with prices copied raw (no rounding); undefined prices are not turned into prices
+          - No async runtime in the decoding crate; an ADR records the dbn dependency
+          - Decoding agrees with the CSV form of the same real window on every field, shown locally against real data; the committed tests use synthetic DBN written by the encoder
 
   # ---------------------------------------------------------------- Phase 3
   - id: E07
@@ -1126,3 +1137,86 @@ epics:
           - Served over TLS behind the existing GitOps flow, reachable only after signing in through an identity provider, with per-user identity
           - Failed sign-ins are rate limited and the shared token is retired or kept only for programs
           - No route can place an order or change a budget (the S09 tests still pass)
+  - id: E18
+    jira: TIC-139
+    title: "Live multi-strategy run: universe filter, shared tiers, daily report"
+    phase: 4
+    labels: [phase4, live, universe]
+    goal: 10 to 20 strategies on live XNAS.BASIC data for one paid month, over thousands of symbols, ending with a replayable capture, measured rates and a per-strategy report.
+    stories:
+      - id: E18-S01
+        jira: TIC-140
+        title: "Universe spec: declarative filter with static pre-market and dynamic top-K layers"
+        status: todo
+        ac:
+          - A universe is data with a canonical text form, a fingerprint, @params, a diff and a review path like the rule layer (ADR 0026/0029)
+          - A static layer (price band, average dollar volume, ATR, exchange, ETF exclusion, shortable) is evaluated pre-market from prior-day data only, and the resulting symbol list is stored with the run so a replay uses the same universe
+          - A dynamic layer ranks by a feature (relative volume, gap, volume z) to a top-K with hysteresis
+      - id: E18-S02
+        jira: TIC-141
+        title: Reference data for the universe from our own history and Alpaca asset flags
+        status: todo
+        deps: [E06-S07]
+        ac:
+          - A daily job turns Databento daily bars into per-symbol reference rows (last close, average dollar volume, ATR, gap) for the universe filter, with the as-of date stored
+          - Tradable, shortable and easy-to-borrow flags come from the Alpaca assets endpoint; float and short interest are explicitly absent (E14) and filters that need them refuse to run
+          - Point-in-time: a row is never used for a day it would not have been known
+      - id: E18-S03
+        jira: TIC-142
+        title: Cross-sectional strategy interface (periodic callback on a member view)
+        status: todo
+        deps: [E18-S01]
+        ac:
+          - A strategy that watches many symbols gets a periodic callback with a read-only view of its member symbols and helpers to rank the top K by a feature, instead of one callback per event
+          - Membership is a per-strategy bitset over dense instrument ids; events reach only strategies that include the symbol
+          - 20 strategies over 5,000 symbols at one callback a second add no measurable load next to the Tier 0 update, shown by a benchmark
+      - id: E18-S04
+        jira: TIC-143
+        title: "Shared Tier 1 capacity: refcounted pins, priority, denial counters"
+        status: todo
+        deps: [E18-S03]
+        ac:
+          - A symbol stays in Tier 1 while any strategy pins it; the Tier 1 cap is shared with a documented priority rule when strategies compete
+          - A request that cannot be granted is counted per strategy and exported as a metric, never silently lost
+          - Demotion never takes a symbol a strategy has an open position or working order in
+      - id: E18-S05
+        jira: TIC-144
+        title: Multi-strategy live host with sub-accounts, simulated broker and staged rollout
+        status: todo
+        deps: [E18-S03, E18-S04, E09-S08]
+        ac:
+          - 10 to 20 strategies run in one engine, each with its own gateway sub-account and budget, against the simulated broker on live data; a subset can send orders to Alpaca paper
+          - A strategy can be added to a running day only after it has been replayed on captured tape, and the host refuses one that has not
+          - One strategy failing or being killed does not stop the others, and the kill switch and loss limits behave as in the single-strategy case
+      - id: E18-S06
+        jira: TIC-145
+        title: "Replay-equivalence check: a captured day replays to the live run's decisions"
+        status: todo
+        deps: [E06-S04, E18-S05]
+        ac:
+          - Replaying the raw capture of a live day through the same host reproduces every strategy's intents and the gateway's answers bit for bit, or reports the first difference with its time and symbol
+          - Run nightly on the day just captured, and the result is part of the daily report
+      - id: E18-S07
+        jira: TIC-146
+        title: Daily report per strategy and for system health
+        status: todo
+        deps: [E18-S05]
+        ac:
+          - After each session a report lists, per strategy, trades, P&L, refusals by reason, and what it watched; and for the system, message rates, peak second, lag, drops, gaps and the replay-equivalence result
+          - Fills are labelled simulated or paper and the report says paper fills are optimistic
+      - id: E18-S08
+        jira: TIC-147
+        title: "The strategy set for the month: templates, variants, metrics fixed in advance, baseline"
+        status: todo
+        deps: [E18-S05]
+        ac:
+          - 3 to 4 strategy templates give 10 to 20 variants, each with its universe spec and budget; the evaluation metrics, the baseline and the minimum number of trades to judge on are written down before the first live session
+          - Nothing is promoted on one month: the report states the number of variants tried and does not rank on P&L alone
+      - id: E18-S09
+        jira: TIC-148
+        title: "Operating the month: runbook, uptime from 04:00 to 20:00 ET, time sync, alerts"
+        status: todo
+        deps: [E18-S05]
+        ac:
+          - A runbook covers start before 04:00 ET, the opening burst, end of day, capture rotation and what to do on a feed stall or reconnect
+          - The machine's clock is disciplined and its offset logged; the run alerts a person when the feed is stalled, lag exceeds a bound or the disk for captures runs low

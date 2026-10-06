@@ -58,3 +58,4 @@ How:
 | [0039](0039-the-feed-never-waits-for-the-engine-and-what-is-given-up-is-decided-by-what-it-is-worth.md) | The feed never waits for the engine, and what is given up is decided by what it is worth | Accepted |
 | [0040](0040-raw-capture-keeps-the-providers-records-in-files-that-are-complete-or-recoverable.md) | Raw capture keeps the provider's records in files that are complete or recoverable | Accepted |
 | [0041](0041-a-universe-is-a-spec-judged-from-a-dated-snapshot-and-kept-with-the-run.md) | A universe is a spec judged from a dated snapshot, and the list is kept with the run | Accepted |
+| [0042](0042-reference-rows-come-from-dated-daily-bars-and-an-asset-list-and-say-what-they-lack.md) | Reference rows come from dated daily bars and an asset list, and say what they lack | Accepted |

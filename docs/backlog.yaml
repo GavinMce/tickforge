@@ -1187,12 +1187,44 @@ epics:
       - id: E18-S02
         jira: TIC-141
         title: Reference data for the universe from our own history and Alpaca asset flags
-        status: todo
+        status: done
         deps: [E06-S07]
+        evidence: >
+          New crate tf-reference (ADR 0042), `tf reference build` and scripts/fetch_reference.sh (the only
+          step that touches the network). From Databento ohlcv-1d daily bars and a symbology.resolve file
+          it builds one row per symbol: last close, average dollar volume and share volume over the last
+          20 sessions (needs 10 of them, else unknown, not zero; a missing session counts as zero
+          volume) and average true range as permille of the close (previous *session's* close; a bar
+          after a gap has no range). A symbol with no bar on the as-of day has no price (a stale close is
+          not today's). Only bars dated on or before --up-to are read, and the snapshot's as-of date is
+          the last session used. Strict readers (header, rtype 35, midnight timestamps, high/low contain
+          open/close; a bad line is an error, not a skipped bar). Alpaca's asset list adds tradable,
+          shortable, easy_to_borrow and exchange for the symbols it lists (an unlisted symbol stays
+          unknown and fails conditions); an ETF list the person keeps adds etf; float and short interest
+          are absent so universes using them refuse (shown end to end in a CLI test). 8 library tests and
+          1 CLI test; 20 mutants of the window, minimum days, as-of rule, true range terms, session lookup,
+          filters and flag copying all killed (one equivalent mutant, |l-pc| written as |pc-l|). Real data
+          (Databento EQUS.SUMMARY ohlcv-1d, 2026-09-01 to 2026-10-02, 304,704 bars, about $0.48 of credit):
+          13,252 symbols as of 2026-10-02 in 0.17 s; price, adv_dollar, adv_shares and atr_permille for
+          AAPL, NVDA, TSLA, F and SPY agree exactly with an independent recomputation from the raw CSV.
+          Narrowed: the Alpaca assets parser is tested on fixtures in the documented format and has not run
+          against the real endpoint (no credentials), now E18-S10; "gap" is a live measure (E18-S01), not a
+          reference column; the daily schedule is operations (E18-S09), here it is one script and one
+          command; 145 symbols with non-name characters (warrants, rights, some preferreds) cannot be
+          listed and are counted; the dollar volume uses each day's close, not its VWAP; etf has no free
+          source and comes from a list.
         ac:
-          - A daily job turns Databento daily bars into per-symbol reference rows (last close, average dollar volume, ATR, gap) for the universe filter, with the as-of date stored
-          - Tradable, shortable and easy-to-borrow flags come from the Alpaca assets endpoint; float and short interest are explicitly absent (E14) and filters that need them refuse to run
-          - Point-in-time: a row is never used for a day it would not have been known
+          - A command turns Databento daily bars into per-symbol reference rows (last close, average dollar volume, ATR) for the universe filter, with the as-of date stored; run by one script and one command
+          - Tradable, shortable and easy-to-borrow flags are read from the Alpaca assets format (fixtures; the real endpoint is E18-S10); float and short interest are explicitly absent (E14) and filters that need them refuse to run
+          - Point-in-time: bars dated after the as-of date are never read, and a symbol with no bar on the as-of day has no price
+      - id: E18-S10
+        jira: TIC-151
+        title: Alpaca asset list fetched and checked against the real endpoint
+        status: todo
+        deps: [E18-S02]
+        ac:
+          - With paper credentials, scripts/fetch_reference.sh fetches /v2/assets and tf reference build --assets reads it without error
+          - The count of active US equities and the flags of a hand-checked sample agree with the Alpaca dashboard, and any field or exchange name that differs from the fixtures is fixed
       - id: E18-S03
         jira: TIC-142
         title: Cross-sectional strategy interface (periodic callback on a member view)

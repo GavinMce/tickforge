@@ -2,6 +2,7 @@ mod budgets_cmd;
 mod catalog_cmd;
 mod explore;
 mod ledger_cmd;
+mod reference_cmd;
 mod rules_cmd;
 mod runs;
 mod serve_cmd;
@@ -134,6 +135,16 @@ USAGE:
     approve   record a named person's approval (appended to the record). A rejected proposal
               cannot be approved, and nothing is live until a person has approved it.
     The gates test internal consistency on synthetic sessions; they are not evidence of an edge.
+
+    tf reference build --bars FILE --symbology FILE --out FILE [--assets FILE] [--etf-list FILE]
+                       [--up-to YYYY-MM-DD] [--window N] [--min-days N]
+
+    Builds the reference snapshot a universe is judged from: per symbol the last close, average
+    dollar and share volume over the last --window sessions (default 20; needs --min-days of them,
+    default 10) and average true range, from daily bars and a symbology file (fetched by
+    scripts/fetch_reference.sh). Only bars dated on or before --up-to are read. --assets adds
+    Alpaca's tradable, shortable, easy_to_borrow and exchange; --etf-list (a file of symbols you
+    keep) adds etf. A column with no source is left out, so a universe that needs it refuses.
 
     tf universe show SPEC [--snapshot FILE]
     tf universe members SPEC --snapshot FILE [--out FILE]
@@ -1005,6 +1016,7 @@ fn main() -> ExitCode {
         Some("rules") => rules_cmd::rules(&args[1..]),
         Some("budgets") => budgets_cmd::budgets(&args[1..]),
         Some("universe") => universe_cmd::universe(&args[1..]),
+        Some("reference") => reference_cmd::reference(&args[1..]),
         Some("serve") => serve_cmd::serve_cmd(&args[1..]),
         Some("catalog") => catalog_cmd::catalog(&args[1..]),
         Some("ledger") => ledger_cmd::ledger(&args[1..]),

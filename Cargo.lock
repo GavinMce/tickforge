@@ -97,6 +97,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-budget"
+version = "0.1.0"
+dependencies = [
+ "tf-synth",
+]
+
+[[package]]
 name = "tf-cli"
 version = "0.1.0"
 dependencies = [

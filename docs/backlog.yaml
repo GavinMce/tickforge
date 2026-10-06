@@ -962,7 +962,8 @@ epics:
       - id: E17-S01
         jira: TIC-120
         title: "Budget tree model and rules (workspace, groups, strategies; reserved shares)"
-        status: todo
+        status: done
+        evidence: "crates/tf-budget: Tree/Group/Strategy in basis points with Usage; a tree is only built valid (ids, shares, children within parent, loss limits 0<soft<hard); group_range / strategy_range give the legal share with the reason (unassigned above, what is in use below, or over-budget so it may stay or grow but not shrink); with_group_share / with_strategy_share / with_loss; canonical text and fingerprint; diff. Checked against a brute-force search on 300 random trees (every edit at each bound keeps children within parent in dollars); 30 mutations tried, all caught, one equivalent check removed. Pure library, not yet used by the gateway (S02)"
         ac:
           - Children never exceed their parent and a share cannot go below what is in use
           - Budgets in dollars, the legal range of each share for a draft, and the diff between two trees are pure functions with tests
@@ -970,7 +971,7 @@ epics:
         jira: TIC-121
         title: "Per-node budgets enforced by the risk gateway"
         status: todo
-        deps: [E17-S01, E09-S01, E09-S03]
+        deps: [E17-S01, E17-S03, E09-S01, E09-S03]
         ac:
           - An opening order that would exceed its strategy's or its group's budget is refused, naming the node
           - Longs are charged at notional and shorts at the worst case under the gap rule; closes always pass
@@ -978,7 +979,7 @@ epics:
         jira: TIC-122
         title: "Per-strategy position attribution (virtual sub-accounts over one broker account)"
         status: todo
-        deps: [E09-S04, E17-S02]
+        deps: [E09-S04, E09-S01]
         ac:
           - Two strategies holding one symbol keep separate lots and P&L; only the net reaches the broker
           - Replay reproduces the split exactly and it reconciles to the account

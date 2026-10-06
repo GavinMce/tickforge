@@ -1,3 +1,4 @@
+mod catalog_cmd;
 mod explore;
 mod ledger_cmd;
 mod rules_cmd;
@@ -130,6 +131,15 @@ USAGE:
     approve   record a named person's approval (appended to the record). A rejected proposal
               cannot be approved, and nothing is live until a person has approved it.
     The gates test internal consistency on synthetic sessions; they are not evidence of an edge.
+
+    tf catalog [--store DIR] [--ledger DIR --kind paper|live] [--strategy NAME] [--latest]
+
+    List the runs of each strategy, newest first, with backtest, paper and live kept apart:
+    backtests from a run store, and one paper or live session per trading day of an order
+    ledger (the ledger does not say which, so --kind does). A session's P&L is the change in
+    the strategy's realised profit that day; trades are the orders that opened a position and
+    got a fill. Only stored backtests can be opened with `tf explore`. --latest shows only
+    each strategy's newest run. Read-only.
 
     tf ledger verify DIR [--orders]
 
@@ -950,6 +960,7 @@ fn main() -> ExitCode {
         Some("explore") => explore::explore(&args[1..]),
         Some("runs") => runs::runs(&args[1..]),
         Some("rules") => rules_cmd::rules(&args[1..]),
+        Some("catalog") => catalog_cmd::catalog(&args[1..]),
         Some("ledger") => ledger_cmd::ledger(&args[1..]),
         Some("help" | "--help" | "-h") | None => {
             print!("{USAGE}");

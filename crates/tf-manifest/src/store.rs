@@ -79,6 +79,39 @@ impl DirStore {
         Ok(Put::Written)
     }
 
+    /// Every result in the store, in no particular order, and how many files could not be read as
+    /// one (a damaged or foreign file is counted and skipped, never fatal). A store that does not
+    /// exist is an error.
+    pub fn list(&self) -> Result<(Vec<RunResult>, usize), Error> {
+        let mut runs = Vec::new();
+        let mut skipped = 0;
+        for sub in fs::read_dir(&self.root)
+            .map_err(|e| io(&self.root, e))?
+            .flatten()
+        {
+            if !sub.path().is_dir() {
+                continue;
+            }
+            let Ok(files) = fs::read_dir(sub.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let path = f.path();
+                if path.extension().is_none_or(|x| x != "tfrs") {
+                    continue;
+                }
+                match fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|t| RunResult::parse(&t).ok())
+                {
+                    Some(r) => runs.push(r),
+                    None => skipped += 1,
+                }
+            }
+        }
+        Ok((runs, skipped))
+    }
+
     /// The stored result for `m`, or run `f` to produce one, store it and return
     /// it. `f` is not called when there is a stored result.
     pub fn get_or_run<F>(&self, m: &Manifest, f: F) -> Result<(RunResult, Source), Error>

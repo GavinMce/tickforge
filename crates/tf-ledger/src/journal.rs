@@ -129,13 +129,23 @@ impl<S: LedgerStore> Journal<S> {
         instruments: usize,
     ) -> Result<(Journal<S>, Recovery), JournalError> {
         let loaded = store.load()?;
-        Journal::from_loaded(store, loaded, limits, instruments)
+        Journal::from_loaded(store, loaded, limits, instruments, &mut |_, _| {})
     }
 
     /// Open an existing ledger using the limits and universe it was started with, as recorded in
     /// its first record (for tools that check or inspect a ledger). A ledger with no records is an
     /// error here: there is nothing to say what it is for.
-    pub fn open_recorded(mut store: S) -> Result<(Journal<S>, Recovery), JournalError> {
+    pub fn open_recorded(store: S) -> Result<(Journal<S>, Recovery), JournalError> {
+        Journal::open_recorded_observed(store, &mut |_, _| {})
+    }
+
+    /// [`Journal::open_recorded`], calling `observer` with the journal as it stands after each record
+    /// is replayed (the start record included). For read models that need the history, not only the
+    /// end state: the run catalog reads each session's profit this way.
+    pub fn open_recorded_observed(
+        mut store: S,
+        observer: &mut dyn FnMut(&Journal<S>, &Record),
+    ) -> Result<(Journal<S>, Recovery), JournalError> {
         let loaded = store.load()?;
         let Some(first) = loaded.records.first() else {
             return Err(JournalError::Structure(
@@ -152,7 +162,7 @@ impl<S: LedgerStore> Journal<S> {
                         "the ledger's start record has bad limits: {why}"
                     ))
                 })?;
-                Journal::from_loaded(store, loaded, limits, instruments as usize)
+                Journal::from_loaded(store, loaded, limits, instruments as usize, observer)
             }
             Ok(_) => Err(JournalError::Structure(
                 "the first record is not a start record".to_owned(),
@@ -166,6 +176,7 @@ impl<S: LedgerStore> Journal<S> {
         loaded: crate::store::Loaded,
         limits: Limits,
         instruments: usize,
+        observer: &mut dyn FnMut(&Journal<S>, &Record),
     ) -> Result<(Journal<S>, Recovery), JournalError> {
         let pairs: Vec<(String, String)> = limits
             .pairs()
@@ -221,6 +232,7 @@ impl<S: LedgerStore> Journal<S> {
                     }
                 }
                 j.seq = n;
+                observer(&j, &rec);
             }
         }
         let rec = Recovery {

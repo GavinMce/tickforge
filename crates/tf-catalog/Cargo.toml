@@ -1,6 +1,6 @@
 [package]
-name = "tf-cli"
-description = "tickforge command line"
+name = "tf-catalog"
+description = "The run catalog: every run of each strategy, newest first, with backtest, paper and live kept apart"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,21 +10,12 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[[bin]]
-name = "tf"
-path = "src/main.rs"
-
 [dependencies]
 tf-core.workspace = true
-tf-provider.workspace = true
-tf-synth.workspace = true
-tf-replay.workspace = true
-tf-bench.workspace = true
 tf-manifest.workspace = true
-tf-backtest.workspace = true
-tf-params.workspace = true
+tf-ledger.workspace = true
 tf-risk.workspace = true
 tf-strategy.workspace = true
-tf-ledger.workspace = true
+
+[dev-dependencies]
 tf-budget.workspace = true
-tf-catalog.workspace = true

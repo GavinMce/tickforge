@@ -337,7 +337,7 @@ pub enum Verdict {
     Differs(Difference),
 }
 
-fn clock(ts: Nanos) -> String {
+pub(crate) fn clock(ts: Nanos) -> String {
     let day = 86_400_000_000_000u64;
     let t = ts % day;
     let s = t / 1_000_000_000;

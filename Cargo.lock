@@ -417,6 +417,7 @@ dependencies = [
  "tf-core",
  "tf-databento",
  "tf-engine",
+ "tf-ingest",
  "tf-ledger",
  "tf-provider",
  "tf-risk",

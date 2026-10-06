@@ -997,7 +997,8 @@ epics:
       - id: E17-S05
         jira: TIC-124
         title: "Budget events in the ledger and the end-of-session rebalance"
-        status: todo
+        status: done
+        evidence: "tf_budget::rebalance (profit into the strategy that made it, shares to the nearest basis point so no profit means no change, clamped to bounds around the targets and trimmed to fit) with Bounds; ledger inputs `schedule` and `rebalance` (plus the existing `budgets`), Journal::schedule_budgets / rebalance / targets / scheduled: a scheduled change waits for the rebalance and replaces the profit adjustment that time, profit counts from when budgets were set or last rebalanced, the broker's balance wins if given; replay reproduces it all; tf ledger verify shows a pending change. No profit changes nothing over 300 random trees; every share within bounds and dollar budgets within the balance over 500 random cases; bounds from targets at strategy and group level; about 45 mutations tried (one equivalent, six test gaps closed); ADR 0033. Nothing yet calls rebalance at the end of a session"
         deps: [E17-S01, E09-S04]
         ac:
           - Budget changes are scheduled and take effect only at the rebalance, which moves realised P&L into the strategy that made it within a floor and ceiling

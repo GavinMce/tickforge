@@ -35,7 +35,9 @@ pub enum ExplorerError {
 /// Opens a stored run in the trade explorer: given a run's hash (or a prefix), the complete page.
 /// The service does not know how to replay a run; the program that hosts it does.
 #[derive(Clone)]
-pub struct Explorer(std::sync::Arc<dyn Fn(&str) -> Result<String, ExplorerError> + Send + Sync>);
+pub struct Explorer(std::sync::Arc<OpenRun>);
+
+type OpenRun = dyn Fn(&str) -> Result<String, ExplorerError> + Send + Sync;
 
 impl Explorer {
     pub fn new(

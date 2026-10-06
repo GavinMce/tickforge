@@ -22,6 +22,7 @@ use tf_strategy::intent::Side;
 
 pub mod budgets;
 pub mod http;
+pub mod proposals;
 
 /// Why a stored run was not opened in the explorer.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -62,7 +62,7 @@ fn text_of(by: &str, tree: Option<&Tree>) -> String {
     let by: String = by
         .chars()
         .filter(|c| !c.is_control())
-        .take(64)
+        .take(160)
         .collect::<String>()
         .trim()
         .to_owned();

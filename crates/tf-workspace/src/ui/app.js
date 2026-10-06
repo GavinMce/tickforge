@@ -7,6 +7,7 @@
   var data = null;      // /api/overview
   var selected = null;  // selected group on the overview
   var failed = false;
+  var props = null;     // /api/proposals
   var runView = null;   // {strategy, id, runs, detail} for the run screen
   var REASONS = {
     invalid: "the order itself was malformed", kill_switch: "the kill switch was on",
@@ -178,6 +179,59 @@
       h.apply(null, ["ul", null].concat(items)));
   }
 
+
+  // ---- agents' budget proposals -------------------------------------------------------------
+
+  var CHIP = { scheduled: "Applied: scheduled", waiting: "Waiting for you", approved: "Approved", declined: "Declined", refused: "Refused" };
+
+  function answer(p, what, box, buttons) {
+    buttons.forEach(function (b) { b.disabled = true; });
+    var note = what === "decline" ? "declined in the app" : "approved in the app";
+    fetch("/api/proposals/" + p.id + "/" + what, { method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "X-Requested-With": "workspace", "Content-Type": "text/plain" }, body: note }).then(function (r) {
+      if (r.status === 401) { location.href = "/"; return null; }
+      return r.json().then(function (j) { return { ok: r.ok, body: j }; });
+    }).then(function (r) {
+      if (!r) return;
+      if (r.ok) load();
+      else { box.textContent = r.body.error || "The server refused."; buttons.forEach(function (b) { b.disabled = false; }); }
+    }).catch(function () { box.textContent = "Could not reach the server."; buttons.forEach(function (b) { b.disabled = false; }); });
+  }
+
+  function proposalItem(p) {
+    var err = h("div", { "class": "err small", role: "alert" });
+    var kids = [
+      h("div", { "class": "between" }, h("span", { "class": "small mute" }, p.by + " · " + p.at),
+        h("span", { "class": "state" + (p.state === "waiting" || p.state === "refused" ? " bad" : "") }, CHIP[p.state] || p.state)),
+      h.apply(null, ["ul", { style: "margin:0;padding-left:18px;font-weight:500" }].concat(
+        (p.changes.length ? p.changes : ["Budget change"]).map(function (c) { return h("li", null, c); }))),
+      h("div", { "class": "small" }, p.reason),
+      h("div", { "class": "small mute" }, "Evidence: " + p.evidence)
+    ];
+    if (p.why.length) kids.push(h("div", { "class": "small mute" }, "Policy: " + p.why.join("; ")));
+    if (p.decision) kids.push(h("div", { "class": "small mute" }, (p.decision.call === "approved" ? "Approved" : "Declined") + " " + p.decision.at + (p.decision.note ? ": " + p.decision.note : "")));
+    if (p.state === "waiting") {
+      var ok = h("button", { "class": "btn dark" }, "Approve");
+      var no = h("button", { "class": "btn" }, "Decline");
+      ok.setAttribute("aria-label", "Approve proposal " + p.id + " by " + p.by);
+      no.setAttribute("aria-label", "Decline proposal " + p.id + " by " + p.by);
+      ok.addEventListener("click", function () { answer(p, "approve", err, [ok, no]); });
+      no.addEventListener("click", function () { answer(p, "decline", err, [ok, no]); });
+      kids.push(h("div", { "class": "row" }, ok, no), h("div", { "class": "small mute" }, "Approving schedules it for the next rebalance, like any other edit."));
+    }
+    kids.push(err);
+    return h.apply(null, ["div", { "class": "prop" }].concat(kids));
+  }
+
+  function proposalsPanel() {
+    var list = props && props.proposals ? props.proposals : [];
+    var shown = list.slice(0, 12);
+    return h.apply(null, ["section", { "class": "card panel", "aria-label": "Budget proposals" }, h("h2", null, "Budget proposals")].concat(
+      shown.length ? shown.map(proposalItem) : [h("div", { "class": "small mute" }, "No agent has proposed a budget change.")],
+      list.length > shown.length ? [h("div", { "class": "small mute" }, (list.length - shown.length) + " older not shown.")] : [],
+      props && props.unreadable ? [h("div", { "class": "small err" }, props.unreadable + " proposal file(s) could not be read.")] : []));
+  }
+
   function drawOverview() {
     var a = data.account;
     var kids = [];
@@ -203,7 +257,7 @@
       kids.push(banner(a), waitingNote(a), totals(a), allocation(),
         h("div", { "class": "split" },
           h("div", { "class": "mainc" }, groupCards(), strategies(g, gi)),
-          h("aside", null, limits(g))));
+          h("aside", null, limits(g), proposalsPanel())));
     }
     app.replaceChildren.apply(app, kids.filter(Boolean));
   }
@@ -566,10 +620,11 @@
     ed = null;
     var jobs = [get("/api/overview")];
     if (want) jobs.push(get("/api/runs?strategy=" + encodeURIComponent(want.strategy)));
+    else jobs.push(get("/api/proposals").catch(function () { return null; }));
     Promise.all(jobs).then(function (res) {
       if (!res[0]) return null;
       data = res[0]; failed = false;
-      if (!want) { runView = null; drawOverview(); return null; }
+      if (!want) { runView = null; props = res[1]; drawOverview(); return null; }
       var runs = res[1] ? res[1].runs : [];
       var id = want.id || (runs.length ? runs[0].id : null);
       if (id && !runs.some(function (r) { return r.id === id; })) id = runs.length ? runs[0].id : null;

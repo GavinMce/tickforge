@@ -17,6 +17,7 @@ tf-risk.workspace = true
 tf-budget.workspace = true
 tf-catalog.workspace = true
 tf-manifest.workspace = true
+tf-proposals.workspace = true
 tf-strategy.workspace = true
 
 

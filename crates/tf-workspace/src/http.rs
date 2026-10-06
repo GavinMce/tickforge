@@ -11,6 +11,7 @@ use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use crate::budgets::{self, Refusal};
+use crate::proposals;
 use crate::{ExplorerError, Source, js, overview, run_detail, runs};
 
 const MAX_HEAD: usize = 16 * 1024;
@@ -261,6 +262,46 @@ fn budget_change(src: &Source, token: &str, req: &Request) -> Response {
     }
 }
 
+/// A person's answer to a proposal: `/api/proposals/<id>/approve` or `/decline`, the body being an
+/// optional note. Same conditions as any other change: signed in, and the header. The approval is
+/// checked again, queued like any edit, and not enacted until the engine records it and the next
+/// rebalance.
+fn proposal_answer(src: &Source, token: &str, req: &Request) -> Response {
+    if !signed_in(req, token) {
+        return Response::error(401, "sign in").with("WWW-Authenticate", "Bearer");
+    }
+    if req.requested_with.as_deref() != Some("workspace") {
+        return Response::error(403, "send the header X-Requested-With: workspace");
+    }
+    const BY: &str = "the workspace app (shared token)";
+    let rest = req.path.strip_prefix("/api/proposals/").unwrap_or("");
+    let Some((id, what)) = rest.split_once('/') else {
+        return Response::error(404, "no such route");
+    };
+    let Ok(id) = id.parse::<u64>() else {
+        return Response::error(404, "no such proposal");
+    };
+    let note = req.body.trim();
+    let answer = |r: Result<String, proposals::Refusal>| match r {
+        Ok(body) => Response::json(200, body),
+        Err(proposals::Refusal::NoLedger) => Response::error(409, "no ledger is connected"),
+        Err(proposals::Refusal::NotFound(m)) => Response::error(404, &m),
+        Err(proposals::Refusal::NotWaiting(m)) => Response::error(409, &m),
+        Err(proposals::Refusal::NotAllowed(m)) => Response::error(422, &m),
+        Err(proposals::Refusal::Failed(m)) => Response::error(500, &m),
+    };
+    match what {
+        "approve" => answer(
+            proposals::approve(src, id, BY, note)
+                .map(|name| format!("{{\"requested\":{}}}", js(&name))),
+        ),
+        "decline" => {
+            answer(proposals::decline(src, id, BY, note).map(|()| "{\"declined\":true}".to_owned()))
+        }
+        _ => Response::error(404, "no such route"),
+    }
+}
+
 /// Answers one request. Reads the ledger and run store named by `src`; writes nothing.
 pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     if req.method == "POST" && req.path == "/login" {
@@ -283,6 +324,9 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     if req.method == "POST" && req.path.starts_with("/api/budgets/") {
         return budget_change(src, token, req);
     }
+    if req.method == "POST" && req.path.starts_with("/api/proposals/") {
+        return proposal_answer(src, token, req);
+    }
     if req.method != "GET" {
         return Response::error(405, "this service only reads").with("Allow", "GET");
     }
@@ -297,7 +341,12 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     }
     let known = matches!(
         req.path.as_str(),
-        "/" | "/app.js" | "/api/overview" | "/api/runs" | "/api/run" | "/api/budgets"
+        "/" | "/app.js"
+            | "/api/overview"
+            | "/api/runs"
+            | "/api/run"
+            | "/api/budgets"
+            | "/api/proposals"
     );
     if !known {
         return Response::error(404, "no such route");
@@ -313,6 +362,13 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
         "/" => return Response::new(200, "text/html", HOME),
         "/app.js" => return Response::new(200, "text/javascript", APP_JS),
         "/api/overview" => overview(src),
+        "/api/proposals" => match proposals::view(src) {
+            Ok(body) => Ok(body),
+            Err(proposals::Refusal::NoLedger) => {
+                return Response::error(409, "no ledger is connected");
+            }
+            Err(other) => Err(format!("{other:?}")),
+        },
         "/api/budgets" => match budgets::view(src, None) {
             Ok(body) => Ok(body),
             Err(Refusal::NothingToEdit(m)) => return Response::error(409, &m),

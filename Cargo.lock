@@ -260,6 +260,7 @@ dependencies = [
  "tf-core",
  "tf-ledger",
  "tf-manifest",
+ "tf-proposals",
  "tf-risk",
  "tf-strategy",
 ]

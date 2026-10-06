@@ -182,12 +182,64 @@ impl<T: DecodeRecordRef> NextRecord for T {
     }
 }
 
-pub struct Decoder<'a> {
-    inner: Box<dyn NextRecord + 'a>,
+/// Maps Databento records to [`Item`]s, one at a time. A [`Decoder`] is one over a DBN stream; the live
+/// adapter uses one directly on the records its client hands it. It owns the instrument ids and the
+/// counts, so the same one can be carried across files.
+#[derive(Clone, Debug, Default)]
+pub struct Mapper {
     ids: InstrumentMap,
     stats: Stats,
-    pending: VecDeque<Item>,
     keep_zero_size: bool,
+}
+
+impl Mapper {
+    pub fn new() -> Mapper {
+        Mapper::default()
+    }
+
+    /// Start from instrument ids already assigned (a later file of the same session).
+    pub fn with_instruments(mut self, ids: InstrumentMap) -> Mapper {
+        self.ids = ids;
+        self
+    }
+
+    /// Pass prints of zero shares through as trades of size 0 (the default drops and counts them).
+    pub fn keep_zero_size(mut self, keep: bool) -> Mapper {
+        self.keep_zero_size = keep;
+        self
+    }
+
+    pub fn instruments(&self) -> &InstrumentMap {
+        &self.ids
+    }
+
+    pub fn stats(&self) -> Stats {
+        self.stats
+    }
+
+    pub fn into_instruments(self) -> InstrumentMap {
+        self.ids
+    }
+
+    /// Map one record, appending what it makes (nothing, or one or two items) to `out`.
+    pub fn map(&mut self, rec: &RecordRef<'_>, out: &mut Vec<Item>) -> Result<(), DecodeError> {
+        let index = self.stats.records;
+        self.stats.records += 1;
+        map_record(
+            rec,
+            &mut self.ids,
+            &mut self.stats,
+            self.keep_zero_size,
+            index,
+            out,
+        )
+    }
+}
+
+pub struct Decoder<'a> {
+    inner: Box<dyn NextRecord + Send + 'a>,
+    mapper: Mapper,
+    pending: VecDeque<Item>,
 }
 
 fn side_px(px: i64) -> Px {
@@ -208,23 +260,21 @@ fn seq_of(publisher: u16, sequence: u32) -> u64 {
 }
 
 impl<'a> Decoder<'a> {
-    fn from_inner(inner: Box<dyn NextRecord + 'a>) -> Decoder<'a> {
+    fn from_inner(inner: Box<dyn NextRecord + Send + 'a>) -> Decoder<'a> {
         Decoder {
             inner,
-            ids: InstrumentMap::default(),
-            stats: Stats::default(),
+            mapper: Mapper::default(),
             pending: VecDeque::new(),
-            keep_zero_size: false,
         }
     }
 
     /// Plain (uncompressed) DBN.
-    pub fn new<R: Read + 'a>(reader: R) -> Result<Decoder<'a>, DecodeError> {
+    pub fn new<R: Read + Send + 'a>(reader: R) -> Result<Decoder<'a>, DecodeError> {
         Ok(Decoder::from_inner(Box::new(DbnDecoder::new(reader)?)))
     }
 
     /// Zstd-compressed DBN, as Databento delivers and as captures are kept.
-    pub fn zstd<R: Read + 'a>(reader: R) -> Result<Decoder<'a>, DecodeError> {
+    pub fn zstd<R: Read + Send + 'a>(reader: R) -> Result<Decoder<'a>, DecodeError> {
         Ok(Decoder::from_inner(Box::new(DbnDecoder::with_zstd(
             reader,
         )?)))
@@ -239,16 +289,27 @@ impl<'a> Decoder<'a> {
 
     /// Pass prints of zero shares through as trades of size 0 (the default drops and counts them).
     pub fn keep_zero_size(mut self, keep: bool) -> Self {
-        self.keep_zero_size = keep;
+        self.mapper = self.mapper.keep_zero_size(keep);
+        self
+    }
+
+    /// Start from instrument ids already assigned (the next file of one session).
+    pub fn with_instruments(mut self, ids: InstrumentMap) -> Self {
+        self.mapper = self.mapper.with_instruments(ids);
         self
     }
 
     pub fn instruments(&self) -> &InstrumentMap {
-        &self.ids
+        self.mapper.instruments()
+    }
+
+    /// The ids assigned so far, to carry into the next file.
+    pub fn into_instruments(self) -> InstrumentMap {
+        self.mapper.into_instruments()
     }
 
     pub fn stats(&self) -> Stats {
-        self.stats
+        self.mapper.stats()
     }
 
     /// The next item, or `None` at the end of the stream.
@@ -257,20 +318,11 @@ impl<'a> Decoder<'a> {
             if let Some(i) = self.pending.pop_front() {
                 return Ok(Some(i));
             }
-            let index = self.stats.records;
             let Some(rec) = self.inner.next_ref()? else {
                 return Ok(None);
             };
-            self.stats.records += 1;
             let mut out: Vec<Item> = Vec::with_capacity(2);
-            map_record(
-                &rec,
-                &mut self.ids,
-                &mut self.stats,
-                self.keep_zero_size,
-                index,
-                &mut out,
-            )?;
+            self.mapper.map(&rec, &mut out)?;
             self.pending.extend(out);
         }
     }

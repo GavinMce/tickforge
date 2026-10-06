@@ -695,3 +695,63 @@ fn errors_say_what_and_where() {
     let d = DecodeError::from(dbn::Error::decode("boom"));
     assert!(d.to_string().starts_with("DBN: "), "{d}");
 }
+
+#[test]
+fn a_mapper_maps_records_it_is_handed_and_keeps_its_ids_and_counts() {
+    use dbn::decode::{DbnDecoder, DecodeRecordRef};
+    let bytes = dbn(Schema::Trades, |e| {
+        e.encode_record(&trade(81, 500, 1, 1, 5 * D, 3, 1)).unwrap();
+        e.encode_record(&trade(81, 600, 2, 2, 0, 3, 2)).unwrap();
+        e.encode_record(&trade(81, 500, 3, 3, 6 * D, 0, 3)).unwrap();
+    });
+    let mut dec = DbnDecoder::new(&bytes[..]).unwrap();
+    let mut m = Mapper::new();
+    let mut out = Vec::new();
+    while let Some(rec) = dec.decode_record_ref().unwrap() {
+        m.map(&rec, &mut out).unwrap();
+    }
+    assert_eq!(out.len(), 1);
+    let s = m.stats();
+    assert_eq!(
+        (s.records, s.trades, s.bad_trades, s.zero_size),
+        (3, 1, 1, 1)
+    );
+    assert_eq!(m.instruments().dense(500), Some(0));
+    assert_eq!(
+        m.instruments().dense(600),
+        None,
+        "a dropped trade does not make an id"
+    );
+}
+
+#[test]
+fn instrument_ids_carry_from_one_file_to_the_next() {
+    let first = dbn(Schema::Trades, |e| {
+        e.encode_record(&trade(81, 20, 1, 1, 5 * D, 1, 1)).unwrap();
+        e.encode_record(&trade(81, 30, 2, 2, 5 * D, 1, 2)).unwrap();
+    });
+    let second = dbn(Schema::Trades, |e| {
+        e.encode_record(&trade(81, 40, 3, 3, 5 * D, 1, 3)).unwrap();
+        e.encode_record(&trade(81, 30, 4, 4, 5 * D, 1, 4)).unwrap();
+    });
+    let mut a = Decoder::new(&first[..]).unwrap();
+    while a.next_item().unwrap().is_some() {}
+    let ids = a.into_instruments();
+    let ev: Vec<Event> = Decoder::new(&second[..])
+        .unwrap()
+        .with_instruments(ids)
+        .filter_map(|i| {
+            if let Item::Event(e) = i.unwrap() {
+                Some(e)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let dense: Vec<u32> = ev.iter().map(|e| e.hdr().instrument).collect();
+    assert_eq!(
+        dense,
+        [2, 1],
+        "30 keeps the id it had, 40 gets the next one"
+    );
+}

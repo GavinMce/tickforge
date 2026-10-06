@@ -223,3 +223,7 @@ the opening five minutes' first six seconds (531,057 trades, busiest second 236,
 prints are set aside) lose nothing even if the engine pauses for six seconds in the middle of the
 burst (the ring peaks at 343k of 2.1M). Only a ring smaller than the burst drops, and every drop is
 counted and marked. Details and the policy are in ADR 0039.
+
+**Raw capture (2026-10-06).** `tf-capture` keeps the feed's own records in rolling, crash-safe files
+(ADR 0040). Real data through it: 1.1 million records a second written with an fsync per 100,000,
+about 10% smaller than Databento's own compressed files, verified and replayed identically.

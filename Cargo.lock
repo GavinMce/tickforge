@@ -408,6 +408,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-host"
+version = "0.1.0"
+dependencies = [
+ "tf-budget",
+ "tf-core",
+ "tf-engine",
+ "tf-ledger",
+ "tf-risk",
+ "tf-strategy",
+ "tf-synth",
+ "tf-universe",
+]
+
+[[package]]
 name = "tf-ingest"
 version = "0.1.0"
 dependencies = [

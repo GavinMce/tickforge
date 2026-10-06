@@ -34,6 +34,7 @@ tf-ingest = { path = "crates/tf-ingest" }
 tf-capture = { path = "crates/tf-capture" }
 tf-universe = { path = "crates/tf-universe" }
 tf-reference = { path = "crates/tf-reference" }
+tf-host = { path = "crates/tf-host" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

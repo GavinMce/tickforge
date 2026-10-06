@@ -952,4 +952,136 @@ epics:
           - A proposed rule set is shown as a structural diff with any loosening of a protective stage flagged
           - It is backtested against the base on held-out sessions and judged by explicit gates, with a stored record of the verdict and the runs
           - Nothing is approved by the gates alone; a person's approval is recorded, and a rejected proposal cannot be approved
-
+  - id: E17
+    jira: TIC-119
+    title: "Workspace: linked account, budgets for groups and strategies, and strategy runs"
+    phase: 5
+    labels: [phase5, workspace, ui]
+    goal: One linked broker account split into reserved budgets (groups, then strategies) enforced by the risk gateway and rebalanced after each session; each strategy shows its runs and opens the most recent one, with the trade explorer in its own view. Decisions in ADR 0031.
+    stories:
+      - id: E17-S01
+        jira: TIC-120
+        title: "Budget tree model and rules (workspace, groups, strategies; reserved shares)"
+        status: todo
+        ac:
+          - Children never exceed their parent and a share cannot go below what is in use
+          - Budgets in dollars, the legal range of each share for a draft, and the diff between two trees are pure functions with tests
+      - id: E17-S02
+        jira: TIC-121
+        title: "Per-node budgets enforced by the risk gateway"
+        status: todo
+        deps: [E17-S01, E09-S01, E09-S03]
+        ac:
+          - An opening order that would exceed its strategy's or its group's budget is refused, naming the node
+          - Longs are charged at notional and shorts at the worst case under the gap rule; closes always pass
+      - id: E17-S03
+        jira: TIC-122
+        title: "Per-strategy position attribution (virtual sub-accounts over one broker account)"
+        status: todo
+        deps: [E09-S04, E17-S02]
+        ac:
+          - Two strategies holding one symbol keep separate lots and P&L; only the net reaches the broker
+          - Replay reproduces the split exactly and it reconciles to the account
+      - id: E17-S04
+        jira: TIC-123
+        title: "Two-tier loss limits per strategy (stop opening, then flatten)"
+        status: todo
+        deps: [E17-S02, E17-S03]
+        ac:
+          - A strategy past its soft limit stops opening and its exits still pass; past its hard limit its positions are flattened
+          - Only that strategy is affected, and the limits are not agent-tunable
+      - id: E17-S05
+        jira: TIC-124
+        title: "Budget events in the ledger and the end-of-session rebalance"
+        status: todo
+        deps: [E17-S01, E09-S04]
+        ac:
+          - Budget changes are scheduled and take effect only at the rebalance, which moves realised P&L into the strategy that made it within a floor and ceiling
+          - A cut never forces an open position to resize, and replay verifies the budgets at every point
+      - id: E17-S06
+        jira: TIC-125
+        title: "Link a broker account and read its balance (Alpaca paper first, one account)"
+        status: todo
+        deps: [E09-S05, E13-S05]
+        ac:
+          - One account is linked with credentials held in secrets management, and its balance and positions are read
+          - The account is a field, so another can be added later
+      - id: E17-S07
+        jira: TIC-126
+        title: "Broker-reported constraints cap the usable budget (no hardcoded regulation)"
+        status: todo
+        deps: [E17-S06, E17-S02]
+        ac:
+          - Buying power, margin and any day-trade restrictions reported by the broker cap what the reserved budgets can use
+          - A warning shows when the budgets add up to more than the account supports
+      - id: E17-S08
+        jira: TIC-127
+        title: "Run catalog per strategy (most recent first, with paper, live and backtest kept apart)"
+        status: todo
+        deps: [E16-S03, E17-S03]
+        ac:
+          - Each strategy's runs list session date, net P&L, trades, rules version and the budget in force, newest first
+          - The most recent run is one lookup and any run opens in the trade explorer
+      - id: E17-S09
+        jira: TIC-128
+        title: "Workspace service: read API, hosting and sign-in"
+        status: todo
+        deps: [E17-S05, E17-S08, E13-S02]
+        ac:
+          - A read-only API serves balance, groups, strategies, budgets, use, day P&L and runs
+          - The UI is hosted behind sign-in and no screen can place an order
+      - id: E17-S10
+        jira: TIC-129
+        title: "Overview screen (totals, allocation bar, group cards, strategies)"
+        status: todo
+        deps: [E17-S09]
+        ac:
+          - Shows totals, the split of the balance, a card per group and the selected group's strategies with budget, use, P&L, state and run count
+          - Shows the selection's loss limits and a banner when budget changes are scheduled
+      - id: E17-S11
+        jira: TIC-130
+        title: "Strategy run view (opens the latest run; older, newer and a run list)"
+        status: todo
+        deps: [E17-S08, E17-S10]
+        ac:
+          - Clicking a strategy opens its most recent run, with Older, Newer, Latest and a newest-first run list
+          - Shows the run's summary, a thumbnail chart, its trades, and for a run with no entry the reason it passed
+      - id: E17-S12
+        jira: TIC-131
+        title: "Trade explorer in its own view, opened from a run"
+        status: todo
+        deps: [E17-S11, E16-S02]
+        ac:
+          - The existing explorer opens full view from a run, starting at the scanner hit, with Back to the run
+          - Reads the stored run and draws only data up to the cursor
+      - id: E17-S13
+        jira: TIC-132
+        title: "Budget editor (clamped sliders, loss limits, scheduled changes)"
+        status: todo
+        deps: [E17-S01, E17-S05, E17-S09]
+        ac:
+          - Each share shows its legal range and why, and edits are clamped to it
+          - Changes are listed in dollars and scheduled for the next rebalance, and the same rules are enforced server-side
+      - id: E17-S14
+        jira: TIC-133
+        title: "Agent budget proposals with an asymmetric approval path"
+        status: todo
+        deps: [E17-S01, E12-S06, E16-S04]
+        ac:
+          - A decrease within bounds (step and cooldown per node) applies on its own and is recorded; an increase needs a person's approval
+          - An increase is refused for a strategy in drawdown, and children never exceed the parent
+      - id: E17-S15
+        jira: TIC-134
+        title: "Proposals panel in the app (approve and decline)"
+        status: todo
+        deps: [E17-S14, E17-S10]
+        ac:
+          - Applied and pending proposals show what changed, why and the evidence
+          - Approving an increase schedules it for the next rebalance like any other edit
+      - id: E17-S16
+        jira: TIC-135
+        title: "Overflow: lend idle budget to a sibling (opt-in, deferred)"
+        status: todo
+        deps: [E17-S02, E17-S05]
+        ac:
+          - Deferred by decision. An opt-in setting lets a sibling use idle budget temporarily, returned at the rebalance

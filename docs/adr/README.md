@@ -63,3 +63,4 @@ How:
 | [0044](0044-tier-1-is-shared-by-claims-with-holds-that-cannot-be-taken-and-interests-that-can.md) | Tier 1 is shared by claims, with holds that cannot be taken and interests that can | Accepted |
 | [0045](0045-brokers-speak-one-interface-and-their-events-are-checked-by-one-rule.md) | Brokers speak one interface, and their events are checked by one rule | Accepted |
 | [0046](0046-the-host-runs-many-strategies-through-one-gateway-and-stops-one-without-stopping-the-rest.md) | The host runs many strategies through one gateway and stops one without stopping the rest | Accepted |
+| [0047](0047-a-day-is-checked-by-replaying-its-capture-and-comparing-decision-logs.md) | A day is checked by replaying its capture and comparing decision logs | Accepted |

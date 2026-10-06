@@ -1374,11 +1374,40 @@ epics:
       - id: E18-S06
         jira: TIC-145
         title: "Replay-equivalence check: a captured day replays to the live run's decisions"
-        status: todo
+        status: done
         deps: [E06-S04, E18-S05]
+        evidence: >
+          tf-host (ADR 0047). A recording host writes a decision log as text (`decisions v1`, one record a
+          line, checked by an `end N` line): every intent with the gateway's answer (accepted as order N,
+          or refused and why), every tier change (the scanner's and the strategies'), every fill, and every
+          operator action (a strategy added, killed, the kill switch, the end of the day), each with the
+          number of the event and its time. `replay` runs the events through a fresh host built like the
+          live one, doing what the live log says was done by hand at the event it was done at, and
+          `compare` finds the first difference: record, event, time of day to the nanosecond and symbol
+          name, with both lines. `replay_capture` does it from a raw capture directory in two passes (the first
+          learns the instrument ids and names, numbered in the order first seen, as live; the second
+          streams events through the host so a day never sits in memory) and checks the symbol
+          numbering and id space before the decisions, so a renumbering is not mistaken for a decision.
+          Shown: a live day replays to the same decisions, answers, fills and a byte-identical
+          ledger; a raw DBN capture in rolled segments replays equal to a live run over the same
+          stream; one changed price, a missing event, a missing operator action or a strategy that decides on a
+          counter outside the events are each caught with the right record, time and symbol (S02 in the
+          capture test); a strategy given with other parameters or universe is refused, not compared; the report
+          says when strategies traded on a paper broker (their fills cannot be reproduced) and, only
+          when the replay differs, how many events the live ingest queue gave up (the capture holds what the feed
+          sent, the engine saw less). 12 tests; about 25 mutants killed. The probe left over from ADR 0044: a
+          replay by recomputation has no gap between a strategy-caused eviction and the event; a follower fed
+          the tape holds exactly the live promoter's symbols after every event (tested with evictions
+          and promotions); the in-callback gap exists only for a follower, and no run here uses one.
+          Narrowed: running it nightly is operations (E18-S09) and its place in the daily report is
+          E18-S07 (the check returns a Report with text for it); a `tf` command waits for the strategy set
+          to have names to build from (E18-S08); the live process that writes the log and the engine-input
+          tape (the live feed adapter, E06-S02) does not exist yet, so the live side in the tests is the host
+          run over the same stream. Operator inputs other than the four actions (a budget edit, a rebalance)
+          are not replayed.
         ac:
-          - Replaying the raw capture of a live day through the same host reproduces every strategy's intents and the gateway's answers bit for bit, or reports the first difference with its time and symbol
-          - Run nightly on the day just captured, and the result is part of the daily report
+          - Replaying the raw capture of a day through the same host reproduces every strategy's intents, the gateway's answers, tier changes and fills, or reports the first difference with its time and symbol
+          - The check returns a report fit for the daily report, naming strategies whose fills cannot be reproduced and the live queue's drops as a possible cause
       - id: E18-S07
         jira: TIC-146
         title: Daily report per strategy and for system health

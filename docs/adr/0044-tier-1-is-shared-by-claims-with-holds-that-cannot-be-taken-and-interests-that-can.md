@@ -43,6 +43,6 @@ host to tell the strategies (`on_tier1_revoked`); holds are not revoked by a dem
   strategies the multi-strategy host derives holds from the gateway's orders and positions (E18-S05).
 - A strategy-caused eviction is applied inside the callback live but arrives before the event in a
   replay; code that inspects the evicted symbol in the same callback can see different state. The
-  replay-equivalence work (E18-S06) is to test for it.
+  replay-equivalence work (E18-S06) probed it: a replay by recomputation has no such gap, and a follower holds the live promoter's symbols after every event (ADR 0047).
 - Rejected: a scanner hit evicting an interest (the market's heat does not outrank a strategy's
   stated need), and priority by recency (it would let the busiest strategy crowd out the rest).

@@ -16,14 +16,14 @@ use crate::{
     StopReason, StrategyDef, certify, runner,
 };
 
-const SEC: Nanos = NANOS_PER_SEC;
-const MS: Nanos = 1_000_000;
-const T0: Nanos = 100 * SEC;
-const D: u128 = 1_000_000_000;
-const SYMBOLS: u32 = 12;
+pub(crate) const SEC: Nanos = NANOS_PER_SEC;
+pub(crate) const MS: Nanos = 1_000_000;
+pub(crate) const T0: Nanos = 100 * SEC;
+pub(crate) const D: u128 = 1_000_000_000;
+pub(crate) const SYMBOLS: u32 = 12;
 
 #[derive(Clone, Copy, Debug)]
-enum Plan {
+pub(crate) enum Plan {
     /// Buy `qty` of the member with the most trades each review, for the first `n` reviews.
     Buy { qty: u32, n: u32 },
     /// As `Buy`, and panic at review `at`.
@@ -39,7 +39,7 @@ enum Plan {
     Rest { qty: u32, n: u32 },
 }
 
-struct Trader {
+pub(crate) struct Trader {
     id: u16,
     plan: Plan,
     reviews: u32,
@@ -150,7 +150,7 @@ impl CrossStrategy for Trader {
     }
 }
 
-fn names() -> SymbolTable {
+pub(crate) fn names() -> SymbolTable {
     let mut t = SymbolTable::new();
     for i in 0..SYMBOLS {
         t.intern(&format!("S{i:02}"));
@@ -158,7 +158,7 @@ fn names() -> SymbolTable {
     t
 }
 
-fn snapshot() -> Snapshot {
+pub(crate) fn snapshot() -> Snapshot {
     let mut text = String::from("# as_of 2026-10-02\nsymbol,price,adv_shares\n");
     for i in 0..SYMBOLS {
         text.push_str(&format!("S{i:02},20.00,{}\n", (i + 1) * 100));
@@ -166,14 +166,14 @@ fn snapshot() -> Snapshot {
     Snapshot::parse(&text).unwrap()
 }
 
-fn reference() -> Reference {
+pub(crate) fn reference() -> Reference {
     Reference {
         symbols: names(),
         snapshot: snapshot(),
     }
 }
 
-fn tree(n: u32) -> Tree {
+pub(crate) fn tree(n: u32) -> Tree {
     let strategies = (1..=n)
         .map(|i| BudgetStrategy {
             id: format!("s{i}"),
@@ -192,7 +192,7 @@ fn tree(n: u32) -> Tree {
     .unwrap()
 }
 
-fn config(strategies: u32) -> HostConfig {
+pub(crate) fn config(strategies: u32) -> HostConfig {
     let ids = (1..=strategies).map(|i| (i as u16, format!("s{i}")));
     HostConfig {
         id_space: SYMBOLS as usize,
@@ -219,12 +219,12 @@ fn config(strategies: u32) -> HostConfig {
 /// A market: every symbol quotes and trades each second, `1 + sym % 3` trades, so within any set of
 /// symbols the one with the lowest id of those with `sym % 3 == 2` has the most trades.
 /// `price(sym, sec)` is in cents.
-fn market(secs: u64, price: impl Fn(u32, u64) -> i64) -> Vec<Event> {
+pub(crate) fn market(secs: u64, price: impl Fn(u32, u64) -> i64) -> Vec<Event> {
     market_with(secs, 1, price)
 }
 
 /// [`market`] with the quote `half` cents either side of the price.
-fn market_with(secs: u64, half: i64, price: impl Fn(u32, u64) -> i64) -> Vec<Event> {
+pub(crate) fn market_with(secs: u64, half: i64, price: impl Fn(u32, u64) -> i64) -> Vec<Event> {
     let mut v = Vec::new();
     for sec in 0..secs {
         for sym in 0..SYMBOLS {
@@ -259,11 +259,11 @@ fn market_with(secs: u64, half: i64, price: impl Fn(u32, u64) -> i64) -> Vec<Eve
     v
 }
 
-fn flat(_: u32, _: u64) -> i64 {
+pub(crate) fn flat(_: u32, _: u64) -> i64 {
     2_000
 }
 
-fn def(id: u16, universe: &str, plan: Plan, route: Route) -> StrategyDef {
+pub(crate) fn def(id: u16, universe: &str, plan: Plan, route: Route) -> StrategyDef {
     StrategyDef {
         id,
         name: format!("trader{id}"),
@@ -283,21 +283,26 @@ fn def(id: u16, universe: &str, plan: Plan, route: Route) -> StrategyDef {
     }
 }
 
-const LOW: &str = "universe v1\nstatic adv_shares <= 600\n";
-const HIGH: &str = "universe v1\nstatic adv_shares >= 700\n";
+pub(crate) const LOW: &str = "universe v1\nstatic adv_shares <= 600\n";
+pub(crate) const HIGH: &str = "universe v1\nstatic adv_shares >= 700\n";
 
-fn certify_all(h: &mut Host<MemStore>, cfg: &HostConfig, defs: &[StrategyDef], tape: &[Event]) {
+pub(crate) fn certify_all(
+    h: &mut Host<MemStore>,
+    cfg: &HostConfig,
+    defs: &[StrategyDef],
+    tape: &[Event],
+) {
     for d in defs {
         let cert = certify(d, cfg, &reference(), tape, 7).unwrap();
         h.add_strategy(d, &cert).unwrap();
     }
 }
 
-fn host(cfg: &HostConfig) -> Host<MemStore> {
+pub(crate) fn host(cfg: &HostConfig) -> Host<MemStore> {
     Host::new(cfg.clone(), reference(), MemStore::from_records(vec![])).unwrap()
 }
 
-fn run(h: &mut Host<MemStore>, events: &[Event]) {
+pub(crate) fn run(h: &mut Host<MemStore>, events: &[Event]) {
     for e in events {
         h.on_event(e).unwrap();
     }
@@ -1059,7 +1064,7 @@ fn nothing_more_is_called_on_a_strategy_that_panicked() {
 static REVOKED: Mutex<Vec<(u16, u32)>> = Mutex::new(Vec::new());
 
 /// Asks for Tier 1 for its top member at its first review, and notes what it loses.
-struct Wants(u16);
+struct Wants(u16, bool);
 
 impl CrossStrategy for Wants {
     fn id(&self) -> StrategyId {
@@ -1077,7 +1082,9 @@ impl CrossStrategy for Wants {
     }
 
     fn on_tier1_revoked(&mut self, _ctx: &mut Ctx<'_>, _v: &MemberView<'_>, id: u32) {
-        REVOKED.lock().unwrap().push((self.0, id));
+        if self.1 {
+            REVOKED.lock().unwrap().push((self.0, id));
+        }
     }
 }
 
@@ -1093,7 +1100,7 @@ fn a_symbol_taken_from_a_strategy_is_told_to_it_and_to_no_one_else() {
         universe: Spec::parse(universe).unwrap(),
         priority,
         route: Route::Sim,
-        build: Box::new(move || runner(Wants(id))),
+        build: Box::new(move || runner(Wants(id, true))),
     };
     // Strategy 1 (priority 1) takes S02 first; strategy 2 (priority 5) then wants S08 and there is room for one.
     let mut h = host(&cfg);
@@ -1245,4 +1252,9 @@ fn twenty_strategies_run_in_one_engine_each_in_its_own_account() {
     }
     assert_eq!(h.ledger_refusals(), 0, "{:?}", h.anomalies());
     assert!(h.working_orders().is_empty());
+}
+
+/// A strategy that asks for Tier 1 for its top member at each review (for the replay tests).
+pub(crate) fn wants(id: u16) -> impl CrossStrategy + 'static {
+    Wants(id, false)
 }

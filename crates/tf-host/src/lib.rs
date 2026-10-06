@@ -1,0 +1,41 @@
+//! The multi-strategy live host (E18-S05).
+//!
+//! One engine step per market event serves up to twenty strategies at once:
+//!
+//! 1. the brokers see the event; what they did (acknowledged, filled, closed) is recorded in the ledger
+//!    and told to the strategy that owns the order;
+//! 2. Tier 0 and the shared promoter take the event;
+//! 3. every running strategy takes it (a periodic review and, if it asks, events for its members), and
+//!    each strategy's dynamic universe is re-ranked on schedule;
+//! 4. what the strategies asked for goes through the risk gateway (kill switch, loss limits, per
+//!    strategy budgets: its **sub-account**), is written to the ledger, and goes to the strategy's
+//!    broker: the simulated one, or a paper broker;
+//! 5. once a second of event time the loss limits are looked at and strategies being flattened are
+//!    pushed on.
+//!
+//! **One strategy failing does not stop the others.** A strategy that panics, is killed, or crosses a
+//! loss limit is stopped alone: its working opens are cancelled and what it holds is closed by the
+//! host through the same gateway. The others keep running.
+//!
+//! **Admission.** A strategy is added only with a [`Certificate`] from [`certify`]: proof that this
+//! strategy, as configured, was replayed on a tape through this very machinery without a panic or a
+//! ledger refusal. The host refuses one that has not been.
+//!
+//! **Tier 1 holds** are derived from the ledger: a strategy holds a symbol while it has a position or an
+//! order working in it, including an order whose placement got no answer.
+
+mod certify;
+mod def;
+mod host;
+mod runner;
+
+#[cfg(test)]
+mod tests;
+
+pub use certify::{CertifyError, certify};
+pub use def::{Build, Certificate, Route, StrategyDef};
+pub use host::{
+    AdmitError, Host, HostConfig, HostError, REASON_FLATTEN, Reference, SlotState, StopReason,
+    StrategyStats,
+};
+pub use runner::{DynRunner, runner};

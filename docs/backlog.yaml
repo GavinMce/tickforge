@@ -1323,12 +1323,54 @@ epics:
       - id: E18-S05
         jira: TIC-144
         title: Multi-strategy live host with sub-accounts, simulated broker and staged rollout
-        status: todo
+        status: done
         deps: [E18-S03, E18-S04, E09-S08]
+        evidence: >
+          New crate tf-host (ADR 0046). One engine step per event serves up to 20 strategies: brokers
+          see the event and what they did is recorded in the ledger and told to the owning strategy;
+          marks; shared Tier 0 and promoter; every running strategy (reviews, member events) and each
+          dynamic universe; then each strategy's intents go through the risk gateway (kill switch, loss
+          limits, per-strategy budgets from the budget tree: its sub-account, refused at admission if it
+          has none), into the ledger, and to the strategy's broker (the simulated one, or a paper
+          broker the host is given); once a second of event time the loss limits are checked and strategies being
+          flattened are pushed on. Failure isolation: a strategy that panics (in a review, an order
+          update or a revocation), is killed, or crosses a loss limit stops alone; its working opens are
+          cancelled and what it holds is closed by the host through the same gateway (marketable
+          collars, own numbering, repeated each second until flat, shown against a rate limit that
+          refuses some closes); the other strategy's decisions and counts are identical with and
+          without the broken one. Soft limit: stops events and reviews, cancels resting opens, keeps the
+          position; hard limit: flattens. Kill switch: gateway refuses opens, host cancels what is
+          working to open. Admission: `certify` replays a strategy, as configured, over a tape through a
+          scratch host with the same limits and budgets and issues a sealed Certificate (strategy
+          fingerprint over number, name, parameters, universe, priority and route; tape id; counts; an
+          outcome hash); `add_strategy` refuses a missing, altered, other-strategy, other-parameters or
+          other-universe certificate and one from too short a replay, and `certify` refuses a
+          strategy that panics, is stopped by a limit, has no budget, needs data the snapshot lacks
+          or names symbols the host does not know. Tier 1 holds are derived from the ledger (a position
+          or any working order, including one whose placement got no answer) and given to the
+          promoter per strategy; interests lost to an eviction reach the strategy that held them. Broker
+          faults are handled per order (refused and rate-limited orders are closed in the ledger, unanswered ones stay
+          working and held); a broker that says impossible things is counted and noted, never forced
+          into the ledger. 20 tests including 20 strategies in one engine (each position its own; their sum is the
+          broker's) and two identical runs giving identical ledgers; about 35 mutants killed (one equivalent: a
+          `.max(1)` on the minimum events). Narrowed: "a subset can send orders to Alpaca paper" is
+          split out as E18-S11 (TIC-152; needs the transport, E09-S10, and credentials): the host routes
+          to any Broker and the Alpaca one is tested against a fake transport only. The certificate's
+          replay takes the tape as events with a tape id; reading a capture directory into those events and
+          proving a replay equals the live run is E18-S06. A certificate proves the strategy ran through
+          this machinery without a panic or ledger refusal; it is not a claim about profit.
         ac:
-          - 10 to 20 strategies run in one engine, each with its own gateway sub-account and budget, against the simulated broker on live data; a subset can send orders to Alpaca paper
-          - A strategy can be added to a running day only after it has been replayed on captured tape, and the host refuses one that has not
+          - 10 to 20 strategies run in one engine, each with its own budget (a sub-account of the gateway) against the simulated broker on live data
+          - A strategy can be added only with a certificate that it was replayed on a tape, and the host refuses one that has not
           - One strategy failing or being killed does not stop the others, and the kill switch and loss limits behave as in the single-strategy case
+      - id: E18-S11
+        jira: TIC-152
+        title: A subset of strategies sends orders to Alpaca paper through the host
+        status: todo
+        deps: [E18-S05, E09-S10]
+        ac:
+          - With the transport and Alpaca paper credentials, a chosen subset of strategies runs against Alpaca paper for a live session, the stream feeding AlpacaBroker, and every acknowledgement, fill, rejection and unanswered placement is recorded in the ledger without a refusal
+          - Ledger positions are reconciled against Alpaca's at the end of the session and any difference is reported
       - id: E18-S06
         jira: TIC-145
         title: "Replay-equivalence check: a captured day replays to the live run's decisions"

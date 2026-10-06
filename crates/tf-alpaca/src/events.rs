@@ -267,38 +267,7 @@ pub fn parse_frame(text: &str) -> Result<Frame, ParseError> {
     }
 }
 
-/// Which protective leg of a bracket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Leg {
-    /// The stop-loss.
-    Stop,
-    /// The profit target.
-    Target,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Ack,
-    Fill {
-        qty: u32,
-        px: Px,
-    },
-    Close(OrderState),
-    /// A protective leg of this order filled.
-    LegFill {
-        leg: Leg,
-        qty: u32,
-        px: Px,
-    },
-}
-
-/// Something that happened to an order we placed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BrokerEvent {
-    pub order: OrderId,
-    pub ts: Nanos,
-    pub kind: Kind,
-}
+pub use tf_strategy::broker::{BrokerEvent, Kind, Leg};
 
 /// What reading an update gave.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -410,7 +379,9 @@ impl Tracker {
             "fill" | "partial_fill" => self.fill(order, u, ts, &mut out, ack),
             "canceled" => self.end(order, OrderState::Cancelled, ts, &mut out, ack),
             "expired" => self.end(order, OrderState::Expired, ts, &mut out, ack),
-            "rejected" => self.end(order, OrderState::Rejected, ts, &mut out, ack),
+            // A rejection comes before any acknowledgement and the order was never accepted, so there
+            // is nothing to acknowledge first (an acknowledged order cannot become rejected).
+            "rejected" => self.end(order, OrderState::Rejected, ts, &mut out, |_, _| {}),
             "done_for_day"
             | "replaced"
             | "stopped"

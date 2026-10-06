@@ -29,6 +29,7 @@
 
 use tf_core::{Event, InstrumentId, Nanos, Px, StatusKind};
 
+use crate::broker::{Broker, BrokerEvent, CancelOutcome, Kind, Submission};
 use crate::intent::{Intent, IntentId, Side, Tif};
 use crate::lifecycle::{Order, OrderId, OrderState, OrderUpdate, RejectReason};
 use crate::strategy::{Host, Strategy};
@@ -87,6 +88,36 @@ impl Book {
 struct Live {
     order: Order,
     arrival: Nanos,
+    /// The venue will refuse it when it arrives (a [`FaultPlan`] decided so).
+    venue_rejects: bool,
+}
+
+/// Failures the simulated broker injects, deterministically, by the count of placements through the
+/// [`Broker`] interface (the first placement is number 1; `every: 3` hits numbers 3, 6, 9...). The
+/// first rule that matches a placement applies, in the order listed. A rule with `every: 0` is off.
+///
+/// These exist so a host can be shown to cope with what a real broker does: refuse, ask to slow
+/// down, say nothing, or accept and then reject.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FaultPlan {
+    /// Placements in these instruments are refused.
+    pub refuse_instruments: Vec<InstrumentId>,
+    /// Every Nth placement is refused outright.
+    pub refuse_every: u32,
+    /// Every Nth placement is told to wait `rate_limit_retry_ns`; the order does not happen.
+    pub rate_limit_every: u32,
+    pub rate_limit_retry_ns: Nanos,
+    /// Every Nth placement gets no answer ([`Submission::Unknown`]). Alternate ones arrive at the
+    /// venue anyway (the first, third, ...); the others never happen.
+    pub unknown_every: u32,
+    /// Every Nth placement is accepted by the broker and then refused by the venue on arrival.
+    pub venue_reject_every: u32,
+}
+
+impl FaultPlan {
+    fn hits(every: u32, n: u64) -> bool {
+        every != 0 && n % u64::from(every) == 0
+    }
 }
 
 pub struct SimBroker {
@@ -102,6 +133,14 @@ pub struct SimBroker {
     next_order: u64,
     updates: Vec<OrderUpdate>,
     fills: Vec<Fill>,
+    /// What the [`Broker`] interface reports, in order.
+    events: Vec<BrokerEvent>,
+    /// Set by the first placement through the [`Broker`] interface; a run that never uses it keeps no
+    /// event log.
+    events_on: bool,
+    faults: FaultPlan,
+    placements: u64,
+    unknowns: u64,
 }
 
 impl SimBroker {
@@ -116,7 +155,24 @@ impl SimBroker {
             next_order: 0,
             updates: Vec::new(),
             fills: Vec::new(),
+            events: Vec::new(),
+            events_on: false,
+            faults: FaultPlan::default(),
+            placements: 0,
+            unknowns: 0,
         }
+    }
+
+    fn note(&mut self, e: BrokerEvent) {
+        if self.events_on {
+            self.events.push(e);
+        }
+    }
+
+    /// Inject failures into placements made through the [`Broker`] interface.
+    pub fn with_faults(mut self, faults: FaultPlan) -> SimBroker {
+        self.faults = faults;
+        self
     }
 
     /// Send an intent. It reaches the venue `latency_ns` after `intent.ts`.
@@ -128,9 +184,14 @@ impl SimBroker {
         }
         let id = OrderId(self.next_order);
         self.next_order += 1;
+        self.live_as(intent, id, false);
+    }
+
+    fn live_as(&mut self, intent: &Intent, id: OrderId, venue_rejects: bool) {
         self.live.push(Live {
             order: Order::new(id, *intent),
             arrival: intent.ts.saturating_add(self.cfg.latency_ns),
+            venue_rejects,
         });
     }
 
@@ -146,6 +207,11 @@ impl SimBroker {
         let ok = l.order.transition(OrderState::Cancelled).is_ok();
         if ok {
             self.updates.push(l.order.update(ts));
+            self.note(BrokerEvent {
+                order: l.order.id,
+                ts,
+                kind: Kind::Close(OrderState::Cancelled),
+            });
         } else {
             self.live.insert(i, l);
         }
@@ -187,12 +253,21 @@ impl SimBroker {
     pub fn end_of_day(&mut self, ts: Nanos) {
         self.release(ts);
         self.accrue(ts);
+        let mut expired = Vec::new();
         for l in &mut self.live {
             if l.order.state() != OrderState::Pending
                 && l.order.transition(OrderState::Expired).is_ok()
             {
                 self.updates.push(l.order.update(ts));
+                expired.push(l.order.id);
             }
+        }
+        for order in expired {
+            self.note(BrokerEvent {
+                order,
+                ts,
+                kind: Kind::Close(OrderState::Expired),
+            });
         }
         self.live.retain(|l| !l.order.state().is_terminal());
     }
@@ -238,13 +313,38 @@ impl SimBroker {
             let at = self.live[i].arrival;
             self.accrue(at);
             let mut o = self.live[i].order;
+            if self.live[i].venue_rejects {
+                // Refused on arrival, never acknowledged.
+                o.transition(OrderState::Rejected).expect("pending rejects");
+                let mut u = o.update(at);
+                u.reject = Some(RejectReason::Broker);
+                self.updates.push(u);
+                self.note(BrokerEvent {
+                    order: o.id,
+                    ts: at,
+                    kind: Kind::Close(OrderState::Rejected),
+                });
+                self.live[i].order = o;
+                self.live.retain(|l| !l.order.state().is_terminal());
+                continue;
+            }
             o.transition(OrderState::Accepted).expect("pending accepts");
             self.updates.push(o.update(at));
+            self.note(BrokerEvent {
+                order: o.id,
+                ts: at,
+                kind: Kind::Ack,
+            });
             self.try_fill(&mut o, at);
             if o.intent.tif == Tif::Ioc && !o.state().is_terminal() {
                 o.transition(OrderState::Expired)
                     .expect("a working order expires");
                 self.updates.push(o.update(at));
+                self.note(BrokerEvent {
+                    order: o.id,
+                    ts: at,
+                    kind: Kind::Close(OrderState::Expired),
+                });
             }
             self.live[i].order = o;
             self.live.retain(|l| !l.order.state().is_terminal());
@@ -317,6 +417,11 @@ impl SimBroker {
             slippage,
         });
         self.updates.push(o.update(ts));
+        self.note(BrokerEvent {
+            order: o.id,
+            ts,
+            kind: Kind::Fill { qty, px },
+        });
     }
 
     /// Charge borrow on short positions for the time since the last call.
@@ -337,6 +442,70 @@ impl SimBroker {
             }
         }
         self.last_accrue = Some(ts);
+    }
+}
+
+impl Broker for SimBroker {
+    fn place(&mut self, intent: &Intent, order: OrderId) -> Submission {
+        self.events_on = true;
+        self.placements += 1;
+        let n = self.placements;
+        let f = &self.faults;
+        if intent.instrument as usize >= self.books.len() {
+            return Submission::Refused {
+                code: 400,
+                message: "unknown instrument".to_owned(),
+            };
+        }
+        if f.refuse_instruments.contains(&intent.instrument) || FaultPlan::hits(f.refuse_every, n) {
+            return Submission::Refused {
+                code: 422,
+                message: "simulated refusal".to_owned(),
+            };
+        }
+        if FaultPlan::hits(f.rate_limit_every, n) {
+            return Submission::RateLimited {
+                retry_after: f.rate_limit_retry_ns,
+            };
+        }
+        if FaultPlan::hits(f.unknown_every, n) {
+            self.unknowns += 1;
+            if self.unknowns % 2 == 1 {
+                self.live_as(intent, order, false);
+            }
+            return Submission::Unknown;
+        }
+        let venue_rejects = FaultPlan::hits(f.venue_reject_every, n);
+        self.live_as(intent, order, venue_rejects);
+        Submission::Accepted
+    }
+
+    fn cancel_order(&mut self, order: OrderId, ts: Nanos) -> CancelOutcome {
+        let Some(intent) = self
+            .live
+            .iter()
+            .find(|l| l.order.id == order)
+            .map(|l| l.order.intent.id)
+        else {
+            return CancelOutcome::Finished;
+        };
+        if self.cancel(intent, ts) {
+            CancelOutcome::Requested
+        } else {
+            CancelOutcome::Finished
+        }
+    }
+
+    fn observe(&mut self, ev: &Event) {
+        self.on_event(ev);
+    }
+
+    fn close_day(&mut self, ts: Nanos) {
+        self.end_of_day(ts);
+    }
+
+    fn take_events(&mut self) -> Vec<BrokerEvent> {
+        std::mem::take(&mut self.events)
     }
 }
 

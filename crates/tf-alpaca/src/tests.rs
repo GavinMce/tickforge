@@ -739,7 +739,7 @@ fn a_fill_before_any_acknowledgement_acknowledges_first() {
 }
 
 #[test]
-fn an_order_ends_cancelled_expired_or_rejected_and_a_rejection_before_an_ack_acknowledges_first() {
+fn an_order_ends_cancelled_expired_or_rejected_and_only_a_rejection_needs_no_ack_first() {
     let mut t = tracker();
     t.translate(&update(NEW));
     assert_eq!(
@@ -753,7 +753,7 @@ fn an_order_ends_cancelled_expired_or_rejected_and_a_rejection_before_an_ack_ack
     );
     assert_eq!(
         events(&tracker().translate(&update(REJECTED))),
-        [(8, Kind::Ack), (8, Kind::Close(OrderState::Rejected))]
+        [(8, Kind::Close(OrderState::Rejected))]
     );
 }
 
@@ -1339,6 +1339,31 @@ fn from_the_gateway_through_alpaca_and_the_stream_into_the_ledger_and_back_from_
 }
 
 #[test]
+fn a_rejection_by_alpaca_closes_the_order_in_the_ledger() {
+    // A rejection arrives before any acknowledgement. Acknowledging first would leave the order
+    // accepted, and the ledger (rightly) cannot turn an accepted order into a rejected one.
+    let mut j = journal();
+    let Decision::Accepted(order) = j.decide(&small(), 1).unwrap() else {
+        panic!()
+    };
+    let id = format!("tf1-{}", order.0);
+    let mut a = alpaca(vec![reply(200, &order_json(&id, "accepted"))]);
+    a.submit(&small(), order, "AAPL").unwrap();
+    let Frame::Update(u) = parse_frame(&REJECTED.replace("tf1-8", &id)).unwrap() else {
+        panic!()
+    };
+    let mut seen = 0;
+    for outcome in a.tracker.translate(&u) {
+        let Outcome::Event(e) = outcome else { continue };
+        assert_eq!(apply(&mut j, &e).unwrap(), Applied::Recorded, "{e:?}");
+        seen += 1;
+    }
+    assert_eq!(seen, 1);
+    assert_eq!(j.order(order).unwrap().state(), OrderState::Rejected);
+    assert!(j.open_orders().is_empty());
+}
+
+#[test]
 fn what_the_ledger_cannot_take_is_said_not_forced() {
     let mut j = journal();
     let ghost = BrokerEvent {
@@ -1398,4 +1423,267 @@ fn what_the_ledger_cannot_take_is_said_not_forced() {
         matches!(apply(&mut j, &leg).unwrap(), Applied::NotRecorded(m) if m.contains("protective leg"))
     );
     assert_eq!(j.records(), n);
+}
+
+// ---- the Broker interface ----
+
+use crate::broker::AlpacaBroker;
+use tf_strategy::broker::{Broker, CancelOutcome, Submission as Placed, check_events};
+
+fn broker_over(replies: Vec<Result<HttpResponse, TransportError>>) -> AlpacaBroker<Script> {
+    AlpacaBroker::new(alpaca(replies), vec!["AAPL".to_owned(), String::new()])
+}
+
+#[test]
+fn placements_end_the_way_the_broker_interface_says() {
+    let mut b = broker_over(vec![
+        reply(200, &order_json("tf1-1", "accepted")),
+        reply(422, r#"{"message":"insufficient buying power"}"#),
+        Ok(HttpResponse {
+            status: 429,
+            body: String::new(),
+            retry_after: Some(3),
+        }),
+        Err(TransportError::Timeout),
+        Err(TransportError::Timeout),
+        reply(200, "not an order"),
+    ]);
+    assert_eq!(b.place(&buy_100(), OrderId(1)), Placed::Accepted);
+    assert_eq!(
+        b.place(&buy_100(), OrderId(2)),
+        Placed::Refused {
+            code: 422,
+            message: "insufficient buying power".into()
+        }
+    );
+    assert_eq!(
+        b.place(&buy_100(), OrderId(3)),
+        Placed::RateLimited {
+            retry_after: 3_000_000_000
+        }
+    );
+    assert_eq!(b.place(&buy_100(), OrderId(4)), Placed::Unknown);
+    assert_eq!(b.unsure(), [OrderId(4)]);
+    // An answer that is not an order might still be an order: unknown, not refused.
+    assert_eq!(b.place(&buy_100(), OrderId(5)), Placed::Unknown);
+    // No symbol for the instrument (id 1 has none, 9 is outside the table): refused without a request.
+    let sent = b.alpaca().transport_sent().len();
+    let mut i = buy_100();
+    i.instrument = 1;
+    assert!(
+        matches!(b.place(&i, OrderId(6)), Placed::Refused { code: 0, message } if message.contains("no symbol"))
+    );
+    i.instrument = 9;
+    assert!(matches!(
+        b.place(&i, OrderId(7)),
+        Placed::Refused { code: 0, .. }
+    ));
+    assert_eq!(b.alpaca().transport_sent().len(), sent);
+    // An intent that cannot be written as an Alpaca order is refused with the reason.
+    let mut z = buy_100();
+    z.qty = 0;
+    assert!(matches!(
+        b.place(&z, OrderId(8)),
+        Placed::Refused { code: 0, .. }
+    ));
+}
+
+#[test]
+fn stream_frames_become_the_events_the_broker_interface_returns() {
+    let mut b = broker_over(vec![reply(200, &order_json("tf1-7", "accepted"))]);
+    assert_eq!(b.place(&buy_100(), OrderId(7)), Placed::Accepted);
+    for f in [NEW, PARTIAL, FILL] {
+        b.on_stream_frame(f).unwrap();
+    }
+    let ev = b.take_events();
+    assert_eq!(ev.iter().map(|e| e.kind).collect::<Vec<_>>().len(), 3);
+    assert!(
+        matches!(ev[0].kind, Kind::Ack)
+            && matches!(ev[1].kind, Kind::Fill { qty: 40, .. })
+            && matches!(ev[2].kind, Kind::Fill { qty: 60, .. })
+    );
+    check_events(&ev, |o| (o == OrderId(7)).then_some(100)).unwrap();
+    assert!(b.take_events().is_empty());
+    // Frames that are not updates come back to the caller; a replay of one applied is a note; an
+    // order we did not place is an anomaly; none of these makes an event.
+    assert!(matches!(
+        b.on_stream_frame(include_str!("../fixtures/stream_authorized.json"))
+            .unwrap(),
+        Frame::Authorized
+    ));
+    b.on_stream_frame(PARTIAL).unwrap();
+    b.on_stream_frame(&NEW.replace("tf1-7", "someone-else-1"))
+        .unwrap();
+    assert!(b.take_events().is_empty());
+    assert_eq!((b.notes().len(), b.anomalies().len()), (1, 1));
+    assert!(b.on_stream_frame("{not json").is_err());
+}
+
+#[test]
+fn a_placement_that_got_no_answer_is_settled_by_the_stream() {
+    let mut b = broker_over(vec![
+        Err(TransportError::Timeout),
+        Err(TransportError::Timeout),
+    ]);
+    assert_eq!(b.place(&buy_100(), OrderId(7)), Placed::Unknown);
+    assert_eq!(
+        b.cancel_order(OrderId(7), 0),
+        CancelOutcome::Unknown,
+        "it may exist, and has no id we know"
+    );
+    assert_eq!(b.unsure(), [OrderId(7)]);
+    // The order did arrive: its first stream message settles the doubt.
+    b.on_stream_frame(NEW).unwrap();
+    assert!(b.unsure().is_empty());
+    assert_eq!(b.take_events().len(), 1);
+}
+
+#[test]
+fn cancelling_goes_to_alpaca_by_its_own_id() {
+    let mut b = broker_over(vec![
+        reply(200, &order_json("tf1-1", "accepted")),
+        reply(204, ""),
+        reply(404, ""),
+        reply(500, ""),
+    ]);
+    b.place(&buy_100(), OrderId(1));
+    assert_eq!(b.cancel_order(OrderId(1), 0), CancelOutcome::Requested);
+    assert_eq!(b.cancel_order(OrderId(1), 0), CancelOutcome::Finished);
+    assert_eq!(b.cancel_order(OrderId(1), 0), CancelOutcome::Unknown);
+    let s = b.alpaca().transport_sent();
+    assert_eq!(
+        (s[1].method, s[1].path.as_str()),
+        (Method::Delete, "/v2/orders/broker-tf1-1")
+    );
+    // Never placed: nothing to cancel, and nothing is sent.
+    assert_eq!(b.cancel_order(OrderId(99), 0), CancelOutcome::Finished);
+    assert_eq!(b.alpaca().transport_sent().len(), 4);
+}
+
+#[test]
+fn a_rejection_on_the_stream_ends_the_order_without_an_acknowledgement_and_passes_the_checker() {
+    let mut b = broker_over(vec![reply(200, &order_json("tf1-8", "accepted"))]);
+    b.place(&buy_100(), OrderId(8));
+    b.on_stream_frame(REJECTED).unwrap();
+    let ev = b.take_events();
+    assert_eq!(ev.len(), 1);
+    check_events(&ev, |_| Some(100)).unwrap();
+    // The market side of the interface is not Alpaca's business.
+    b.observe(&tf_core::Event::Quote(tf_core::Quote {
+        hdr: tf_core::Header {
+            ts_event: 0,
+            ts_recv: 0,
+            seq: 0,
+            instrument: 0,
+            provider: tf_core::ProviderId::Synthetic,
+        },
+        bid_px: tf_core::Px::from_cents(1),
+        ask_px: tf_core::Px::from_cents(2),
+        bid_sz: 1,
+        ask_sz: 1,
+    }));
+    b.close_day(0);
+    assert!(b.take_events().is_empty());
+}
+
+#[test]
+fn the_simulated_broker_drives_the_ledger_through_every_outcome() {
+    use tf_core::{Event, Header, ProviderId, Quote};
+    use tf_strategy::sim::{FaultPlan, SimBroker, SimConfig};
+
+    const SEC: u64 = 1_000_000_000;
+    let mut j = journal();
+    let mut sim = SimBroker::new(
+        SimConfig {
+            latency_ns: 0,
+            borrow_bps_per_year: 0,
+        },
+        1,
+    )
+    .with_faults(FaultPlan {
+        refuse_every: 9,
+        rate_limit_every: 7,
+        rate_limit_retry_ns: SEC,
+        unknown_every: 5,
+        venue_reject_every: 4,
+        ..FaultPlan::default()
+    });
+    let quote = |ts: u64| {
+        Event::Quote(Quote {
+            hdr: Header {
+                ts_event: ts,
+                ts_recv: ts,
+                seq: ts,
+                instrument: 0,
+                provider: ProviderId::Synthetic,
+            },
+            bid_px: Px::from_cents(4_890),
+            ask_px: Px::from_cents(4_900),
+            bid_sz: 1_000,
+            ask_sz: 1_000,
+        })
+    };
+    let (mut unknown, mut heard, mut closed_by_us, mut recorded) =
+        (Vec::new(), std::collections::BTreeSet::new(), 0, 0);
+    let feed = |j: &mut Journal<MemStore>,
+                sim: &mut SimBroker,
+                heard: &mut std::collections::BTreeSet<OrderId>,
+                recorded: &mut u32| {
+        for e in sim.take_events() {
+            heard.insert(e.order);
+            assert_eq!(apply(j, &e).unwrap(), Applied::Recorded, "{e:?}");
+            *recorded += 1;
+        }
+    };
+    for n in 0..40u64 {
+        let ts = SEC + n * 11 * SEC;
+        sim.observe(&quote(ts));
+        let mut i = small();
+        i.qty = 10;
+        i.id.seq = n;
+        i.ts = ts;
+        let Decision::Accepted(order) = j.decide(&i, ts).unwrap() else {
+            panic!("gateway refused order {n}")
+        };
+        match sim.place(&i, order) {
+            Placed::Accepted => {}
+            Placed::Refused { .. } | Placed::RateLimited { .. } => {
+                // It did not happen: the ledger is told so, which frees what the gateway held for it.
+                j.close(order, OrderState::Rejected, ts).unwrap();
+                closed_by_us += 1;
+            }
+            Placed::Unknown => unknown.push(order),
+        }
+        sim.observe(&quote(ts + SEC));
+        feed(&mut j, &mut sim, &mut heard, &mut recorded);
+    }
+    sim.close_day(500 * SEC);
+    feed(&mut j, &mut sim, &mut heard, &mut recorded);
+    assert!(
+        closed_by_us > 8 && unknown.len() > 6 && recorded > 40,
+        "{closed_by_us} {} {recorded}",
+        unknown.len()
+    );
+    // Every order the gateway still has working is one whose placement got no answer and that was
+    // never heard of again: it stays working until something settles it, and is never closed on a guess.
+    let silent: std::collections::BTreeSet<OrderId> = unknown
+        .iter()
+        .copied()
+        .filter(|o| !heard.contains(o))
+        .collect();
+    assert!(!silent.is_empty() && silent.len() < unknown.len());
+    let open: std::collections::BTreeSet<OrderId> = j.open_orders().iter().map(|o| o.id).collect();
+    assert_eq!(open, silent);
+    // What the gateway holds is what the broker holds.
+    let snap = j.snapshot();
+    let held: i64 = snap.positions.iter().map(|p| p.2).sum();
+    assert_eq!(held, sim.position(0));
+    assert!(held > 0);
+    // Some orders were rejected by the venue after being accepted: the ledger has them as rejected.
+    assert!(
+        j.orders()
+            .filter(|o| o.state() == OrderState::Rejected)
+            .count() as u32
+            > closed_by_us as u32
+    );
 }

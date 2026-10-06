@@ -673,10 +673,35 @@ epics:
       - id: E09-S08
         jira: TIC-77
         title: Simulated broker for backtests and CI
-        status: todo
+        status: done
         deps: [E09-S04, E02-S02]
+        evidence: >
+          tf-strategy::broker (ADR 0045): a Broker trait (place under the gateway's order id, cancel,
+          observe market events, close the day, take events) with four placement outcomes shaped
+          like Alpaca's (Accepted, Refused, RateLimited, Unknown) and the ledger's own BrokerEvent (Ack,
+          Fill, Close; the type moved here from tf-alpaca). SimBroker implements it, with a FaultPlan
+          that injects refusals, rate limits, no-answer placements (alternate ones arrive anyway) and venue
+          rejections deterministically by placement count, first matching rule wins; fills against recorded quotes with
+          latency were already there (E08-S06). `check_events` says whether a sequence is one a broker
+          may produce (ack before fill, rejection before any ack, nothing after an end, no overfill,
+          time forward) and is run on every broker's events. AlpacaBroker (tf-alpaca) implements the
+          same trait over the Transport and reads stream frames into events. Tests: 10 sim and checker tests,
+          including a differential run of 4,000 random steps showing the Broker interface and the
+          original submit/drain_updates API make identical fills and the same endings; 5 Alpaca-wrapper
+          tests against the fake transport; and one that drives the real ledger (Journal) from the
+          simulated broker through refusals, rate limits, venue rejections and never-answered
+          placements: every event is recorded, the gateway's position equals the broker's, and the only
+          orders left working are the unanswered ones nobody heard of again. 29 mutants of the fault
+          counting and precedence, retry value, event log switch, cancel, unsure tracking, unit conversion and checker bounds
+          killed. Found by building it: the Alpaca tracker acknowledged an order before reporting its
+          rejection, which the ledger (correctly) cannot take (an accepted order cannot become
+          rejected), so a venue rejection would have left the order working and its budget held; fixed
+          (a rejection is reported alone) with a test through the real ledger. Not done: the Alpaca
+          wrapper has never run against the real service (E09-S10 transport, credentials), and
+          protective-leg fills are still not recorded in the ledger (E09-S11).
         ac:
-          - Same adapter interface as Alpaca; fills against synthetic quotes with latency and rejects
+          - Same adapter interface as Alpaca (one Broker trait, implemented by both, checked by the same event rules)
+          - Fills against recorded quotes with latency (E08-S06) and injectable rejects, rate limits, no-answer placements and venue rejections
       - id: E09-S10
         jira: TIC-137
         title: "Alpaca transport: HTTPS REST and the trade_updates websocket (TLS dependency decision)"

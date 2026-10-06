@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 
 use tf_core::{InstrumentId, Nanos, Px};
-use tf_risk::{Budgets, Gateway, GatewayError, GatewaySnapshot, Limits};
+use tf_risk::{Budgets, Gateway, GatewayError, GatewaySnapshot, Limits, LossEvent};
 use tf_strategy::intent::Intent;
 use tf_strategy::lifecycle::{Decision, LifecycleError, Order, OrderId, OrderState};
 
@@ -301,6 +301,10 @@ impl<S: LedgerStore> Journal<S> {
                 self.gw.new_day();
                 Ok(None)
             }
+            Input::LossCheck { .. } => {
+                self.gw.check_loss_limits();
+                Ok(None)
+            }
             Input::Budgets { budgets, .. } => {
                 self.gw.set_budgets(budgets);
                 Ok(None)
@@ -389,6 +393,25 @@ impl<S: LedgerStore> Journal<S> {
     /// other input, so a replay enforces exactly what the live run did.
     pub fn set_budgets(&mut self, budgets: Option<Budgets>, ts: Nanos) -> Result<(), JournalError> {
         self.apply(Input::Budgets { budgets, ts }).map(|_| ())
+    }
+
+    /// Check every strategy's loss against its limits (after bringing the marks up to date) and
+    /// return the limits newly crossed. A strategy past its soft limit has its opens refused; one
+    /// past its hard limit should be flattened (`gateway().flatten_plan(strategy)`). The check is
+    /// written to the ledger only when it crossed something, since otherwise it changed nothing.
+    pub fn check_loss_limits(&mut self, ts: Nanos) -> Result<Vec<LossEvent>, JournalError> {
+        if self.poisoned {
+            return Err(JournalError::Poisoned);
+        }
+        self.sync_marks()?;
+        let events = self.gw.check_loss_limits();
+        if !events.is_empty() {
+            self.append(&Record::Event {
+                input: Input::LossCheck { ts },
+                outcome: None,
+            })?;
+        }
+        Ok(events)
     }
 
     pub fn new_day(&mut self, ts: Nanos) -> Result<(), JournalError> {

@@ -12,6 +12,7 @@
 //! close <order> <cancelled|rejected|expired> <ts>
 //! kill <ts>
 //! newday <ts>
+//! losscheck <ts>
 //! budgets <ts> off
 //! budgets <ts> <balance> <number>=<id>,... <group>:<share>:<soft>:<hard>/<id>:<share>/...;...
 //! ```
@@ -64,6 +65,11 @@ pub enum Input {
     NewDay {
         ts: Nanos,
     },
+    /// Every strategy's loss was checked against its limits and at least one crossed (only such
+    /// checks are written: a check that crosses nothing changes no state).
+    LossCheck {
+        ts: Nanos,
+    },
     /// The budgets the gateway enforces from here on (`None`: none).
     Budgets {
         budgets: Option<Budgets>,
@@ -100,7 +106,7 @@ fn err<T>(m: impl Into<String>) -> Result<T, CodecError> {
     Err(CodecError(m.into()))
 }
 
-const REASONS: [(&str, RejectReason); 19] = [
+const REASONS: [(&str, RejectReason); 20] = [
     ("kill_switch", RejectReason::KillSwitch),
     ("max_notional", RejectReason::MaxNotional),
     ("max_position", RejectReason::MaxPosition),
@@ -120,6 +126,7 @@ const REASONS: [(&str, RejectReason); 19] = [
     ("no_budget", RejectReason::NoBudget),
     ("strategy_budget", RejectReason::StrategyBudget),
     ("group_budget", RejectReason::GroupBudget),
+    ("strategy_loss_limit", RejectReason::StrategyLossLimit),
 ];
 
 const INVALID: [(&str, IntentError); 9] = [
@@ -426,6 +433,7 @@ impl Record {
                 ),
                 (Input::Kill { ts }, None) => format!("kill {ts}"),
                 (Input::NewDay { ts }, None) => format!("newday {ts}"),
+                (Input::LossCheck { ts }, None) => format!("losscheck {ts}"),
                 (Input::Budgets { budgets: None, ts }, None) => format!("budgets {ts} off"),
                 (
                     Input::Budgets {
@@ -511,6 +519,9 @@ impl Record {
                 ts: num(ts, "time")?,
             }),
             ("newday", [ts]) => ev(Input::NewDay {
+                ts: num(ts, "time")?,
+            }),
+            ("losscheck", [ts]) => ev(Input::LossCheck {
                 ts: num(ts, "time")?,
             }),
             ("budgets", [ts, "off"]) => ev(Input::Budgets {

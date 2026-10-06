@@ -988,7 +988,8 @@ epics:
       - id: E17-S04
         jira: TIC-123
         title: "Two-tier loss limits per strategy (stop opening, then flatten)"
-        status: todo
+        status: done
+        evidence: "tf-risk: each strategy's loss since the day began (realised plus paper, from a per-strategy baseline set at new_day); soft limit (default 3% of its own budget) latches the strategy so its opens are refused for the day (StrategyLossLimit, closes pass); check_loss_limits reports each tier once per day and the hard limit (6%) latches too; flatten_plan lists the closes (less working closes) and the working opens to cancel, for whoever runs the strategy to turn into closing intents; limits come from the budget tree's per-group loss limits; ledger records a `losscheck` only when it crossed something, and replay reproduces latches and baselines; tf ledger verify lists strategies past a limit. Boundaries to the unit, realised and paper losses, shorts, per-group settings, daily reset, random trading where a latched strategy never opens again and flattening empties it; about two dozen mutations tried (two redundant lines removed, two test gaps closed). The gateway does not send orders: wiring flatten into a runner is left to the story that runs strategies against the workspace"
         deps: [E17-S02, E17-S03]
         ac:
           - A strategy past its soft limit stops opening and its exits still pass; past its hard limit its positions are flattened

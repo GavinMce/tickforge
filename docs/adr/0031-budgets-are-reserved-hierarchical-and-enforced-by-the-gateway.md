@@ -31,6 +31,10 @@ used to check the answers against how they would feel.
   opening, exits still pass. Hard (default 6%): its positions are flattened. Only that
   strategy is affected. Pausing a group is a person's decision. Limits are risk settings and
   are never agent-tunable.
+  Loss is measured since the day began from each strategy's own baseline, realised plus on
+  paper, and each limit is latched for the rest of the day. The gateway refuses the opens and
+  reports the crossing; it does not send orders, so flattening is a plan
+  (`Gateway::flatten_plan`) for whoever runs the strategy to carry out as closing intents.
 - **Agent proposals are asymmetric.** A decrease within bounds (a step size and cooldown per
   node, like the parameter store) is applied and recorded; an increase needs a person's
   approval, is refused for a strategy in drawdown, and carries its evidence. This follows

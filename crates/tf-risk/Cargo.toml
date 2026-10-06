@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 tf-core.workspace = true
+tf-budget.workspace = true
 tf-strategy.workspace = true
 
 [dev-dependencies]

@@ -1189,3 +1189,461 @@ fn across_random_trading_by_several_strategies_the_parts_always_add_up_to_the_ac
     }
     assert!(fills > 200, "{fills} fills");
 }
+
+// ---- budgets ----
+
+use tf_budget::{Group, LossLimits as BudgetLoss, Strategy as BudgetStrategy, Tree};
+
+fn bs(id: &str, share: u32) -> BudgetStrategy {
+    BudgetStrategy {
+        id: id.to_owned(),
+        share,
+    }
+}
+
+/// $100,000: group g1 50% ($50,000: a 40% = $20,000, b 60% = $30,000), group g2 50% (c, all of it).
+fn tree() -> Tree {
+    let g = |id: &str, share, strategies| Group {
+        id: id.to_owned(),
+        share,
+        loss: BudgetLoss::default(),
+        strategies,
+    };
+    Tree::new(vec![
+        g("g1", 5000, vec![bs("a", 4000), bs("b", 6000)]),
+        g("g2", 5000, vec![bs("c", 10_000)]),
+    ])
+    .unwrap()
+}
+
+fn budgets_for(t: Tree) -> Budgets {
+    Budgets::new(
+        t,
+        100_000 * D,
+        [
+            (1, "a".to_owned()),
+            (2, "b".to_owned()),
+            (3, "c".to_owned()),
+        ],
+    )
+    .unwrap()
+}
+
+/// A gateway with the budgets above and nothing else in the way.
+fn budgeted(gap_permille: u32) -> Gateway {
+    let l = Limits::new(
+        1_000_000 * D,
+        1_000_000,
+        1_000_000_000 * D,
+        1_000_000_000 * D,
+        100_000,
+        SEC,
+    )
+    .unwrap()
+    .with_gap_rule(GapRule::new(1_000_000_000 * D, 1_000_000, gap_permille).unwrap());
+    let mut g = Gateway::new(l, 2);
+    g.set_budgets(Some(budgets_for(tree())));
+    g
+}
+
+fn buy_by(strategy: u16, seq: u64, qty: u32, dollars: i64) -> Intent {
+    by(
+        strategy,
+        intent(seq, 0, Side::Buy, Purpose::Open, qty, dollars * 100),
+    )
+}
+
+fn short_by(strategy: u16, seq: u64, qty: u32, dollars: i64) -> Intent {
+    by(
+        strategy,
+        intent(seq, 0, Side::SellShort, Purpose::Open, qty, dollars * 100),
+    )
+}
+
+fn take(g: &mut Gateway, i: Intent, t: Nanos) -> OrderId {
+    let id = accepted(g.decide(&i, t));
+    g.on_fill(id, i.qty, i.pricing.reference_price()).unwrap();
+    id
+}
+
+#[test]
+fn budgets_must_name_real_strategies_once_each() {
+    assert_eq!(
+        Budgets::new(tree(), 1, [(1, "nope".to_owned())]).unwrap_err(),
+        BudgetsError::UnknownStrategy("nope".into())
+    );
+    assert_eq!(
+        Budgets::new(tree(), 1, [(1, "a".to_owned()), (2, "a".to_owned())]).unwrap_err(),
+        BudgetsError::Duplicate("a".into())
+    );
+    let b = budgets_for(tree());
+    assert_eq!(
+        (
+            b.strategy_budget(1),
+            b.strategy_budget(2),
+            b.strategy_budget(3)
+        ),
+        (Some(20_000 * D), Some(30_000 * D), Some(50_000 * D))
+    );
+    assert_eq!(b.strategy_budget(9), None);
+    assert_eq!(
+        (b.group_of(1), b.group_of(3), b.group_of(9)),
+        (Some("g1"), Some("g2"), None)
+    );
+    assert_eq!(b.balance(), 100_000 * D);
+    assert_eq!(b.ids().len(), 3);
+    assert_eq!(b.tree().groups().len(), 2);
+}
+
+#[test]
+fn an_opening_order_must_fit_the_strategys_own_budget_to_the_last_unit() {
+    let mut g = budgeted(1000);
+    take(&mut g, buy_by(1, 1, 3_000, 6), SEC); // $18,000 of $20,000
+    assert_eq!(g.strategy_charge(1), 18_000 * D);
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 2, 401, 5), 2 * SEC)),
+        RejectReason::StrategyBudget,
+        "$2,005 would be $20,005"
+    );
+    accepted(g.decide(&buy_by(1, 3, 400, 5), 2 * SEC)); // exactly $20,000: allowed
+    assert_eq!(g.strategy_charge(1), 20_000 * D, "a working order counts");
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 4, 1, 1), 3 * SEC)),
+        RejectReason::StrategyBudget
+    );
+    // Another strategy's budget is its own.
+    accepted(g.decide(&buy_by(2, 5, 6_000, 5), 3 * SEC)); // $30,000 of b's $30,000
+    assert_eq!(g.rejected_count("strategy_budget"), 2);
+}
+
+#[test]
+fn a_group_budget_binds_when_a_sibling_has_run_over_its_own() {
+    let mut g = budgeted(1000);
+    take(&mut g, buy_by(2, 1, 5_000, 5), SEC); // b holds $25,000 of its $30,000
+    g.mark(0, px(700)); // b's position is now worth $35,000: over its budget by $5,000
+    assert_eq!(g.strategy_charge(2), 35_000 * D);
+    // a is far inside its own $20,000, but the group's $50,000 is $35,000 used.
+    accepted(g.decide(&buy_by(1, 2, 2_000, 7), 2 * SEC)); // $14,000: group $49,000
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 3, 143, 7), 3 * SEC)),
+        RejectReason::GroupBudget,
+        "$1,001 more is $50,001"
+    );
+    assert_eq!(g.group_charge("g1"), 49_000 * D);
+    assert_eq!(g.group_charge("g2"), 0);
+    assert_eq!(g.group_charge("nope"), 0);
+    accepted(g.decide(&buy_by(1, 4, 142, 7), 3 * SEC)); // $994: group $49,994
+}
+
+#[test]
+fn a_strategy_without_a_budget_cannot_open_but_can_still_close() {
+    let mut g = Gateway::new(
+        Limits::new(
+            1_000_000 * D,
+            1_000_000,
+            1_000_000_000 * D,
+            1_000_000_000 * D,
+            100_000,
+            SEC,
+        )
+        .unwrap()
+        .with_gap_rule(generous()),
+        2,
+    );
+    take(&mut g, buy_by(9, 1, 100, 5), SEC); // before budgets are in force
+    g.set_budgets(Some(budgets_for(tree())));
+    assert_eq!(
+        rejected(g.decide(&buy_by(9, 2, 1, 5), 2 * SEC)),
+        RejectReason::NoBudget
+    );
+    accepted(g.decide(&by(9, close(3, 100, 500)), 3 * SEC));
+    assert_eq!(g.rejected_count("no_budget"), 1);
+}
+
+#[test]
+fn a_short_is_charged_its_notional_times_the_gap_assumption_and_never_less_than_its_notional() {
+    // 150%: a $5 short of n shares is charged 7.5 n.
+    let mut g = budgeted(1500);
+    take(&mut g, short_by(1, 1, 2_666, 5), SEC);
+    assert_eq!(g.strategy_charge(1), 19_995 * D);
+    assert_eq!(
+        rejected(g.decide(&short_by(1, 2, 2, 5), 2 * SEC)),
+        RejectReason::StrategyBudget,
+        "2,668 shares would be $20,010"
+    );
+    assert_eq!(
+        rejected(g.decide(&short_by(1, 3, 1, 5), 2 * SEC)),
+        RejectReason::StrategyBudget,
+        "one more share is $20,002.50"
+    );
+    // The same size under a gap assumption below 100% is still charged as a full notional.
+    let mut low = budgeted(500);
+    accepted(low.decide(&short_by(1, 1, 4_000, 5), SEC)); // $20,000 exactly
+    assert_eq!(
+        rejected(low.decide(&short_by(1, 2, 1, 5), 2 * SEC)),
+        RejectReason::StrategyBudget
+    );
+    // A long of the same notional is charged just the notional.
+    let mut long = budgeted(1500);
+    accepted(long.decide(&buy_by(1, 1, 4_000, 5), SEC));
+    assert_eq!(long.strategy_charge(1), 20_000 * D);
+}
+
+#[test]
+fn working_orders_count_until_they_end_and_partial_fills_count_what_remains() {
+    let mut g = budgeted(1000);
+    let w = accepted(g.decide(&buy_by(1, 1, 3_000, 5), SEC)); // $15,000 working
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 2, 1_001, 5), 2 * SEC)),
+        RejectReason::StrategyBudget
+    );
+    g.on_fill(w, 1_000, px(500)).unwrap(); // $5,000 held, $10,000 still working
+    assert_eq!(g.strategy_charge(1), 15_000 * D);
+    g.on_closed(w).unwrap(); // the rest is cancelled
+    assert_eq!(g.strategy_charge(1), 5_000 * D);
+    accepted(g.decide(&buy_by(1, 3, 3_000, 5), 3 * SEC)); // room again: $5,000 + $15,000
+}
+
+#[test]
+fn a_position_is_charged_at_the_higher_of_cost_and_mark() {
+    let mut g = budgeted(1000);
+    take(&mut g, buy_by(1, 1, 1_000, 5), SEC);
+    assert_eq!(g.strategy_charge(1), 5_000 * D);
+    g.mark(0, px(800));
+    assert_eq!(
+        g.strategy_charge(1),
+        8_000 * D,
+        "a gain uses more of the budget"
+    );
+    g.mark(0, px(200));
+    assert_eq!(
+        g.strategy_charge(1),
+        5_000 * D,
+        "a loss does not give budget back"
+    );
+}
+
+#[test]
+fn closes_always_pass_even_when_a_strategy_is_over_budget() {
+    let mut g = budgeted(1000);
+    take(&mut g, buy_by(1, 1, 3_000, 6), SEC);
+    g.mark(0, px(900)); // $27,000 against a $20,000 budget
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 2, 1, 9), 2 * SEC)),
+        RejectReason::StrategyBudget
+    );
+    let c = accepted(g.decide(&by(1, close(3, 3_000, 900)), 3 * SEC));
+    g.on_fill(c, 3_000, px(900)).unwrap();
+    assert_eq!(g.strategy_charge(1), 0);
+}
+
+#[test]
+fn replacing_or_removing_budgets_changes_what_may_open_and_touches_no_position() {
+    let mut g = budgeted(1000);
+    take(&mut g, buy_by(1, 1, 3_000, 5), SEC); // $15,000
+    let half = Tree::new(
+        tree()
+            .groups()
+            .iter()
+            .map(|gr| Group {
+                share: gr.share / 2,
+                ..gr.clone()
+            })
+            .collect(),
+    )
+    .unwrap(); // a's budget is now $10,000
+    g.set_budgets(Some(budgets_for(half)));
+    assert_eq!(g.position(0), 3_000, "the position stays");
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 2, 1, 5), 2 * SEC)),
+        RejectReason::StrategyBudget
+    );
+    g.set_budgets(None);
+    assert!(g.budgets().is_none());
+    accepted(g.decide(&buy_by(1, 3, 900_000, 1), 3 * SEC));
+    assert_eq!(
+        g.strategy_charge(1),
+        915_000 * D,
+        "with no budgets anything the limits allow may open, and the charge is still computed"
+    );
+}
+
+#[test]
+fn the_snapshot_says_which_budgets_were_in_force() {
+    let a = budgeted(1000).snapshot();
+    let b = budgeted(1000).snapshot();
+    assert_eq!(a, b);
+    assert!(a.budgets.is_some());
+    let mut other = budgeted(1000);
+    other.set_budgets(Some(
+        Budgets::new(tree(), 99_000 * D, [(1, "a".to_owned())]).unwrap(),
+    ));
+    assert_ne!(other.snapshot(), a);
+    other.set_budgets(None);
+    assert_eq!(other.snapshot().budgets, None);
+    let mut moved = budgeted(1000);
+    moved.set_budgets(Some(budgets_for(
+        tree()
+            .with_group_share("g1", 4000, 100_000 * D, &tf_budget::Usage::new())
+            .unwrap(),
+    )));
+    assert_ne!(
+        moved.snapshot().budgets,
+        a.budgets,
+        "a different tree is a different fingerprint"
+    );
+}
+
+#[test]
+fn an_accepted_opening_always_fits_its_strategy_and_group_across_random_trading() {
+    let mut rng = SplitMix64::new(33);
+    let mut g = budgeted(1500);
+    let mut accepted_n = 0;
+    let mut seq = 0;
+    for step in 0..2_000u64 {
+        let now = step * SEC;
+        seq += 1;
+        let strat = 1 + rng.below(3) as u16;
+        let qty = 10 + rng.below(800) as u32;
+        let dollars = 3 + rng.below(8) as i64;
+        match rng.below(10) {
+            0..=5 => {
+                let i = if rng.below(4) == 0 {
+                    short_by(strat, seq, qty, dollars)
+                } else {
+                    buy_by(strat, seq, qty, dollars)
+                };
+                if let Decision::Accepted(_) = g.decide(&i, now) {
+                    accepted_n += 1;
+                    // The check included this order, so right now it fits both budgets.
+                    let b = g.budgets().unwrap().clone();
+                    assert!(
+                        g.strategy_charge(strat) <= b.strategy_budget(strat).unwrap(),
+                        "step {step}"
+                    );
+                    let grp = b.group_of(strat).unwrap().to_owned();
+                    assert!(
+                        g.group_charge(&grp) <= b.tree().group_budget(b.balance(), &grp).unwrap(),
+                        "step {step}"
+                    );
+                }
+            }
+            6..=7 => {
+                let snap = g.snapshot();
+                if !snap.working.is_empty() {
+                    let w = snap.working[rng.below(snap.working.len() as u64) as usize];
+                    let q = 1 + rng.below(u64::from(w.3)) as u32;
+                    g.on_fill(w.0, q, px(300 + rng.below(800) as i64)).unwrap();
+                }
+            }
+            8 => {
+                let snap = g.snapshot();
+                if !snap.working.is_empty() {
+                    g.on_closed(snap.working[rng.below(snap.working.len() as u64) as usize].0)
+                        .unwrap();
+                }
+            }
+            _ => g.mark(0, px(300 + rng.below(800) as i64)),
+        }
+    }
+    assert!(accepted_n > 50, "{accepted_n} accepted");
+    assert!(
+        g.rejected_count("strategy_budget") + g.rejected_count("group_budget") > 50,
+        "the budgets did bind: {:?}",
+        g.rejection_counts()
+    );
+}
+
+#[test]
+fn a_short_is_charged_rounded_up_so_the_budget_is_never_looser_than_stated() {
+    // A balance of 4 raw units gives the only strategy a budget of 4. One share at a raw price of 3
+    // is a notional of 3, which at 150% is 4.5: charged as 5, so it does not fit.
+    let t = Tree::new(vec![Group {
+        id: "x".into(),
+        share: 10_000,
+        loss: BudgetLoss::default(),
+        strategies: vec![bs("s", 10_000)],
+    }])
+    .unwrap();
+    let l = Limits::new(
+        1_000_000 * D,
+        1_000_000,
+        1_000_000_000 * D,
+        1_000_000_000 * D,
+        100_000,
+        SEC,
+    )
+    .unwrap()
+    .with_gap_rule(GapRule::new(1_000_000_000 * D, 1_000_000, 1500).unwrap());
+    let mut g = Gateway::new(l, 1);
+    g.set_budgets(Some(Budgets::new(t, 4, [(1, "s".to_owned())]).unwrap()));
+    let short = Intent {
+        id: IntentId {
+            strategy: StrategyId(1),
+            seq: 1,
+        },
+        instrument: 0,
+        side: Side::SellShort,
+        qty: 1,
+        purpose: Purpose::Open,
+        pricing: Pricing::Limit(Px::from_raw(3)),
+        protect: Some(Protective {
+            stop_trigger: Px::from_raw(6),
+            stop_limit: None,
+            take_profit: None,
+        }),
+        tif: Tif::Day,
+        ts: 0,
+        reason: 0,
+    };
+    assert_eq!(
+        rejected(g.decide(&short, SEC)),
+        RejectReason::StrategyBudget
+    );
+    // At a raw price of 2 it is 3 exactly, and fits.
+    let fits = Intent {
+        pricing: Pricing::Limit(Px::from_raw(2)),
+        protect: Some(Protective {
+            stop_trigger: Px::from_raw(5),
+            stop_limit: None,
+            take_profit: None,
+        }),
+        ..short
+    };
+    accepted(g.decide(&fits, 2 * SEC));
+}
+
+#[test]
+fn a_working_short_is_charged_at_its_reference_price_not_its_collar_floor() {
+    let mut g = budgeted(1000);
+    // A collar of 50% under a $10 reference: the order may sell as low as $5, but it is a $10 short.
+    let collar_short = Intent {
+        id: IntentId {
+            strategy: StrategyId(1),
+            seq: 1,
+        },
+        instrument: 0,
+        side: Side::SellShort,
+        qty: 100,
+        purpose: Purpose::Open,
+        pricing: Pricing::Collar {
+            reference: px(1000),
+            collar_permille: 500,
+        },
+        protect: Some(Protective {
+            stop_trigger: px(2000),
+            stop_limit: None,
+            take_profit: None,
+        }),
+        tif: Tif::Day,
+        ts: 0,
+        reason: 0,
+    };
+    assert_eq!(collar_short.limit_price(), px(500));
+    accepted(g.decide(&collar_short, SEC));
+    assert_eq!(
+        g.strategy_charge(1),
+        1_000 * D,
+        "100 shares at the $10 reference"
+    );
+}

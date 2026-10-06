@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 
 use tf_core::{InstrumentId, Nanos, Px};
-use tf_risk::{Gateway, GatewayError, GatewaySnapshot, Limits};
+use tf_risk::{Budgets, Gateway, GatewayError, GatewaySnapshot, Limits};
 use tf_strategy::intent::Intent;
 use tf_strategy::lifecycle::{Decision, LifecycleError, Order, OrderId, OrderState};
 
@@ -195,7 +195,7 @@ impl<S: LedgerStore> Journal<S> {
                             "record {n} is a second start record"
                         )));
                     };
-                    let got = j.step(input)?;
+                    let got = j.step(input.clone())?;
                     if got != outcome {
                         return Err(JournalError::Diverged {
                             record: n,
@@ -301,6 +301,10 @@ impl<S: LedgerStore> Journal<S> {
                 self.gw.new_day();
                 Ok(None)
             }
+            Input::Budgets { budgets, .. } => {
+                self.gw.set_budgets(budgets);
+                Ok(None)
+            }
         }
     }
 
@@ -309,7 +313,7 @@ impl<S: LedgerStore> Journal<S> {
         if self.poisoned {
             return Err(JournalError::Poisoned);
         }
-        let outcome = self.step(input)?;
+        let outcome = self.step(input.clone())?;
         self.append(&Record::Event { input, outcome })?;
         Ok(outcome)
     }
@@ -379,6 +383,12 @@ impl<S: LedgerStore> Journal<S> {
 
     pub fn engage_kill_switch(&mut self, ts: Nanos) -> Result<(), JournalError> {
         self.apply(Input::Kill { ts }).map(|_| ())
+    }
+
+    /// Put budgets in force from here on, or take them away (`None`). Written to the ledger like any
+    /// other input, so a replay enforces exactly what the live run did.
+    pub fn set_budgets(&mut self, budgets: Option<Budgets>, ts: Nanos) -> Result<(), JournalError> {
+        self.apply(Input::Budgets { budgets, ts }).map(|_| ())
     }
 
     pub fn new_day(&mut self, ts: Nanos) -> Result<(), JournalError> {

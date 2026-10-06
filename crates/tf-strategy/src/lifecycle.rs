@@ -88,6 +88,12 @@ pub enum RejectReason {
     RunUpTooLarge,
     /// Shorting would risk more than the allowed share of equity if the price gapped up.
     GapRisk,
+    /// Budgets are in force and this strategy has none (it is not in the budget tree).
+    NoBudget,
+    /// The order would take the strategy past its own budget.
+    StrategyBudget,
+    /// The order would take the strategy's group past the group's budget.
+    GroupBudget,
     /// An open against an existing position the other way (close it first).
     OpposingPosition,
     /// A close for more than is held, or with nothing held.

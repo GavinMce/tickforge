@@ -26,3 +26,4 @@ tf-params.workspace = true
 tf-risk.workspace = true
 tf-strategy.workspace = true
 tf-ledger.workspace = true
+tf-budget.workspace = true

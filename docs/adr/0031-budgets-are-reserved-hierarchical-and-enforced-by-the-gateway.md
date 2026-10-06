@@ -23,8 +23,10 @@ used to check the answers against how they would feel.
   made them, within a floor and ceiling per node. A change made during the day is scheduled
   and takes effect at the rebalance. A cut never forces an open position to resize.
 - **What a position uses.** A position is charged at what it could lose: longs at notional,
-  shorts at the worst case under the gap rule (E09-S03). Broker margin is read as a
-  constraint, not used as the budget.
+  shorts at notional times the gap rule's assumption (E09-S03), and never less than notional,
+  rounded up. A position counts at the higher of its cost and the mark, and a working opening
+  order at its limit (a short at its reference price). Broker margin is read as a constraint,
+  not used as the budget.
 - **Loss limits, two tiers, per strategy, of its own budget.** Soft (default 3%): it stops
   opening, exits still pass. Hard (default 6%): its positions are flattened. Only that
   strategy is affected. Pausing a group is a person's decision. Limits are risk settings and

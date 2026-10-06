@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tf-budget.workspace = true
 tf-core.workspace = true
 tf-risk.workspace = true
 tf-strategy.workspace = true

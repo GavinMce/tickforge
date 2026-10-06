@@ -970,7 +970,8 @@ epics:
       - id: E17-S02
         jira: TIC-121
         title: "Per-node budgets enforced by the risk gateway"
-        status: todo
+        status: done
+        evidence: "tf-risk Budgets (a tf-budget Tree, the balance, and which strategy number is which) set on the Gateway; an opening order must fit its strategy's budget and its group's (new reasons no_budget, strategy_budget, group_budget; closes always pass); charge = position at the higher of cost and mark plus working opens, shorts at notional times the gap assumption, never below notional, rounded up; strategy_charge / group_charge; budgets are a recorded ledger input (`budgets` record) so replay enforces exactly what the live run did; tf ledger verify shows them. Fits to the last unit, group binds when a sibling is over budget, random trading never accepts an opening that does not fit, 12 gateway and 5 ledger mutations tried (two gaps found and closed); ADR 0031 amended"
         deps: [E17-S01, E17-S03, E09-S01, E09-S03]
         ac:
           - An opening order that would exceed its strategy's or its group's budget is refused, naming the node

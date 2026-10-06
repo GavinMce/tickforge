@@ -109,6 +109,7 @@ version = "0.1.0"
 dependencies = [
  "tf-backtest",
  "tf-bench",
+ "tf-budget",
  "tf-core",
  "tf-ledger",
  "tf-manifest",
@@ -136,6 +137,7 @@ dependencies = [
 name = "tf-ledger"
 version = "0.1.0"
 dependencies = [
+ "tf-budget",
  "tf-core",
  "tf-risk",
  "tf-strategy",
@@ -177,6 +179,7 @@ dependencies = [
 name = "tf-risk"
 version = "0.1.0"
 dependencies = [
+ "tf-budget",
  "tf-core",
  "tf-strategy",
  "tf-synth",

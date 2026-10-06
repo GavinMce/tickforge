@@ -12,20 +12,24 @@
 //! close <order> <cancelled|rejected|expired> <ts>
 //! kill <ts>
 //! newday <ts>
+//! budgets <ts> off
+//! budgets <ts> <balance> <number>=<id>,... <group>:<share>:<soft>:<hard>/<id>:<share>/...;...
 //! ```
 //!
 //! with `side` buy|sell|short, `purpose` open|close, `pricing` `limit:<px>` or
 //! `collar:<reference>:<permille>`, `protect` `-` or `stop:<trigger>:<limit|->:<target|->`,
 //! `tif` day|ioc, and `outcome` `ok:<order>`, `rej:<reason>` or `invalid:<why>`.
 
+use tf_budget::{Group, LossLimits, Strategy as BudgetStrategy, Tree};
 use tf_core::{InstrumentId, Nanos, Px};
+use tf_risk::Budgets;
 use tf_strategy::intent::{
     Intent, IntentError, IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif,
 };
 use tf_strategy::lifecycle::{Decision, OrderId, OrderState, RejectReason};
 
 /// What happened to the gateway or an order: the inputs a ledger replays.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     /// The last price of an instrument holding a position (logged when a decision needs it).
     Mark {
@@ -60,6 +64,11 @@ pub enum Input {
     NewDay {
         ts: Nanos,
     },
+    /// The budgets the gateway enforces from here on (`None`: none).
+    Budgets {
+        budgets: Option<Budgets>,
+        ts: Nanos,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,7 +100,7 @@ fn err<T>(m: impl Into<String>) -> Result<T, CodecError> {
     Err(CodecError(m.into()))
 }
 
-const REASONS: [(&str, RejectReason); 16] = [
+const REASONS: [(&str, RejectReason); 19] = [
     ("kill_switch", RejectReason::KillSwitch),
     ("max_notional", RejectReason::MaxNotional),
     ("max_position", RejectReason::MaxPosition),
@@ -108,6 +117,9 @@ const REASONS: [(&str, RejectReason); 16] = [
     ("nothing_to_close", RejectReason::NothingToClose),
     ("unknown_instrument", RejectReason::UnknownInstrument),
     ("broker", RejectReason::Broker),
+    ("no_budget", RejectReason::NoBudget),
+    ("strategy_budget", RejectReason::StrategyBudget),
+    ("group_budget", RejectReason::GroupBudget),
 ];
 
 const INVALID: [(&str, IntentError); 9] = [
@@ -291,6 +303,82 @@ fn parse_intent(t: &[&str]) -> Result<Intent, CodecError> {
     })
 }
 
+fn budgets_text(b: &Budgets) -> String {
+    let ids: Vec<String> = b.ids().iter().map(|(n, id)| format!("{n}={id}")).collect();
+    let groups: Vec<String> = b
+        .tree()
+        .groups()
+        .iter()
+        .map(|g| {
+            let mut t = format!("{}:{}:{}:{}", g.id, g.share, g.loss.soft, g.loss.hard);
+            for s in &g.strategies {
+                t.push_str(&format!("/{}:{}", s.id, s.share));
+            }
+            t
+        })
+        .collect();
+    format!(
+        "{} {} {}",
+        b.balance(),
+        if ids.is_empty() {
+            "-".to_owned()
+        } else {
+            ids.join(",")
+        },
+        if groups.is_empty() {
+            "-".to_owned()
+        } else {
+            groups.join(";")
+        }
+    )
+}
+
+fn parse_budgets(balance: &str, ids: &str, tree: &str) -> Result<Budgets, CodecError> {
+    let mut groups = Vec::new();
+    if tree != "-" {
+        for g in tree.split(';') {
+            let mut parts = g.split('/');
+            let head: Vec<&str> = parts.next().unwrap_or("").split(':').collect();
+            let [id, share, soft, hard] = head[..] else {
+                return err(format!(
+                    "a budget group is `id:share:soft:hard`, found `{g}`"
+                ));
+            };
+            let mut strategies = Vec::new();
+            for s in parts {
+                let Some((sid, sshare)) = s.split_once(':') else {
+                    return err(format!("a budget strategy is `id:share`, found `{s}`"));
+                };
+                strategies.push(BudgetStrategy {
+                    id: sid.to_owned(),
+                    share: num(sshare, "share")?,
+                });
+            }
+            groups.push(Group {
+                id: id.to_owned(),
+                share: num(share, "share")?,
+                loss: LossLimits {
+                    soft: num(soft, "soft limit")?,
+                    hard: num(hard, "hard limit")?,
+                },
+                strategies,
+            });
+        }
+    }
+    let tree = Tree::new(groups).map_err(|e| CodecError(format!("budgets: {e}")))?;
+    let mut pairs = Vec::new();
+    if ids != "-" {
+        for kv in ids.split(',') {
+            let Some((n, id)) = kv.split_once('=') else {
+                return err(format!("a strategy mapping is `number=id`, found `{kv}`"));
+            };
+            pairs.push((num::<u16>(n, "strategy number")?, id.to_owned()));
+        }
+    }
+    Budgets::new(tree, num(balance, "balance")?, pairs)
+        .map_err(|e| CodecError(format!("budgets: {e:?}")))
+}
+
 fn state_name(s: OrderState) -> Option<&'static str> {
     match s {
         OrderState::Cancelled => Some("cancelled"),
@@ -338,6 +426,16 @@ impl Record {
                 ),
                 (Input::Kill { ts }, None) => format!("kill {ts}"),
                 (Input::NewDay { ts }, None) => format!("newday {ts}"),
+                (Input::Budgets { budgets: None, ts }, None) => format!("budgets {ts} off"),
+                (
+                    Input::Budgets {
+                        budgets: Some(b),
+                        ts,
+                    },
+                    None,
+                ) => {
+                    format!("budgets {ts} {}", budgets_text(b))
+                }
                 (Input::Decide { .. }, None) => return err("a decision record needs its outcome"),
                 (_, Some(_)) => return err("only a decision has an outcome"),
             },
@@ -413,6 +511,14 @@ impl Record {
                 ts: num(ts, "time")?,
             }),
             ("newday", [ts]) => ev(Input::NewDay {
+                ts: num(ts, "time")?,
+            }),
+            ("budgets", [ts, "off"]) => ev(Input::Budgets {
+                budgets: None,
+                ts: num(ts, "time")?,
+            }),
+            ("budgets", [ts, balance, ids, tree]) => ev(Input::Budgets {
+                budgets: Some(parse_budgets(balance, ids, tree)?),
                 ts: num(ts, "time")?,
             }),
             (k, rest) => err(format!(

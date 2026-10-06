@@ -197,6 +197,9 @@ fn every_kind_of_record_survives_the_text_form_exactly() {
         RejectReason::NothingToClose,
         RejectReason::UnknownInstrument,
         RejectReason::Broker,
+        RejectReason::NoBudget,
+        RejectReason::StrategyBudget,
+        RejectReason::GroupBudget,
     ];
     use tf_strategy::intent::IntentError as E;
     reasons.extend(
@@ -1053,11 +1056,16 @@ fn opening_reports_what_it_found() {
 fn random_day(
     seed: u64,
     steps: usize,
+    with_budgets: bool,
     check: &mut dyn FnMut(&mut Journal<MemStore>),
 ) -> Journal<MemStore> {
     const N: usize = 3;
     let mut rng = SplitMix64::new(seed);
     let mut j = fresh(N);
+    if with_budgets {
+        j.set_budgets(Some(day_budgets(3_000 * P as u128)), SEC)
+            .unwrap();
+    }
     let (mut seq, mut now) = (0u64, SEC);
     for _ in 0..steps {
         now += (1 + rng.below(4)) * SEC;
@@ -1150,7 +1158,7 @@ fn after_every_step_of_a_random_day_a_journal_rebuilt_from_the_ledger_is_the_sam
             same(j, &r);
             steps_checked += 1;
         };
-        let j = random_day(seed, 250, &mut check);
+        let j = random_day(seed, 250, false, &mut check);
         accepted += j.gateway().accepted_count();
         kinds.extend(
             j.store()
@@ -1356,4 +1364,168 @@ fn two_strategies_in_one_symbol_come_back_from_the_ledger_as_two_sub_accounts() 
     );
     assert_eq!(snap.strategy_realized, vec![(1, 200 * P as i128), (2, 0)]);
     assert_eq!(r.gateway().position(0), 50);
+}
+
+fn day_budgets(balance: u128) -> tf_risk::Budgets {
+    use tf_budget::{Group, LossLimits, Strategy as S, Tree};
+    let tree = Tree::new(vec![Group {
+        id: "g".into(),
+        share: 10_000,
+        loss: LossLimits::default(),
+        strategies: vec![
+            S {
+                id: "s1".into(),
+                share: 3_333,
+            },
+            S {
+                id: "s2".into(),
+                share: 3_333,
+            },
+            S {
+                id: "s3".into(),
+                share: 3_334,
+            },
+        ],
+    }])
+    .unwrap();
+    tf_risk::Budgets::new(
+        tree,
+        balance,
+        [
+            (1, "s1".to_owned()),
+            (2, "s2".to_owned()),
+            (3, "s3".to_owned()),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn budgets_are_a_recorded_input_that_replay_enforces_exactly_as_the_live_run_did() {
+    let mut j = fresh(1);
+    let before = j.records();
+    j.set_budgets(Some(day_budgets(15_000 * P as u128)), 2 * SEC)
+        .unwrap();
+    assert_eq!(j.records(), before + 1);
+    let line = j.store().records().last().unwrap().clone();
+    assert!(line.starts_with("budgets 2000000000 15000000000000 1=s1,2=s2,3=s3 g:10000:300:600/s1:3333/s2:3333/s3:3334"), "{line}");
+    // Strategy 1's budget is $4,999.50: a $5,000 order is refused and the refusal is in the ledger.
+    let big = |seq: u64, strategy: u16, qty: u32| {
+        let mut i = buy(seq, 0, qty, 5 * P);
+        i.id.strategy = StrategyId(strategy);
+        i
+    };
+    assert_eq!(
+        j.decide(&big(1, 1, 1_000), 3 * SEC).unwrap(),
+        Decision::Rejected(RejectReason::StrategyBudget)
+    );
+    assert!(matches!(
+        j.decide(&big(2, 1, 999), 4 * SEC).unwrap(),
+        Decision::Accepted(_)
+    ));
+    assert_eq!(
+        j.decide(&big(3, 9, 1), 5 * SEC).unwrap(),
+        Decision::Rejected(RejectReason::NoBudget)
+    );
+    assert!(
+        j.store()
+            .records()
+            .iter()
+            .any(|r| r.ends_with("=> rej:strategy_budget"))
+    );
+    let r = recover(&j, 1);
+    same(&j, &r);
+    assert_eq!(r.gateway().budgets(), j.gateway().budgets());
+    assert_eq!(r.gateway().rejected_count("strategy_budget"), 1);
+    // Taking budgets away is recorded too, and the same order then passes.
+    j.set_budgets(None, 6 * SEC).unwrap();
+    assert!(matches!(
+        j.decide(&big(4, 1, 1), 7 * SEC).unwrap(),
+        Decision::Accepted(_)
+    ));
+    let r = recover(&j, 1);
+    same(&j, &r);
+    assert!(r.gateway().budgets().is_none());
+    // A ledger whose budgets record was altered replays differently and says where.
+    let mut recs = j.store().records().to_vec();
+    let at = recs
+        .iter()
+        .position(|l| l.starts_with("budgets 2000000000"))
+        .unwrap();
+    recs[at] = recs[at].replace("15000000000000", "1500000000000");
+    assert!(matches!(
+        open_mem(recs, 1).err().unwrap(),
+        JournalError::Diverged { .. }
+    ));
+}
+
+#[test]
+fn budget_records_that_cannot_be_read_are_refused() {
+    let good = "budgets 1 15000000000000 1=s1 g:10000:300:600/s1:10000";
+    assert!(Record::decode(good).is_ok());
+    assert_eq!(
+        Record::decode("budgets 1 off").unwrap(),
+        Record::Event {
+            input: Input::Budgets {
+                budgets: None,
+                ts: 1
+            },
+            outcome: None
+        }
+    );
+    for (bad, want) in [
+        (
+            good.replace("g:10000:300:600", "g:10000:300"),
+            "a budget group is",
+        ),
+        (good.replace("/s1:10000", "/s1"), "a budget strategy is"),
+        (good.replace("1=s1", "1"), "a strategy mapping is"),
+        (good.replace("1=s1", "1=nope"), "UnknownStrategy"),
+        (good.replace("1=s1", "1=s1,2=s1"), "Duplicate"),
+        (
+            good.replace("10000:300:600/s1:10000", "10001:300:600/s1:10000"),
+            "more than the whole",
+        ),
+        (
+            good.replace("g:10000:300:600", "g:10000:600:300"),
+            "loss limits need",
+        ),
+        (good.replace("15000000000000", "lots"), "not a number"),
+        (good.replace("1=s1", "x=s1"), "not a number"),
+        ("budgets 1 1 2".to_owned(), "field(s) is not a record"),
+    ] {
+        let e = Record::decode(&bad).unwrap_err().0;
+        assert!(e.contains(want), "wanted `{want}` in `{e}` for `{bad}`");
+    }
+    // An empty tree and no strategies round-trip through the `-` placeholders.
+    let empty = tf_risk::Budgets::new(tf_budget::Tree::default(), 5, Vec::new()).unwrap();
+    let r = Record::Event {
+        input: Input::Budgets {
+            budgets: Some(empty),
+            ts: 3,
+        },
+        outcome: None,
+    };
+    assert_eq!(r.encode().unwrap(), "budgets 3 5 - -");
+    assert_eq!(Record::decode(&r.encode().unwrap()).unwrap(), r);
+}
+
+#[test]
+fn with_budgets_in_force_a_rebuilt_journal_is_the_same_journal_after_every_step_of_random_days() {
+    let mut refused = 0;
+    let mut steps = 0;
+    for seed in 0..6 {
+        let mut check = |j: &mut Journal<MemStore>| {
+            j.sync_marks().unwrap();
+            let r = recover(j, 3);
+            same(j, &r);
+            assert_eq!(r.gateway().budgets(), j.gateway().budgets());
+            steps += 1;
+        };
+        let j = random_day(seed, 250, true, &mut check);
+        refused += j.gateway().rejected_count("strategy_budget")
+            + j.gateway().rejected_count("group_budget");
+    }
+    assert_eq!(steps, 6 * 250);
+    assert!(refused > 20, "the budgets bound: {refused} refusals");
 }

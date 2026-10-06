@@ -93,6 +93,20 @@ pub(crate) fn report(args: &[String]) -> Result<String, String> {
         if snap.killed { "ENGAGED" } else { "off" },
         if snap.loss_latched { "YES" } else { "no" }
     );
+    match &snap.budgets {
+        None => {
+            let _ = writeln!(out, "budgets  none in force");
+        }
+        Some((fp, balance, ids)) => {
+            let _ = writeln!(
+                out,
+                "budgets  in force: tree {fp:016x} over {}, {} strateg{} mapped",
+                money(clamp(*balance as i128)),
+                ids.len(),
+                if ids.len() == 1 { "y" } else { "ies" }
+            );
+        }
+    }
     if snap.positions.is_empty() {
         let _ = writeln!(out, "positions none");
     }
@@ -226,6 +240,49 @@ mod tests {
             "orders only on request"
         );
         assert!(!dir.join("ledger.lock").exists(), "the lock is released");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn budgets_in_force_are_shown_and_their_refusals_counted() {
+        use tf_budget::{Group, LossLimits as L, Strategy as S, Tree};
+        let dir = scratch("budgets");
+        make(&dir);
+        let d = dir.to_str().unwrap();
+        assert!(
+            report(&args(&["verify", d]))
+                .unwrap()
+                .contains("budgets  none in force")
+        );
+        let (mut j, _) = Journal::open_recorded(FileStore::open(&dir).unwrap()).unwrap();
+        let tree = Tree::new(vec![Group {
+            id: "g".into(),
+            share: 10_000,
+            loss: L::default(),
+            strategies: vec![S {
+                id: "s".into(),
+                share: 10_000,
+            }],
+        }])
+        .unwrap();
+        // A $1,000 budget: the 100,000-share order (refused by the notional cap earlier) is not the
+        // point; a $2,500 order is.
+        j.set_budgets(
+            Some(
+                tf_risk::Budgets::new(tree, 1_000 * 1_000_000_000, [(1, "s".to_owned())]).unwrap(),
+            ),
+            9_000_000_000,
+        )
+        .unwrap();
+        let Decision::Rejected(why) = j.decide(&buy(4, 500), 10_000_000_000).unwrap() else {
+            panic!()
+        };
+        assert_eq!(why, tf_strategy::lifecycle::RejectReason::StrategyBudget);
+        drop(j);
+        let text = report(&args(&["verify", d])).unwrap();
+        assert!(text.contains("budgets  in force: tree "), "{text}");
+        assert!(text.contains("over $1000.00, 1 strategy mapped"), "{text}");
+        assert!(text.contains("refused  strategy_budget"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

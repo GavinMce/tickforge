@@ -275,6 +275,77 @@ pub struct Audit {
     pub outcome: Decision,
 }
 
+/// Why a set of budgets cannot be given to the gateway.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BudgetsError {
+    /// A strategy number was mapped to an id that is not a strategy of the tree.
+    UnknownStrategy(String),
+    /// Two strategy numbers were mapped to one id.
+    Duplicate(String),
+}
+
+/// The budgets the gateway enforces: a [`tf_budget::Tree`], the balance it divides, and which
+/// strategy number (the one in each intent) is which strategy of the tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Budgets {
+    tree: tf_budget::Tree,
+    balance: u128,
+    ids: BTreeMap<u16, String>,
+}
+
+impl Budgets {
+    pub fn new(
+        tree: tf_budget::Tree,
+        balance: u128,
+        ids: impl IntoIterator<Item = (u16, String)>,
+    ) -> Result<Budgets, BudgetsError> {
+        let mut map = BTreeMap::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for (n, id) in ids {
+            if tree.strategy(&id).is_none() {
+                return Err(BudgetsError::UnknownStrategy(id));
+            }
+            if !seen.insert(id.clone()) {
+                return Err(BudgetsError::Duplicate(id));
+            }
+            map.insert(n, id);
+        }
+        Ok(Budgets {
+            tree,
+            balance,
+            ids: map,
+        })
+    }
+
+    pub fn tree(&self) -> &tf_budget::Tree {
+        &self.tree
+    }
+
+    pub fn balance(&self) -> u128 {
+        self.balance
+    }
+
+    pub fn ids(&self) -> &BTreeMap<u16, String> {
+        &self.ids
+    }
+
+    /// A strategy's budget in raw units, if it is in the tree.
+    pub fn strategy_budget(&self, strategy: u16) -> Option<u128> {
+        self.tree
+            .strategy_budget(self.balance, self.ids.get(&strategy)?)
+    }
+
+    /// The group a strategy belongs to.
+    pub fn group_of(&self, strategy: u16) -> Option<&str> {
+        self.tree
+            .group_of(self.ids.get(&strategy)?)
+            .map(|g| g.id.as_str())
+    }
+}
+
+/// The tree's fingerprint, the balance it divides, and which strategy number is which strategy.
+pub type BudgetsInForce = (u64, u128, Vec<(u16, String)>);
+
 /// A gateway's state as comparable data (see [`Gateway::snapshot`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewaySnapshot {
@@ -293,6 +364,8 @@ pub struct GatewaySnapshot {
     pub recent: Vec<Nanos>,
     pub accepted: u64,
     pub rejected: Vec<(String, u64)>,
+    /// The budgets in force: the tree's fingerprint, the balance, and which strategy number is which.
+    pub budgets: Option<BudgetsInForce>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +406,7 @@ pub struct Gateway {
     next_order: u64,
     /// Realised profit by strategy.
     realized: BTreeMap<u16, i128>,
+    budgets: Option<Budgets>,
     day_base: i128,
     killed: bool,
     loss_latched: bool,
@@ -362,6 +436,9 @@ pub fn reason_name(r: &RejectReason) -> &'static str {
         RejectReason::GapRisk => "gap_risk",
         RejectReason::NothingToClose => "nothing_to_close",
         RejectReason::UnknownInstrument => "unknown_instrument",
+        RejectReason::NoBudget => "no_budget",
+        RejectReason::StrategyBudget => "strategy_budget",
+        RejectReason::GroupBudget => "group_budget",
         _ => "other",
     }
 }
@@ -376,6 +453,7 @@ impl Gateway {
             working: Vec::new(),
             next_order: 0,
             realized: BTreeMap::new(),
+            budgets: None,
             day_base: 0,
             killed: false,
             loss_latched: false,
@@ -537,7 +615,100 @@ impl Gateway {
         if intent.side == Side::SellShort {
             self.check_gap(intent)?;
         }
+        if let Some(b) = &self.budgets {
+            self.check_budgets(b, intent)?;
+        }
         Ok(())
+    }
+
+    /// What a shorted dollar of notional is charged against a budget, per mille: at least the whole
+    /// of it, and more if the gap rule assumes the price could more than double.
+    fn short_charge_permille(&self) -> u128 {
+        self.limits
+            .gap
+            .map_or(1000, |g| u128::from(g.gap_permille).max(1000))
+    }
+
+    /// `notional` charged as a long or as a short, rounded up so it is never looser than stated.
+    fn charged(&self, notional: u128, short: bool) -> u128 {
+        if short {
+            (notional * self.short_charge_permille()).div_ceil(1000)
+        } else {
+            notional
+        }
+    }
+
+    /// What a strategy uses of its budget, raw units: each position at the higher of cost and
+    /// mark, plus its working opening orders. A long is charged at its notional (it cannot lose
+    /// more), a short at its notional times the gap rule's assumption (never less than notional).
+    pub fn strategy_charge(&self, strategy: u16) -> u128 {
+        let held: u128 = self
+            .pos
+            .iter()
+            .filter(|((s, _), p)| *s == strategy && p.qty != 0)
+            .map(|((_, i), p)| {
+                let px = u128::try_from(p.avg.max(self.marks[*i as usize])).unwrap_or(0);
+                self.charged(u128::from(p.qty.unsigned_abs()) * px, p.qty < 0)
+            })
+            .sum();
+        let working: u128 = self
+            .working
+            .iter()
+            .filter(|w| w.strategy == strategy && w.purpose == Purpose::Open)
+            .map(|w| {
+                let short = !w.side.is_buy();
+                let px = if short { w.reference } else { w.limit };
+                self.charged(
+                    u128::from(w.remaining) * u128::try_from(px).unwrap_or(0),
+                    short,
+                )
+            })
+            .sum();
+        held + working
+    }
+
+    /// What a group uses: the sum over its strategies.
+    pub fn group_charge(&self, group: &str) -> u128 {
+        let Some(b) = &self.budgets else { return 0 };
+        b.ids
+            .iter()
+            .filter(|(_, id)| b.tree.group_of(id).is_some_and(|g| g.id == group))
+            .map(|(n, _)| self.strategy_charge(*n))
+            .sum()
+    }
+
+    /// An opening order must fit in its strategy's budget and its group's.
+    fn check_budgets(&self, b: &Budgets, intent: &Intent) -> Result<(), RejectReason> {
+        let me = intent.id.strategy.0;
+        let (Some(own), Some(group)) = (b.strategy_budget(me), b.group_of(me)) else {
+            return Err(RejectReason::NoBudget);
+        };
+        let short = intent.side == Side::SellShort;
+        let notional = if short {
+            u128::from(intent.qty)
+                * u128::try_from(intent.pricing.reference_price().raw()).unwrap_or(0)
+        } else {
+            intent.notional_at_limit()
+        };
+        let new = self.charged(notional, short);
+        if self.strategy_charge(me) + new > own {
+            return Err(RejectReason::StrategyBudget);
+        }
+        let group_budget = b.tree.group_budget(b.balance, group).unwrap_or(0);
+        if self.group_charge(group) + new > group_budget {
+            return Err(RejectReason::GroupBudget);
+        }
+        Ok(())
+    }
+
+    /// Put budgets in force (or take them away with `None`). Positions already held are not
+    /// touched: a smaller budget only blocks new opens, and closes always pass.
+    pub fn set_budgets(&mut self, budgets: Option<Budgets>) {
+        self.budgets = budgets;
+    }
+
+    pub fn budgets(&self) -> Option<&Budgets> {
+        self.budgets.as_ref()
     }
 
     /// The gap rule: all shorts gapping at once, this one included, must fit.
@@ -681,6 +852,13 @@ impl Gateway {
             next_order: self.next_order,
             realized: self.realized.values().sum(),
             strategy_realized: self.realized.iter().map(|(s, v)| (*s, *v)).collect(),
+            budgets: self.budgets.as_ref().map(|b| {
+                (
+                    b.tree.fingerprint(),
+                    b.balance,
+                    b.ids.iter().map(|(n, id)| (*n, id.clone())).collect(),
+                )
+            }),
             day_base: self.day_base,
             killed: self.killed,
             loss_latched: self.loss_latched,

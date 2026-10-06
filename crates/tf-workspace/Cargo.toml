@@ -19,3 +19,6 @@ tf-catalog.workspace = true
 tf-manifest.workspace = true
 tf-strategy.workspace = true
 
+
+[dev-dependencies]
+tf-backtest.workspace = true

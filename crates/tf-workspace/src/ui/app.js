@@ -318,7 +318,11 @@
     if (!d) {
       main.push(h("div", { "class": "card empty" }, "Loading the run…"));
     } else if (d.trades === null) {
-      main.push(h("div", { "class": "card panel" }, d.note));
+      var back = "/#/s/" + encodeURIComponent(rv.strategy) + "/" + encodeURIComponent(run.id);
+      main.push(h("section", { "class": "card panel", "aria-label": "Run" },
+        h("h2", null, "Trades and decisions"),
+        h("div", { "class": "mute" }, d.note),
+        h("a", { "class": "btn", style: "align-self:flex-start", href: "/explorer/" + encodeURIComponent(run.id) + "?back=" + encodeURIComponent(back) }, "Open in trade explorer ›")));
     } else {
       main.push(h("section", { "class": "card panel", "aria-label": "Run chart" },
         h("h2", null, "Realised profit through the session"),

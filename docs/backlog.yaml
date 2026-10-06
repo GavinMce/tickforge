@@ -1058,7 +1058,8 @@ epics:
       - id: E17-S12
         jira: TIC-131
         title: "Trade explorer in its own view, opened from a run"
-        status: todo
+        status: done
+        evidence: "A stored backtest's run view has 'Open in trade explorer' which opens /explorer/HASH full view (the existing explorer, ADR 0025: it starts at the start of the watch window at the scanner hit or promotion and draws only candles, levels and decisions up to its cursor) with 'Back to the run' returning to that run (/#/s/NAME/ID). The service gets the replay from `tf serve` (explore::page_for: the same replay-and-check as `tf explore`), so a run that no longer reproduces, needs rules that are missing or is not a momentum backtest is refused with the reason (422), an unknown run is a 404; names are 8-64 hex digits or never passed on. Served behind sign-in under its own CSP (inline script allowed, connect-src/form-action/frame-ancestors none); the viewer no longer asks Google for fonts. Looked at in headless Chromium: stored run -> explorer -> back, no console errors but the expected 404 on an unknown run. 24 workspace tests, one in tf-cli; 13 mutations tried, 3 survivors closed by counting calls to the explorer, one (the Back link shown by the viewer's own script) covered by the browser check only. Limits: only runs whose stored result still reproduces; ledger sessions have no explorer (no tape); the Back link is validated by a regex in the viewer, not by a unit test of the script"
         deps: [E17-S11, E16-S02]
         ac:
           - The existing explorer opens full view from a run, starting at the scanner hit, with Back to the run

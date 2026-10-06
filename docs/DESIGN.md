@@ -217,3 +217,9 @@ second including zstd. On the full-market feed, venues number their own sequence
 prices (almost all from one venue; a fifth of premarket trades), and a day of `status` has 48
 halts or pauses, 13,337 trading and 308 short-sale-restriction records. No consolidated quote was
 crossed in the sampled windows, and 184 of 93,878 were one-sided.
+
+**The ingest queue on the real opening (2026-10-06).** `tf-ingest` between a paced feed and Tier 0:
+the opening five minutes' first six seconds (531,057 trades, busiest second 236,131 once zero-share
+prints are set aside) lose nothing even if the engine pauses for six seconds in the middle of the
+burst (the ring peaks at 343k of 2.1M). Only a ring smaller than the burst drops, and every drop is
+counted and marked. Details and the policy are in ADR 0039.

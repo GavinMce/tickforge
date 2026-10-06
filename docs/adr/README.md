@@ -55,3 +55,4 @@ How:
 | [0036](0036-agents-may-cut-risk-on-their-own-but-raising-it-needs-a-person.md) | Agents may cut risk on their own, but raising it needs a person | Accepted |
 | [0037](0037-the-alpaca-adapter-is-a-translation-over-a-transport-and-never-retries-an-order-blind.md) | The Alpaca adapter is a translation over a transport and never retries an order blind | Accepted |
 | [0038](0038-databento-records-are-decoded-by-the-dbn-crate-into-canonical-events.md) | Databento records are decoded by the `dbn` crate into canonical events | Accepted |
+| [0039](0039-the-feed-never-waits-for-the-engine-and-what-is-given-up-is-decided-by-what-it-is-worth.md) | The feed never waits for the engine, and what is given up is decided by what it is worth | Accepted |

@@ -30,6 +30,7 @@ tf-workspace = { path = "crates/tf-workspace" }
 tf-proposals = { path = "crates/tf-proposals" }
 tf-alpaca = { path = "crates/tf-alpaca" }
 tf-databento = { path = "crates/tf-databento" }
+tf-ingest = { path = "crates/tf-ingest" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

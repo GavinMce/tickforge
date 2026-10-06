@@ -1,0 +1,21 @@
+[package]
+name = "tf-ingest"
+description = "The queue between a feed and the engine: bounded, never blocks the feed, conflates quotes, never silently drops a trade"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+
+[dev-dependencies]
+tf-engine.workspace = true
+tf-synth.workspace = true
+tf-databento.workspace = true
+tf-alpaca.workspace = true
+zstd = "0.13"

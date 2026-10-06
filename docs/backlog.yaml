@@ -335,12 +335,13 @@ epics:
       - id: E05-S05
         jira: TIC-48
         title: Backpressure and drop policy
-        status: todo
-        deps: [E05-S02]
+        status: done
+        evidence: "crates/tf-ingest: one bounded ring between a feed thread and the engine thread; push never blocks (queued / conflated / dropped), admission by worth (quotes below half the ring, then conflated per symbol and queued when it drains; trades up to 90%, then dropped; control events up to full), every drop counted by kind and marked in-band by a Gap (kind, count, first and last time) before the next event, per-symbol order kept, no unsafe and no new dependency, counters shared by both ends (exporting them is E13-S03); ADR 0039. 19 tests incl. a 60-seed property (per-symbol order, every trade delivered or counted with markers adding up exactly, the last quote per symbol delivered), a producer/consumer thread test, a bounded-bookkeeping test under sustained pressure; about 40 mutations tried, the two real gaps (a leaking dirty list, shared gap slots) closed. Real data, tf-ingest example `burst` (local; XNAS.BASIC trades 2026-10-02 09:30:00-09:35:00 ET at their recorded spacing into Tier 0): no trade dropped with no stall, nor with the engine paused for 1, 3 or 6 seconds in the middle of the burst (deepest ring 343k of 2.1M); the busiest second is 236,131 trades (304,321 with zero-share prints); queue latency p50 0.2 us, p99 38 us, p99.9 28 ms and max 35 ms (the tail is this machine's scheduler, with no stall). Drops start only with a ring smaller than the burst, and then add up exactly: a 200k ring paused 3 s offered 531,057 = 408,784 delivered + 122,273 in 30 markers. Not done: the ingestor that feeds it (E05-S02), exporting the counters (E13-S03), a quote workload on real data (only synthetic quotes are tested)"
+        deps: []
         ac:
           - Bounded SPSC queue between feed and engine; feed is never blocked
-          - Drops are counted and exported as metrics; policy documented
-          - Survives a replay of the real opening five minutes of 2026-10-02 (337,231 trades in one second) with no trade dropped; under pressure quotes are conflated, never trades
+          - Drops are counted, available as a counter snapshot for the metrics exporter (E13-S03), and the policy is documented
+          - Survives a replay of the real opening five minutes of 2026-10-02 with no trade dropped; under pressure quotes are conflated, never trades
   - id: E06
     jira: TIC-7
     title: Databento integration

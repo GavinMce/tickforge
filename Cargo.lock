@@ -392,6 +392,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-ingest"
+version = "0.1.0"
+dependencies = [
+ "tf-alpaca",
+ "tf-core",
+ "tf-databento",
+ "tf-engine",
+ "tf-synth",
+ "zstd 0.13.3",
+]
+
+[[package]]
 name = "tf-ledger"
 version = "0.1.0"
 dependencies = [

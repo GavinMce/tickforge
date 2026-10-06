@@ -128,6 +128,9 @@ struct Slot {
     /// Being flattened: re-checked every second until nothing is left.
     flattening: bool,
     stats: StrategyStats,
+    universe_fp: u64,
+    /// Every symbol a dynamic universe has ever held (empty for a static one).
+    ever: BTreeSet<InstrumentId>,
 }
 
 impl Slot {
@@ -199,6 +202,23 @@ pub struct Host<S: LedgerStore> {
     hash: Fnv,
     failed: bool,
     log: Option<Log>,
+    // What the daily report reads (E18-S07).
+    reasons: BTreeMap<u16, BTreeMap<&'static str, u64>>,
+    fills_by: BTreeMap<(u16, InstrumentId), (u64, u128)>,
+    fill_counts: BTreeMap<u16, u64>,
+    per_second: BTreeMap<u64, u32>,
+    lag_hist: [u64; 65],
+    first_ts: Option<Nanos>,
+    gaps: Vec<GapNote>,
+}
+
+/// A break the ingest queue reported: events of one kind lost between two times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GapNote {
+    pub trades: bool,
+    pub count: u64,
+    pub first_ts: Nanos,
+    pub last_ts: Nanos,
 }
 
 impl<S: LedgerStore> Host<S> {
@@ -248,6 +268,13 @@ impl<S: LedgerStore> Host<S> {
             hash: Fnv(0xcbf2_9ce4_8422_2325),
             failed: false,
             log: None,
+            reasons: BTreeMap::new(),
+            fills_by: BTreeMap::new(),
+            fill_counts: BTreeMap::new(),
+            per_second: BTreeMap::new(),
+            lag_hist: [0; 65],
+            first_ts: None,
+            gaps: Vec::new(),
             reference,
             cfg,
         })
@@ -374,6 +401,8 @@ impl<S: LedgerStore> Host<S> {
             route: def.route,
             flattening: false,
             stats: StrategyStats::default(),
+            universe_fp: def.universe.fingerprint(),
+            ever: BTreeSet::new(),
         });
         Ok(())
     }
@@ -420,6 +449,10 @@ impl<S: LedgerStore> Host<S> {
         let ts = ev.ts_recv();
         self.now = self.now.max(ts);
         self.events += 1;
+        self.first_ts.get_or_insert(ts);
+        *self.per_second.entry(ts / NANOS_PER_SEC).or_insert(0) += 1;
+        let lag = ts.saturating_sub(ev.hdr().ts_event);
+        self.lag_hist[(64 - lag.leading_zeros()) as usize] += 1;
         self.sim.observe(ev);
         if let Some(p) = self.paper.as_mut() {
             p.observe(ev);
@@ -448,6 +481,7 @@ impl<S: LedgerStore> Host<S> {
                 let view = Tier0View { tier0, refs };
                 if let Some(change) = sel.update(ts, &view, &slot.candidates) {
                     slot.runner.members_mut().apply(&change);
+                    slot.ever.extend(change.entered.iter().copied());
                 }
             }
         }
@@ -590,6 +624,12 @@ impl<S: LedgerStore> Host<S> {
         });
         match decision {
             Decision::Rejected(r) => {
+                *self
+                    .reasons
+                    .entry(s)
+                    .or_default()
+                    .entry(tf_risk::reason_name(&r))
+                    .or_insert(0) += 1;
                 self.hash.put(0);
                 self.slots[k].stats.rejected_by_gateway += 1;
                 let u = OrderUpdate::rejected(intent.id, r, intent.ts);
@@ -661,7 +701,11 @@ impl<S: LedgerStore> Host<S> {
                     self.hash.put(u64::from(qty));
                     self.hash.put(px.raw() as u64);
                     self.hash.put(e.ts);
-                    if let Some(&(_, instrument, _)) = self.orders.get(&e.order) {
+                    if let Some(&(s, instrument, _)) = self.orders.get(&e.order) {
+                        let f = self.fills_by.entry((s, instrument)).or_insert((0, 0));
+                        f.0 += u64::from(qty);
+                        f.1 += u128::from(qty) * u128::try_from(px.raw()).unwrap_or(0);
+                        *self.fill_counts.entry(s).or_insert(0) += 1;
                         self.note(e.ts, |idx, ts| Rec::Fill {
                             idx,
                             ts,
@@ -936,6 +980,119 @@ impl<S: LedgerStore> Host<S> {
 
     pub fn accepted(&self) -> u64 {
         self.accepted
+    }
+
+    /// The ingest queue lost events between two times: noted for the report.
+    pub fn on_gap(&mut self, trades: bool, count: u64, first_ts: Nanos, last_ts: Nanos) {
+        self.gaps.push(GapNote {
+            trades,
+            count,
+            first_ts,
+            last_ts,
+        });
+    }
+
+    pub fn gaps(&self) -> &[GapNote] {
+        &self.gaps
+    }
+
+    /// Why the gateway refused a strategy's intents, by reason, with counts.
+    pub fn rejections_of(&self, id: u16) -> Vec<(&'static str, u64)> {
+        self.reasons
+            .get(&id)
+            .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Fills a strategy had: how many, shares and dollars (raw price units x shares) traded.
+    pub fn fills_of(&self, id: u16) -> (u64, u64, u128) {
+        let (shares, notional) = self
+            .fills_by
+            .iter()
+            .filter(|((s, _), _)| *s == id)
+            .fold((0u64, 0u128), |a, (_, v)| (a.0 + v.0, a.1 + v.1));
+        (
+            self.fill_counts.get(&id).copied().unwrap_or(0),
+            shares,
+            notional,
+        )
+    }
+
+    /// The symbols a strategy traded most (by shares), most first, ties to the lower id.
+    pub fn top_symbols_of(&self, id: u16, k: usize) -> Vec<(InstrumentId, u64)> {
+        let mut v: Vec<(InstrumentId, u64)> = self
+            .fills_by
+            .iter()
+            .filter(|((s, _), _)| *s == id)
+            .map(|((_, i), f)| (*i, f.0))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v.truncate(k);
+        v
+    }
+
+    /// What a strategy watched: its universe's fingerprint, how many symbols the static layer chose, how
+    /// many a dynamic layer ever held, and how many it holds now.
+    pub fn watched_by(&self, id: u16) -> Option<(u64, usize, usize, usize)> {
+        let k = self.slot_index(id)?;
+        let s = &self.slots[k];
+        Some((
+            s.universe_fp,
+            s.candidates.len(),
+            s.ever.len(),
+            s.runner.members().len(),
+        ))
+    }
+
+    pub fn reference(&self) -> &Reference {
+        &self.reference
+    }
+
+    pub fn route_of(&self, id: u16) -> Option<Route> {
+        self.slot_index(id).map(|k| self.slots[k].route)
+    }
+
+    /// Events handled, seconds of event time that had any, the busiest second and its time.
+    pub fn rate(&self) -> (u64, u64, u32, Nanos) {
+        let peak = self
+            .per_second
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+            .map_or((0, 0), |(s, n)| (*s, *n));
+        (
+            self.events,
+            self.per_second.len() as u64,
+            peak.1,
+            peak.0 * NANOS_PER_SEC,
+        )
+    }
+
+    /// An upper bound, in nanoseconds, on the `q` permille quantile of how long events took to reach us
+    /// (receive time less event time): the top of the power-of-two bucket it falls in.
+    pub fn feed_lag_quantile(&self, q_permille: u64) -> Nanos {
+        let total: u64 = self.lag_hist.iter().sum();
+        if total == 0 {
+            return 0;
+        }
+        let want = (total * q_permille).div_ceil(1000).max(1);
+        let mut seen = 0;
+        for (b, n) in self.lag_hist.iter().enumerate() {
+            seen += n;
+            if seen >= want {
+                return if b == 0 {
+                    0
+                } else if b >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << b) - 1
+                };
+            }
+        }
+        0
+    }
+
+    pub fn first_event_ts(&self) -> Option<Nanos> {
+        self.first_ts
     }
 
     /// A hash of every decision and fill so far.

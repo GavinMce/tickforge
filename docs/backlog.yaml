@@ -1411,10 +1411,32 @@ epics:
       - id: E18-S07
         jira: TIC-146
         title: Daily report per strategy and for system health
-        status: todo
+        status: done
         deps: [E18-S05]
+        evidence: >
+          tf-host::daily (ADR 0048): `DailyReport::build(host, label, SystemInputs, replay)` and `render()`,
+          a pure reading of what the host kept, so the same day always makes the same text (tested). Per
+          strategy: where its fills came from (simulated, or paper and optimistic, each labelled), how it
+          ended (ran all day, panicked, soft or hard loss limit, killed and flattened), what it watched (universe
+          fingerprint, symbols chosen before the open, held at some time by a dynamic layer, held at the end,
+          reviews), intents, accepted, fills, shares and dollars traded, refusals by reason (the
+          gateway's names) and the broker's (refused, rate limited, no answer), realized, unrealized and total
+          profit and loss from the gateway, orders the host made to close it, the symbols it traded most, and its
+          Tier 1 requests (asked, already there, promoted, denied for room, lost). For the system: events,
+          active seconds and mean rate, the busiest second and its time of day, feed lag (received less
+          event time) as 50th, 99th and worst quantile bounded by the power of two it falls in, the ingest
+          queue's counters with a plain "EVENTS WERE LOST" when anything but a superseded quote
+          was lost, the gaps it reported with times, engine lag and capture facts as the driver gives
+          them (or "not measured"), Tier 1 use, what the ledger would not take, orders still working, the host's
+          notes, and the replay check's result (or "not run"). The report opens by saying that no fill in it is
+          real and that profit and loss is an upper bound. 13 tests with exact-text checks; 14 mutants of
+          the money format, quantile rounding and buckets, peak, refusal tallies, sort order, loss
+          flag and totals killed. Narrowed: running it after each session and storing it is the
+          operations story (E18-S09); the live driver that fills SystemInputs (queue counters,
+          engine lag, capture facts) does not exist yet (E06-S02), so those fields are inputs; text only
+          (no HTML or workspace page).
         ac:
-          - After each session a report lists, per strategy, trades, P&L, refusals by reason, and what it watched; and for the system, message rates, peak second, lag, drops, gaps and the replay-equivalence result
+          - After each session a report lists, per strategy, trades, P&L, refusals by reason and what it watched; and for the system, message rates, busiest second, lag, drops, gaps and the replay-equivalence result
           - Fills are labelled simulated or paper and the report says paper fills are optimistic
       - id: E18-S08
         jira: TIC-147

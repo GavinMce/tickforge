@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workspace overview</title>
+<style>
+:root{--bg:#F2F1EC;--card:#fff;--line:#DAD8D0;--soft:#E9E7E0;--ink:#1B2124;--mute:#566066;--pos:#0E5E51;--neg:#9B2C2C;--link:#2C63B8;--warnbg:#F6EAD2;--warn:#4F3504;--mono:ui-monospace,"IBM Plex Mono",SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#15191B;--card:#1E2427;--line:#343C40;--soft:#2A3236;--ink:#ECEBE6;--mute:#9AA4A9;--pos:#5FC3AE;--neg:#F08A8A;--link:#8FB4F0;--warnbg:#3B2E12;--warn:#F3DDAE}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "IBM Plex Sans",system-ui,sans-serif}
+main{max-width:1280px;margin:0 auto;padding:28px 16px 48px;display:flex;flex-direction:column;gap:20px}
+h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-.01em}
+h2{margin:0;font-size:14px;font-weight:600}
+button{font:inherit;color:inherit}
+button:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.mono{font-family:var(--mono)}
+.mute{color:var(--mute)}
+.small{font-size:12px}
+.pos{color:var(--pos)}.neg{color:var(--neg)}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.chip{font-size:12px;padding:2px 9px;border-radius:99px;background:var(--soft)}
+.eyebrow{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--mute)}
+.banner{background:var(--warnbg);color:var(--warn);border-radius:8px;padding:12px 16px}
+.banner ul{margin:6px 0 0;padding-left:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px}
+.totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.totals .card{padding:14px 16px}
+.big{font-family:var(--mono);font-size:clamp(18px,4.6vw,24px);font-weight:500;margin-top:2px;white-space:nowrap}
+.alloc{padding:16px;display:flex;flex-direction:column;gap:10px}
+.bar{display:flex;gap:3px;height:44px}
+.seg{border:1px solid transparent;border-radius:6px;cursor:pointer;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:0 8px;color:#fff;text-align:left}
+.seg.free{background:repeating-linear-gradient(45deg,var(--soft),var(--soft) 6px,var(--card) 6px,var(--card) 12px);color:var(--mute);cursor:default}
+.seg[aria-pressed=true]{outline:2px solid var(--ink);outline-offset:1px}
+.split{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start}
+.mainc{flex:999 1 640px;min-width:0;display:flex;flex-direction:column;gap:20px}
+aside{flex:1 1 320px;min-width:0;display:flex;flex-direction:column;gap:20px}
+.groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+.gcard{padding:14px 16px;display:flex;flex-direction:column;gap:8px;text-align:left;cursor:pointer;width:100%;background:var(--card)}
+.gcard[aria-pressed=true]{border-color:var(--ink);box-shadow:0 0 0 1px var(--ink)}
+.between{display:flex;justify-content:space-between;gap:8px;width:100%}
+.dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:8px}
+.track{height:8px;border-radius:4px;background:var(--soft);overflow:hidden;width:100%}
+.fill{height:100%;background:var(--ink);border-radius:4px}
+.fill.hot{background:var(--neg)}
+.kv{display:flex;justify-content:space-between;align-items:baseline;gap:4px 12px;flex-wrap:wrap}.kv>:last-child{margin-left:auto;text-align:right}
+.panel{padding:16px;display:flex;flex-direction:column;gap:10px}
+.thead,.trow{display:grid;grid-template-columns:minmax(150px,2fr) 70px 100px minmax(130px,1.5fr) 90px 130px 70px;gap:12px;padding:10px 16px;align-items:center}
+.thead{font-size:12px;color:var(--mute);background:var(--bg);border-bottom:1px solid var(--soft)}
+.trow{border-bottom:1px solid var(--soft);min-height:44px}
+.table{overflow-x:auto}.table>div{min-width:800px}
+.state{font-size:12px;padding:2px 9px;border-radius:99px;display:inline-block;background:var(--soft)}
+.state.bad{background:var(--warnbg);color:var(--warn)}
+.empty{padding:32px 16px;text-align:center}
+.err{color:var(--neg)}
+</style>
+</head>
+<body>
+<main id="app" aria-live="polite"><p class="mute">Loading…</p></main>
+<script src="/app.js"></script>
+</body>
+</html>

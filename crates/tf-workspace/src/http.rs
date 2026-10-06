@@ -72,7 +72,7 @@ impl Response {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut h = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'\r\nConnection: close\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nConnection: close\r\n",
             self.status,
             self.reason(),
             self.content_type,
@@ -153,7 +153,8 @@ pub(crate) fn decode(s: &str) -> String {
 
 const LOGIN: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Workspace sign-in</title><style>body{font:16px system-ui;margin:3rem auto;max-width:22rem;padding:0 1rem}input,button{font:inherit;padding:.5rem;width:100%;box-sizing:border-box;margin:.25rem 0}</style><h1>Workspace</h1><form method=post action=/login><label>Access token<input type=password name=token autocomplete=current-password autofocus></label><button>Sign in</button></form>";
 
-const HOME: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Workspace</title><style>body{font:16px system-ui;margin:3rem auto;max-width:36rem;padding:0 1rem}</style><h1>Workspace</h1><p>Read-only. Nothing here can place an order or change a budget.</p><ul><li><a href=/api/overview>/api/overview</a><li><a href=/api/runs>/api/runs</a></ul>";
+const HOME: &str = include_str!("ui/index.html");
+const APP_JS: &str = include_str!("ui/app.js");
 
 /// Answers one request. Reads the ledger and run store named by `src`; writes nothing.
 pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
@@ -180,7 +181,10 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     if req.path == "/health" {
         return Response::json(200, "{\"ok\":true}");
     }
-    let known = matches!(req.path.as_str(), "/" | "/api/overview" | "/api/runs");
+    let known = matches!(
+        req.path.as_str(),
+        "/" | "/app.js" | "/api/overview" | "/api/runs"
+    );
     if !known {
         return Response::error(404, "no such route");
     }
@@ -193,6 +197,7 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     }
     let answer = match req.path.as_str() {
         "/" => return Response::new(200, "text/html", HOME),
+        "/app.js" => return Response::new(200, "text/javascript", APP_JS),
         "/api/overview" => overview(src),
         _ => runs(src, query_value(&req.query, "strategy").as_deref()),
     };

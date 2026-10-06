@@ -125,6 +125,7 @@ fn every_kind_of_record_survives_the_text_form_exactly() {
         }),
         ev(Input::Kill { ts: 77 }),
         ev(Input::NewDay { ts: 0 }),
+        ev(Input::LossCheck { ts: 9 }),
     ]);
     // Every shape of intent, and every possible answer.
     let mut seq = 0;
@@ -200,6 +201,7 @@ fn every_kind_of_record_survives_the_text_form_exactly() {
         RejectReason::NoBudget,
         RejectReason::StrategyBudget,
         RejectReason::GroupBudget,
+        RejectReason::StrategyLossLimit,
     ];
     use tf_strategy::intent::IntentError as E;
     reasons.extend(
@@ -1126,7 +1128,12 @@ fn random_day(
                     let _ = j.close(o.id, st, now);
                 }
             }
-            80..=94 => j.mark(inst, Px::from_raw(px)),
+            80..=94 => {
+                j.mark(inst, Px::from_raw(px));
+                if with_budgets {
+                    j.check_loss_limits(now).unwrap();
+                }
+            }
             95..=96 => {
                 let _ = j.engage_kill_switch(now);
             }
@@ -1512,7 +1519,7 @@ fn budget_records_that_cannot_be_read_are_refused() {
 
 #[test]
 fn with_budgets_in_force_a_rebuilt_journal_is_the_same_journal_after_every_step_of_random_days() {
-    let mut refused = 0;
+    let (mut refused, mut loss_stops, mut loss_checks) = (0, 0, 0);
     let mut steps = 0;
     for seed in 0..6 {
         let mut check = |j: &mut Journal<MemStore>| {
@@ -1525,7 +1532,113 @@ fn with_budgets_in_force_a_rebuilt_journal_is_the_same_journal_after_every_step_
         let j = random_day(seed, 250, true, &mut check);
         refused += j.gateway().rejected_count("strategy_budget")
             + j.gateway().rejected_count("group_budget");
+        loss_stops += j.gateway().rejected_count("strategy_loss_limit");
+        loss_checks += j
+            .store()
+            .records()
+            .iter()
+            .filter(|r| r.starts_with("losscheck"))
+            .count();
     }
     assert_eq!(steps, 6 * 250);
-    assert!(refused > 20, "the budgets bound: {refused} refusals");
+    assert!(refused > 10, "the budgets bound: {refused} refusals");
+    assert!(
+        loss_stops > 5 && loss_checks > 3,
+        "the loss limits tripped: {loss_stops} refusals, {loss_checks} checks"
+    );
+}
+
+#[test]
+fn a_strategy_crossing_its_loss_limits_is_recorded_once_and_replays_the_same() {
+    // Strategy 1 has a $1,000 budget (soft limit $30, hard limit $60) and holds 100 shares at $5.
+    let mut j = fresh(1);
+    j.set_budgets(Some(day_budgets(3_000 * P as u128)), SEC)
+        .unwrap();
+    let mut open = buy(1, 0, 100, 5 * P);
+    open.id.strategy = StrategyId(1);
+    let Decision::Accepted(o) = j.decide(&open, 2 * SEC).unwrap() else {
+        panic!()
+    };
+    j.ack(o, 2 * SEC).unwrap();
+    j.fill(o, 100, Px::from_raw(5 * P), 2 * SEC).unwrap();
+    // Nothing crossed: nothing is written.
+    let n = j.records();
+    j.mark(0, Px::from_raw(P * 4_800 / 1_000)); // down $0.20: $20
+    assert!(j.check_loss_limits(3 * SEC).unwrap().is_empty());
+    assert_eq!(j.records(), n + 1, "only the mark that the check needed");
+    // $35 down: past the soft limit. One event, one record.
+    j.mark(0, Px::from_raw(P * 4_650 / 1_000));
+    let ev = j.check_loss_limits(4 * SEC).unwrap();
+    assert_eq!(ev.len(), 1);
+    assert_eq!((ev[0].strategy, ev[0].tier), (1, tf_risk::LossTier::Soft));
+    let n = j.records();
+    assert!(
+        j.store()
+            .records()
+            .last()
+            .unwrap()
+            .starts_with("losscheck 4000000000")
+    );
+    assert!(j.check_loss_limits(5 * SEC).unwrap().is_empty());
+    assert_eq!(
+        j.records(),
+        n,
+        "a check that crosses nothing new writes nothing"
+    );
+    let mut again = buy(2, 0, 10, 5 * P);
+    again.id.strategy = StrategyId(1);
+    assert_eq!(
+        j.decide(&again, 6 * SEC).unwrap(),
+        Decision::Rejected(RejectReason::StrategyLossLimit)
+    );
+    // $65 down: the hard limit. The plan to flatten is the gateway's.
+    j.mark(0, Px::from_raw(P * 4_350 / 1_000));
+    let ev = j.check_loss_limits(7 * SEC).unwrap();
+    assert_eq!((ev.len(), ev[0].tier), (1, tf_risk::LossTier::Hard));
+    assert_eq!(
+        j.gateway().flatten_plan(1).closes,
+        vec![(0, tf_strategy::intent::Side::Sell, 100)]
+    );
+    // A restart finds the same latches and the same loss baseline.
+    let r = recover(&j, 1);
+    same(&j, &r);
+    let snap = r.snapshot();
+    assert_eq!(
+        (snap.soft_latched.clone(), snap.hard_latched.clone()),
+        (vec![1], vec![1])
+    );
+    // A new day clears them, and that is recorded and replayed too.
+    j.new_day(10 * SEC).unwrap();
+    let r = recover(&j, 1);
+    same(&j, &r);
+    assert!(r.snapshot().soft_latched.is_empty());
+    assert_eq!(r.gateway().strategy_loss(1), 0);
+}
+
+#[test]
+fn a_loss_check_that_replays_differently_is_caught() {
+    let mut j = fresh(1);
+    j.set_budgets(Some(day_budgets(3_000 * P as u128)), SEC)
+        .unwrap();
+    let mut open = buy(1, 0, 100, 5 * P);
+    open.id.strategy = StrategyId(1);
+    let Decision::Accepted(o) = j.decide(&open, 2 * SEC).unwrap() else {
+        panic!()
+    };
+    j.ack(o, 2 * SEC).unwrap();
+    j.fill(o, 100, Px::from_raw(5 * P), 2 * SEC).unwrap();
+    j.mark(0, Px::from_raw(P * 4_650 / 1_000));
+    j.check_loss_limits(4 * SEC).unwrap();
+    let mut again = buy(2, 0, 10, 5 * P);
+    again.id.strategy = StrategyId(1);
+    assert_eq!(
+        j.decide(&again, 6 * SEC).unwrap(),
+        Decision::Rejected(RejectReason::StrategyLossLimit)
+    );
+    // Remove the loss check from the ledger: the later refusal can no longer be reproduced... except
+    // that the decision itself latches the soft limit, so remove the mark that made the loss as well.
+    let mut recs = j.store().records().to_vec();
+    recs.retain(|r| !r.starts_with("losscheck") && !r.starts_with("mark"));
+    let e = open_mem(recs, 1).err().unwrap();
+    assert!(matches!(e, JournalError::Diverged { .. }), "{e}");
 }

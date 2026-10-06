@@ -93,6 +93,22 @@ pub(crate) fn report(args: &[String]) -> Result<String, String> {
         if snap.killed { "ENGAGED" } else { "off" },
         if snap.loss_latched { "YES" } else { "no" }
     );
+    for s in &snap.hard_latched {
+        let _ = writeln!(
+            out,
+            "limits   strategy {s} crossed its hard loss limit: to be flattened"
+        );
+    }
+    for s in snap
+        .soft_latched
+        .iter()
+        .filter(|s| !snap.hard_latched.contains(s))
+    {
+        let _ = writeln!(
+            out,
+            "limits   strategy {s} crossed its soft loss limit: stopped opening"
+        );
+    }
     match &snap.budgets {
         None => {
             let _ = writeln!(out, "budgets  none in force");
@@ -283,6 +299,63 @@ mod tests {
         assert!(text.contains("budgets  in force: tree "), "{text}");
         assert!(text.contains("over $1000.00, 1 strategy mapped"), "{text}");
         assert!(text.contains("refused  strategy_budget"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strategies_past_their_loss_limits_are_listed() {
+        use tf_budget::{Group, LossLimits as L, Strategy as S, Tree};
+        let dir = scratch("losses");
+        make(&dir); // strategy 1 holds 60 shares of instrument 1 bought at $5
+        let d = dir.to_str().unwrap();
+        assert!(
+            !report(&args(&["verify", d]))
+                .unwrap()
+                .contains("crossed its")
+        );
+        let (mut j, _) = Journal::open_recorded(FileStore::open(&dir).unwrap()).unwrap();
+        let tree = Tree::new(vec![Group {
+            id: "g".into(),
+            share: 10_000,
+            loss: L::default(),
+            strategies: vec![S {
+                id: "s".into(),
+                share: 10_000,
+            }],
+        }])
+        .unwrap();
+        // A $1,000 budget: soft limit $30, hard limit $60.
+        j.set_budgets(
+            Some(
+                tf_risk::Budgets::new(tree, 1_000 * 1_000_000_000, [(1, "s".to_owned())]).unwrap(),
+            ),
+            9_000_000_000,
+        )
+        .unwrap();
+        j.mark(1, Px::from_raw(4_600_000_000)); // down $0.40 on 60 shares: $24
+        assert!(j.check_loss_limits(10_000_000_000).unwrap().is_empty());
+        j.mark(1, Px::from_raw(4_450_000_000)); // $33: soft
+        assert_eq!(j.check_loss_limits(11_000_000_000).unwrap().len(), 1);
+        drop(j);
+        let text = report(&args(&["verify", d])).unwrap();
+        assert!(
+            text.contains("limits   strategy 1 crossed its soft loss limit: stopped opening"),
+            "{text}"
+        );
+        assert!(!text.contains("hard loss limit"), "{text}");
+        let (mut j, _) = Journal::open_recorded(FileStore::open(&dir).unwrap()).unwrap();
+        j.mark(1, Px::from_raw(4_000_000_000)); // $60: hard
+        assert_eq!(j.check_loss_limits(12_000_000_000).unwrap().len(), 1);
+        drop(j);
+        let text = report(&args(&["verify", d])).unwrap();
+        assert!(
+            text.contains("limits   strategy 1 crossed its hard loss limit: to be flattened"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("soft loss limit"),
+            "listed once, at its worst: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

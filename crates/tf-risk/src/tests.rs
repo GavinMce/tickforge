@@ -1498,6 +1498,17 @@ fn the_snapshot_says_which_budgets_were_in_force() {
 fn an_accepted_opening_always_fits_its_strategy_and_group_across_random_trading() {
     let mut rng = SplitMix64::new(33);
     let mut g = budgeted(1500);
+    // Loss limits out of the way: this is about the budgets themselves.
+    let out_of_the_way = BudgetLoss {
+        soft: 9_000,
+        hard: 10_000,
+    };
+    let wide = tree()
+        .with_loss("g1", out_of_the_way)
+        .unwrap()
+        .with_loss("g2", out_of_the_way)
+        .unwrap();
+    g.set_budgets(Some(budgets_for(wide)));
     let mut accepted_n = 0;
     let mut seq = 0;
     for step in 0..2_000u64 {
@@ -1646,4 +1657,303 @@ fn a_working_short_is_charged_at_its_reference_price_not_its_collar_floor() {
         1_000 * D,
         "100 shares at the $10 reference"
     );
+}
+
+// ---- loss limits per strategy ----
+
+/// Strategy 1 ("a", $20,000 budget: soft limit $600, hard limit $1,200) holds 2,000 shares at $5.
+fn holding_a() -> Gateway {
+    let mut g = budgeted(1000);
+    take(&mut g, buy_by(1, 1, 2_000, 5), SEC);
+    g
+}
+
+#[test]
+fn a_strategy_that_loses_its_soft_limit_stops_opening_for_the_day_but_can_still_close() {
+    assert_eq!(
+        budgets_for(tree()).tree().loss_amounts(100_000 * D, "a"),
+        Some((600 * D, 1_200 * D))
+    );
+    let mut g = holding_a();
+    assert_eq!(g.strategy_limits(1), Some((600 * D, 1_200 * D)));
+    assert_eq!(g.strategy_limits(9), None);
+    g.mark(0, px(471)); // down $0.29 on 2,000 shares: $580
+    assert_eq!(g.strategy_loss(1), 580 * D);
+    accepted(g.decide(&buy_by(1, 2, 10, 5), 2 * SEC)); // still allowed
+    g.mark(0, px(470)); // $600: exactly the limit
+    assert_eq!(g.strategy_loss(1), 600 * D);
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 3, 10, 5), 3 * SEC)),
+        RejectReason::StrategyLossLimit
+    );
+    // It stays stopped for the day even if the price recovers.
+    g.mark(0, px(500));
+    assert_eq!(g.strategy_loss(1), 0);
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 4, 10, 5), 4 * SEC)),
+        RejectReason::StrategyLossLimit
+    );
+    // Exits are never blocked.
+    let c = accepted(g.decide(&by(1, close(5, 2_000, 500)), 5 * SEC));
+    g.on_fill(c, 2_000, px(500)).unwrap();
+    // Another strategy in the same group, and its own group, are untouched.
+    accepted(g.decide(&buy_by(2, 6, 10, 5), 6 * SEC));
+    accepted(g.decide(&buy_by(3, 7, 10, 5), 6 * SEC));
+    assert_eq!(g.rejected_count("strategy_loss_limit"), 2);
+    assert_eq!(g.snapshot().soft_latched, vec![1]);
+    assert!(g.snapshot().hard_latched.is_empty());
+}
+
+#[test]
+fn a_loss_counts_realised_and_on_paper_and_a_gain_offsets_it() {
+    let mut g = holding_a();
+    // Sell half at a $0.30 loss ($300 realised), then lose $0.30 on the other half ($300 on paper).
+    let c = accepted(g.decide(&by(1, close(2, 1_000, 470)), 2 * SEC));
+    g.on_fill(c, 1_000, px(470)).unwrap();
+    assert_eq!(g.strategy_realized(1), -300 * D as i128);
+    g.mark(0, px(470));
+    assert_eq!(g.strategy_loss(1), 600 * D);
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 3, 10, 5), 3 * SEC)),
+        RejectReason::StrategyLossLimit
+    );
+    // A strategy that is ahead has no loss, however much another has lost.
+    g.mark(0, px(600));
+    assert_eq!(g.strategy_loss(1), 0);
+    assert_eq!(g.strategy_loss(2), 0);
+}
+
+#[test]
+fn crossing_the_hard_limit_is_reported_once_and_lays_out_what_to_flatten() {
+    let mut g = holding_a();
+    accepted(g.decide(&buy_by(1, 2, 100, 5), 2 * SEC)); // a working open to cancel
+    g.mark(0, px(441)); // 2,000 x $0.59 = $1,180: past soft ($600), not yet hard ($1,200)
+    assert_eq!(
+        g.check_loss_limits(),
+        vec![LossEvent {
+            strategy: 1,
+            tier: LossTier::Soft,
+            loss: 1_180 * D,
+            limit: 600 * D
+        }]
+    );
+    assert!(g.check_loss_limits().is_empty(), "each tier once");
+    g.mark(0, px(440)); // $1,200
+    assert_eq!(
+        g.check_loss_limits(),
+        vec![LossEvent {
+            strategy: 1,
+            tier: LossTier::Hard,
+            loss: 1_200 * D,
+            limit: 1_200 * D
+        }]
+    );
+    assert!(g.check_loss_limits().is_empty());
+    let snap = g.snapshot();
+    assert_eq!((snap.soft_latched, snap.hard_latched), (vec![1], vec![1]));
+    // Flatten: sell the 2,000 it holds and cancel the 100-share open that is working.
+    let plan = g.flatten_plan(1);
+    assert_eq!(plan.closes, vec![(0, Side::Sell, 2_000)]);
+    assert_eq!(plan.cancels.len(), 1);
+    // A close already working counts toward it.
+    accepted(g.decide(&by(1, close(3, 500, 440)), 3 * SEC));
+    assert_eq!(g.flatten_plan(1).closes, vec![(0, Side::Sell, 1_500)]);
+    assert_eq!(
+        g.flatten_plan(1).cancels.len(),
+        1,
+        "a working close is not cancelled"
+    );
+    // A strategy with nothing has nothing to flatten.
+    assert_eq!(
+        g.flatten_plan(2),
+        FlattenPlan {
+            closes: vec![],
+            cancels: vec![]
+        }
+    );
+}
+
+#[test]
+fn jumping_straight_past_the_hard_limit_reports_both_tiers() {
+    let mut g = holding_a();
+    g.mark(0, px(300)); // $4,000 down
+    assert_eq!(
+        g.check_loss_limits()
+            .iter()
+            .map(|e| (e.strategy, e.tier))
+            .collect::<Vec<_>>(),
+        vec![(1, LossTier::Soft), (1, LossTier::Hard)]
+    );
+}
+
+#[test]
+fn flattening_a_short_buys_it_back() {
+    let mut g = budgeted(1000);
+    take(&mut g, short_by(1, 1, 1_000, 10), SEC);
+    let plan = g.flatten_plan(1);
+    assert_eq!(plan.closes, vec![(0, Side::Buy, 1_000)]);
+    g.mark(0, px(1200)); // a short loses $2 a share: $2,000
+    assert_eq!(g.strategy_loss(1), 2_000 * D);
+    assert_eq!(g.check_loss_limits().len(), 2);
+}
+
+#[test]
+fn a_new_day_clears_the_latches_and_measures_from_where_the_strategy_stands() {
+    let mut g = holding_a();
+    g.mark(0, px(440));
+    assert_eq!(g.check_loss_limits().len(), 2);
+    assert_eq!(
+        rejected(g.decide(&buy_by(1, 2, 10, 5), 2 * SEC)),
+        RejectReason::StrategyLossLimit
+    );
+    g.new_day();
+    assert!(g.snapshot().soft_latched.is_empty() && g.snapshot().hard_latched.is_empty());
+    assert_eq!(
+        g.strategy_loss(1),
+        0,
+        "yesterday's loss is the new starting point"
+    );
+    assert_eq!(
+        g.snapshot().strategy_day_base,
+        vec![(1, -1_200 * D as i128), (2, 0), (3, 0)]
+    );
+    accepted(g.decide(&buy_by(1, 3, 10, 4), 3 * SEC));
+    assert!(g.check_loss_limits().is_empty());
+    // And it can lose its limits again from there.
+    g.mark(0, px(380));
+    assert_eq!(g.check_loss_limits().len(), 2);
+}
+
+#[test]
+fn each_groups_own_loss_limits_apply_to_its_strategies() {
+    let t = tree()
+        .with_loss(
+            "g1",
+            BudgetLoss {
+                soft: 100,
+                hard: 200,
+            },
+        )
+        .unwrap(); // 1% and 2%
+    let mut g = budgeted(1000);
+    g.set_budgets(Some(budgets_for(t)));
+    take(&mut g, buy_by(1, 1, 2_000, 5), SEC);
+    assert_eq!(g.strategy_limits(1), Some((200 * D, 400 * D)));
+    assert_eq!(
+        g.strategy_limits(3),
+        Some((1_500 * D, 3_000 * D)),
+        "g2 keeps the default 3% and 6% of $50,000"
+    );
+    g.mark(0, px(490)); // $200 down
+    assert_eq!(g.check_loss_limits().len(), 1);
+}
+
+#[test]
+fn without_budgets_there_are_no_strategy_loss_limits() {
+    let mut g = holding_a();
+    g.set_budgets(None);
+    g.mark(0, px(100));
+    assert!(g.strategy_loss(1) > 0);
+    assert_eq!(g.strategy_limits(1), None);
+    assert!(g.check_loss_limits().is_empty());
+    accepted(g.decide(&buy_by(1, 2, 10, 5), 2 * SEC));
+}
+
+#[test]
+fn across_random_trading_a_latched_strategy_never_opens_again_that_day_and_flattening_empties_it() {
+    let mut rng = SplitMix64::new(77);
+    let mut g = budgeted(1000);
+    let mut seq = 0;
+    let mut tripped = 0;
+    for step in 0..3_000u64 {
+        let now = step * SEC;
+        if step % 400 == 399 {
+            g.new_day();
+        }
+        seq += 1;
+        let strat = 1 + rng.below(3) as u16;
+        match rng.below(10) {
+            0..=3 => {
+                let i = buy_by(
+                    strat,
+                    seq,
+                    10 + rng.below(400) as u32,
+                    3 + rng.below(8) as i64,
+                );
+                let was_latched = g.snapshot().soft_latched.contains(&strat);
+                let d = g.decide(&i, now);
+                if was_latched {
+                    assert_eq!(
+                        d,
+                        Decision::Rejected(RejectReason::StrategyLossLimit),
+                        "step {step}"
+                    );
+                }
+            }
+            4..=5 => {
+                let snap = g.snapshot();
+                if !snap.working.is_empty() {
+                    let w = snap.working[rng.below(snap.working.len() as u64) as usize];
+                    g.on_fill(
+                        w.0,
+                        1 + rng.below(u64::from(w.3)) as u32,
+                        px(300 + rng.below(800) as i64),
+                    )
+                    .unwrap();
+                }
+            }
+            _ => g.mark(0, px(300 + rng.below(800) as i64)),
+        }
+        for e in g.check_loss_limits() {
+            if e.tier == LossTier::Hard {
+                tripped += 1;
+                // Carry out the plan: cancel the opens, close what is held, at the mark.
+                let plan = g.flatten_plan(e.strategy);
+                for o in plan.cancels {
+                    g.on_closed(o).unwrap();
+                }
+                for (inst, side, qty) in plan.closes {
+                    seq += 1;
+                    let cents = g.mark_of(inst) / 10_000_000;
+                    let close = by(
+                        e.strategy,
+                        intent(seq, inst, side, Purpose::Close, qty, cents),
+                    );
+                    let id = accepted(g.decide(&close, now));
+                    g.on_fill(id, qty, px(cents)).unwrap();
+                }
+                assert!(
+                    g.strategy_positions(e.strategy).is_empty(),
+                    "step {step}: flattened"
+                );
+                assert!(g.flatten_plan(e.strategy).closes.is_empty());
+            }
+        }
+    }
+    assert!(tripped > 3, "the hard limit was reached {tripped} times");
+    assert!(g.rejected_count("strategy_loss_limit") > 10);
+}
+
+#[test]
+fn a_strategy_with_no_budget_share_is_not_reported_as_having_lost_it() {
+    // A strategy sized at zero has a zero limit, which a loss of zero must not trip.
+    let zero = Tree::new(vec![Group {
+        id: "g".into(),
+        share: 10_000,
+        loss: BudgetLoss::default(),
+        strategies: vec![bs("a", 0), bs("b", 10_000)],
+    }])
+    .unwrap();
+    let mut g = budgeted(1000);
+    g.set_budgets(Some(
+        Budgets::new(
+            zero,
+            100_000 * D,
+            [(1, "a".to_owned()), (2, "b".to_owned())],
+        )
+        .unwrap(),
+    ));
+    assert_eq!(g.strategy_limits(1), Some((0, 0)));
+    assert!(g.check_loss_limits().is_empty());
+    assert!(g.snapshot().soft_latched.is_empty());
 }

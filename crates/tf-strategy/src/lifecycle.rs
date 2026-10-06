@@ -94,6 +94,8 @@ pub enum RejectReason {
     StrategyBudget,
     /// The order would take the strategy's group past the group's budget.
     GroupBudget,
+    /// The strategy has lost its soft limit for the day and may not open again until the next.
+    StrategyLossLimit,
     /// An open against an existing position the other way (close it first).
     OpposingPosition,
     /// A close for more than is held, or with nothing held.

@@ -275,6 +275,35 @@ pub struct Audit {
     pub outcome: Decision,
 }
 
+/// Which limit a strategy crossed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LossTier {
+    /// It stops opening for the day.
+    Soft,
+    /// Its positions are to be flattened.
+    Hard,
+}
+
+/// A strategy crossing a loss limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LossEvent {
+    pub strategy: u16,
+    pub tier: LossTier,
+    /// What it has lost since the day began, raw units.
+    pub loss: u128,
+    /// The limit it crossed, raw units.
+    pub limit: u128,
+}
+
+/// What flattening a strategy takes (see [`Gateway::flatten_plan`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlattenPlan {
+    /// Instrument, the side that closes, and the shares still to close.
+    pub closes: Vec<(InstrumentId, Side, u32)>,
+    /// Working opening orders to cancel.
+    pub cancels: Vec<OrderId>,
+}
+
 /// Why a set of budgets cannot be given to the gateway.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BudgetsError {
@@ -366,6 +395,11 @@ pub struct GatewaySnapshot {
     pub rejected: Vec<(String, u64)>,
     /// The budgets in force: the tree's fingerprint, the balance, and which strategy number is which.
     pub budgets: Option<BudgetsInForce>,
+    /// Each strategy's profit when the day began, for the strategies that have one.
+    pub strategy_day_base: Vec<(u16, i128)>,
+    /// Strategies past their soft limit (stopped opening) and past their hard limit (to be flattened).
+    pub soft_latched: Vec<u16>,
+    pub hard_latched: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -407,6 +441,11 @@ pub struct Gateway {
     /// Realised profit by strategy.
     realized: BTreeMap<u16, i128>,
     budgets: Option<Budgets>,
+    /// Each strategy's profit at the start of the day, so its loss is measured from there.
+    strategy_base: BTreeMap<u16, i128>,
+    /// Strategies that crossed their soft limit today (no new opens) or their hard limit (flatten).
+    soft_latched: std::collections::BTreeSet<u16>,
+    hard_latched: std::collections::BTreeSet<u16>,
     day_base: i128,
     killed: bool,
     loss_latched: bool,
@@ -439,6 +478,7 @@ pub fn reason_name(r: &RejectReason) -> &'static str {
         RejectReason::NoBudget => "no_budget",
         RejectReason::StrategyBudget => "strategy_budget",
         RejectReason::GroupBudget => "group_budget",
+        RejectReason::StrategyLossLimit => "strategy_loss_limit",
         _ => "other",
     }
 }
@@ -454,6 +494,9 @@ impl Gateway {
             next_order: 0,
             realized: BTreeMap::new(),
             budgets: None,
+            strategy_base: BTreeMap::new(),
+            soft_latched: std::collections::BTreeSet::new(),
+            hard_latched: std::collections::BTreeSet::new(),
             day_base: 0,
             killed: false,
             loss_latched: false,
@@ -481,6 +524,20 @@ impl Gateway {
     /// A manual kill switch stays.
     pub fn new_day(&mut self) {
         self.day_base = self.total_pnl();
+        // Each strategy's loss is measured from here, and its latches clear with the day.
+        let known: std::collections::BTreeSet<u16> = self
+            .realized
+            .keys()
+            .copied()
+            .chain(self.pos.keys().map(|(s, _)| *s))
+            .chain(self.budgets.iter().flat_map(|b| b.ids.keys().copied()))
+            .collect();
+        self.strategy_base = known
+            .into_iter()
+            .map(|s| (s, self.strategy_pnl(s)))
+            .collect();
+        self.soft_latched.clear();
+        self.hard_latched.clear();
         self.loss_latched = false;
         self.recent.clear();
     }
@@ -539,6 +596,18 @@ impl Gateway {
             if self.loss_latched || self.daily_loss() >= self.limits.max_daily_loss {
                 self.loss_latched = true;
                 return Err(RejectReason::DailyLossLimit);
+            }
+            let me = intent.id.strategy.0;
+            // (Past the hard limit is past the soft one, so the soft latch is the one to ask.)
+            if self.soft_latched.contains(&me) {
+                return Err(RejectReason::StrategyLossLimit);
+            }
+            if let Some((soft, _)) = self.strategy_limits(me) {
+                let loss = self.strategy_loss(me);
+                if loss > 0 && loss >= soft {
+                    self.soft_latched.insert(me);
+                    return Err(RejectReason::StrategyLossLimit);
+                }
             }
         }
         // Sliding window of event time: an order exactly `window` old has left it.
@@ -701,6 +770,98 @@ impl Gateway {
         Ok(())
     }
 
+    /// A strategy's profit so far, realised plus on paper, raw units.
+    pub fn strategy_pnl(&self, strategy: u16) -> i128 {
+        self.strategy_realized(strategy) + self.strategy_unrealized(strategy)
+    }
+
+    /// What a strategy has lost since the day began, raw units (zero if it is ahead).
+    pub fn strategy_loss(&self, strategy: u16) -> u128 {
+        let base = self.strategy_base.get(&strategy).copied().unwrap_or(0);
+        u128::try_from(base - self.strategy_pnl(strategy)).unwrap_or(0)
+    }
+
+    /// The loss at which a strategy stops opening and the loss at which it is flattened, from its
+    /// own budget and its group's loss limits. `None` without budgets or if it has none.
+    pub fn strategy_limits(&self, strategy: u16) -> Option<(u128, u128)> {
+        let b = self.budgets.as_ref()?;
+        b.tree.loss_amounts(b.balance, b.ids.get(&strategy)?)
+    }
+
+    /// Look at every strategy's loss against its limits and latch the ones that have crossed them.
+    /// Returns what newly crossed, once each per day: the caller should stop feeding a strategy
+    /// that crossed its soft limit (the gateway already refuses its opens) and flatten one that
+    /// crossed its hard limit (see [`Gateway::flatten_plan`]). Call it as marks move.
+    pub fn check_loss_limits(&mut self) -> Vec<LossEvent> {
+        let Some(b) = &self.budgets else {
+            return Vec::new();
+        };
+        let ids: Vec<u16> = b.ids.keys().copied().collect();
+        let mut out = Vec::new();
+        for s in ids {
+            let Some((soft, hard)) = self.strategy_limits(s) else {
+                continue;
+            };
+            let loss = self.strategy_loss(s);
+            if loss == 0 {
+                continue;
+            }
+            if loss >= soft && self.soft_latched.insert(s) {
+                out.push(LossEvent {
+                    strategy: s,
+                    tier: LossTier::Soft,
+                    loss,
+                    limit: soft,
+                });
+            }
+            if loss >= hard && self.hard_latched.insert(s) {
+                // (Past the hard limit is past the soft one, which was latched just above.)
+                out.push(LossEvent {
+                    strategy: s,
+                    tier: LossTier::Hard,
+                    loss,
+                    limit: hard,
+                });
+            }
+        }
+        out
+    }
+
+    /// What it takes to flatten a strategy: the closing orders for what it holds (less what its
+    /// working closes already cover) and its working opening orders to cancel. The gateway does not
+    /// send orders; whoever runs the strategy turns this into closing intents, which always pass.
+    pub fn flatten_plan(&self, strategy: u16) -> FlattenPlan {
+        let mut closes = Vec::new();
+        for ((s, i), p) in &self.pos {
+            if *s != strategy || p.qty == 0 {
+                continue;
+            }
+            let side = if p.qty > 0 { Side::Sell } else { Side::Buy };
+            let covered: i64 = self
+                .working
+                .iter()
+                .filter(|w| {
+                    w.strategy == strategy
+                        && w.instrument == *i
+                        && w.purpose == Purpose::Close
+                        && w.side == side
+                })
+                .map(|w| i64::from(w.remaining))
+                .sum();
+            let left = p.qty.abs() - covered;
+            if left > 0 {
+                closes.push((*i, side, u32::try_from(left).unwrap_or(u32::MAX)));
+            }
+        }
+        let cancels = self
+            .working
+            .iter()
+            .filter(|w| w.strategy == strategy && w.purpose == Purpose::Open)
+            .map(|w| w.id)
+            .collect();
+        FlattenPlan { closes, cancels }
+    }
+
     /// Put budgets in force (or take them away with `None`). Positions already held are not
     /// touched: a smaller budget only blocks new opens, and closes always pass.
     pub fn set_budgets(&mut self, budgets: Option<Budgets>) {
@@ -852,6 +1013,9 @@ impl Gateway {
             next_order: self.next_order,
             realized: self.realized.values().sum(),
             strategy_realized: self.realized.iter().map(|(s, v)| (*s, *v)).collect(),
+            strategy_day_base: self.strategy_base.iter().map(|(s, v)| (*s, *v)).collect(),
+            soft_latched: self.soft_latched.iter().copied().collect(),
+            hard_latched: self.hard_latched.iter().copied().collect(),
             budgets: self.budgets.as_ref().map(|b| {
                 (
                     b.tree.fingerprint(),

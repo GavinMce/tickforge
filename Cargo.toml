@@ -27,6 +27,7 @@ tf-ledger = { path = "crates/tf-ledger" }
 tf-budget = { path = "crates/tf-budget" }
 tf-catalog = { path = "crates/tf-catalog" }
 tf-workspace = { path = "crates/tf-workspace" }
+tf-proposals = { path = "crates/tf-proposals" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

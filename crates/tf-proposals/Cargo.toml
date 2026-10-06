@@ -1,0 +1,22 @@
+[package]
+name = "tf-proposals"
+description = "Budget proposals from agents: what applies on its own, what needs a person, what is refused"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-core.workspace = true
+tf-budget.workspace = true
+tf-ledger.workspace = true
+tf-catalog.workspace = true
+
+[dev-dependencies]
+tf-synth.workspace = true
+tf-risk.workspace = true
+tf-strategy.workspace = true

@@ -127,6 +127,7 @@ dependencies = [
  "tf-ledger",
  "tf-manifest",
  "tf-params",
+ "tf-proposals",
  "tf-provider",
  "tf-replay",
  "tf-risk",
@@ -170,6 +171,19 @@ name = "tf-params"
 version = "0.1.0"
 dependencies = [
  "tf-core",
+ "tf-synth",
+]
+
+[[package]]
+name = "tf-proposals"
+version = "0.1.0"
+dependencies = [
+ "tf-budget",
+ "tf-catalog",
+ "tf-core",
+ "tf-ledger",
+ "tf-risk",
+ "tf-strategy",
  "tf-synth",
 ]
 

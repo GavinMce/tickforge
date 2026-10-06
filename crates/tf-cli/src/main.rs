@@ -1,3 +1,4 @@
+mod budgets_cmd;
 mod catalog_cmd;
 mod explore;
 mod ledger_cmd;
@@ -132,6 +133,19 @@ USAGE:
     approve   record a named person's approval (appended to the record). A rejected proposal
               cannot be approved, and nothing is live until a person has approved it.
     The gates test internal consistency on synthetic sessions; they are not evidence of an edge.
+
+    tf budgets propose DIR --by NAME --reason TEXT --evidence TEXT --tree FILE [--at NANOS]
+                       [--step-bp N] [--cooldown-secs N]
+    tf budgets proposals DIR
+    tf budgets approve|decline DIR ID --by NAME [--note TEXT] [--at NANOS]
+
+    An agent proposes a budget tree (the text form) with its reason and evidence. A change that
+    only reduces risk (a share cut, loss limits tightened) by at most --step-bp (default 1000)
+    on a node not changed within --cooldown-secs (default a day) is queued on its own; anything
+    that raises a share or loosens a limit waits for a person (`approve` or `decline`); an
+    increase for a strategy in drawdown, or anything the rules do not allow, is refused and this
+    exits with an error. Nothing writes the ledger: what is queued goes in its inbox
+    (`tf ledger apply-inbox`) and takes effect at the next rebalance.
 
     tf catalog [--store DIR] [--ledger DIR --kind paper|live] [--strategy NAME] [--latest]
 
@@ -978,6 +992,7 @@ fn main() -> ExitCode {
         Some("explore") => explore::explore(&args[1..]),
         Some("runs") => runs::runs(&args[1..]),
         Some("rules") => rules_cmd::rules(&args[1..]),
+        Some("budgets") => budgets_cmd::budgets(&args[1..]),
         Some("serve") => serve_cmd::serve_cmd(&args[1..]),
         Some("catalog") => catalog_cmd::catalog(&args[1..]),
         Some("ledger") => ledger_cmd::ledger(&args[1..]),

@@ -52,3 +52,4 @@ How:
 | [0033](0033-the-rebalance-moves-realised-profit-into-the-strategy-that-made-it.md) | The rebalance moves realised profit into the strategy that made it | Accepted |
 | [0034](0034-the-workspace-service-only-reads-and-reads-the-ledger-without-its-lock.md) | The workspace service only reads, and reads the ledger without its lock | Accepted |
 | [0035](0035-budget-edits-are-requests-in-an-inbox-that-the-engine-records.md) | Budget edits are requests in an inbox that the engine records | Accepted |
+| [0036](0036-agents-may-cut-risk-on-their-own-but-raising-it-needs-a-person.md) | Agents may cut risk on their own, but raising it needs a person | Accepted |

@@ -50,3 +50,4 @@ How:
 | [0031](0031-budgets-are-reserved-hierarchical-and-enforced-by-the-gateway.md) | Budgets are reserved, hierarchical, and enforced by the gateway | Accepted |
 | [0032](0032-the-gateway-keeps-a-sub-account-per-strategy.md) | The gateway keeps a sub-account per strategy | Accepted |
 | [0033](0033-the-rebalance-moves-realised-profit-into-the-strategy-that-made-it.md) | The rebalance moves realised profit into the strategy that made it | Accepted |
+| [0034](0034-the-workspace-service-only-reads-and-reads-the-ledger-without-its-lock.md) | The workspace service only reads, and reads the ledger without its lock | Accepted |

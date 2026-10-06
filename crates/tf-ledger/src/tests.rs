@@ -1981,3 +1981,53 @@ fn an_observer_sees_the_journal_after_each_replayed_record_in_order() {
     assert!(first_profit > 1 && first_profit < total - 1, "{seen:?}");
     assert_eq!(seen.last().unwrap().2, 200 * P as i128);
 }
+
+#[test]
+fn a_ledger_can_be_read_while_a_writer_holds_it_without_changing_a_byte() {
+    let dir = scratch("readonly");
+    let mut w = file_with(&dir, 3);
+    let log = dir.join("ledger.log");
+    // The writer is live (lock held): a reader still sees every finished record.
+    let mut r = ReadOnlyStore::open(&dir);
+    let l = r.load().unwrap();
+    assert_eq!(
+        l.records,
+        ["record number 1", "record number 2", "record number 3"]
+    );
+    assert_eq!(l.repaired, None);
+    assert!(
+        dir.join("ledger.lock").exists(),
+        "the reader took and removed nothing"
+    );
+    // A record still being written is left out and reported, and left on disk for its writer.
+    let mut bytes = std::fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"4 par");
+    std::fs::write(&log, &bytes).unwrap();
+    let l = r.load().unwrap();
+    assert_eq!(l.records.len(), 3);
+    assert!(l.repaired.unwrap().contains("5 byte(s) after record 3"));
+    assert_eq!(std::fs::read(&log).unwrap(), bytes, "not truncated");
+    // Damage before the end is still refused, and nothing can be appended.
+    let text = String::from_utf8(bytes)
+        .unwrap()
+        .replace("number 2", "number 9");
+    std::fs::write(&log, text).unwrap();
+    assert!(matches!(r.load(), Err(StoreError::Corrupt { line: 2, .. })));
+    assert_eq!(r.append(4, "x"), Err(StoreError::ReadOnly));
+    assert!(
+        StoreError::ReadOnly
+            .to_string()
+            .contains("cannot be written")
+    );
+    drop(w.load());
+    drop(w);
+    // A ledger that does not exist reads as empty, like an unwritten one.
+    assert!(
+        ReadOnlyStore::open(dir.join("nope"))
+            .load()
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

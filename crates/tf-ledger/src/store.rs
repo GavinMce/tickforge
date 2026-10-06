@@ -33,6 +33,8 @@ pub enum StoreError {
     LockHeld(String),
     /// `append` before `load`.
     NotLoaded,
+    /// `append` to a store opened to be read.
+    ReadOnly,
     BadPayload(&'static str),
 }
 
@@ -57,6 +59,9 @@ impl std::fmt::Display for StoreError {
                 "the ledger is held by another writer ({p}); if that writer is gone, remove the lock file"
             ),
             StoreError::NotLoaded => f.write_str("the ledger was appended to before it was loaded"),
+            StoreError::ReadOnly => {
+                f.write_str("the ledger was opened to be read and cannot be written")
+            }
             StoreError::BadPayload(m) => write!(f, "bad ledger record: {m}"),
         }
     }
@@ -187,6 +192,81 @@ fn io(path: &Path, e: std::io::Error) -> StoreError {
     StoreError::Io(format!("{}: {e}", path.display()))
 }
 
+fn read_log(log: &Path) -> Result<Vec<u8>, StoreError> {
+    let mut bytes = Vec::new();
+    match File::open(log) {
+        Ok(mut f) => {
+            f.read_to_end(&mut bytes).map_err(|e| io(log, e))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io(log, e)),
+    }
+    Ok(bytes)
+}
+
+/// The good records, how many bytes they take, and what was wrong with the tail if anything.
+/// Damage anywhere but the very end is an error.
+fn parse_log(bytes: &[u8]) -> Result<(Vec<String>, usize, Option<String>), StoreError> {
+    // Lines that end in a newline are complete; what follows the last newline is a torn tail.
+    let complete_to = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let mut lines: Vec<&[u8]> = bytes[..complete_to].split(|b| *b == b'\n').collect();
+    lines.pop(); // what follows the final newline: nothing
+    let mut records = Vec::new();
+    let mut good_to = 0usize;
+    let mut repaired = None;
+    for (k, line) in lines.iter().enumerate() {
+        let seq = k as u64 + 1;
+        let parsed = std::str::from_utf8(line)
+            .map_err(|_| "not text".to_owned())
+            .and_then(|l| unframe(l, seq));
+        match parsed {
+            Ok(p) => {
+                records.push(p);
+                good_to += line.len() + 1;
+            }
+            Err(why) if k + 1 == lines.len() && complete_to == bytes.len() => {
+                // The last record, finished writing but damaged: a torn write.
+                repaired = Some(format!("record {seq}: {why}"));
+            }
+            Err(why) => return Err(StoreError::Corrupt { line: seq, why }),
+        }
+    }
+    if complete_to < bytes.len() {
+        repaired = Some(format!(
+            "{} byte(s) after record {}",
+            bytes.len() - complete_to,
+            records.len()
+        ));
+    }
+    Ok((records, good_to, repaired))
+}
+
+/// A ledger opened to be read while an engine may be writing it: no lock is taken, nothing is
+/// repaired or written, and a last record that is still being written is left out (and reported as
+/// `repaired`, though nothing was changed). Appending is refused.
+pub struct ReadOnlyStore {
+    log: PathBuf,
+}
+
+impl ReadOnlyStore {
+    pub fn open(dir: impl AsRef<Path>) -> ReadOnlyStore {
+        ReadOnlyStore {
+            log: dir.as_ref().join("ledger.log"),
+        }
+    }
+}
+
+impl LedgerStore for ReadOnlyStore {
+    fn load(&mut self) -> Result<Loaded, StoreError> {
+        let (records, _, repaired) = parse_log(&read_log(&self.log)?)?;
+        Ok(Loaded { records, repaired })
+    }
+
+    fn append(&mut self, _seq: u64, _payload: &str) -> Result<(), StoreError> {
+        Err(StoreError::ReadOnly)
+    }
+}
+
 impl FileStore {
     /// Open (creating if needed) the ledger in `dir`, taking its lock.
     pub fn open(dir: impl AsRef<Path>) -> Result<FileStore, StoreError> {
@@ -223,45 +303,8 @@ impl Drop for FileStore {
 
 impl LedgerStore for FileStore {
     fn load(&mut self) -> Result<Loaded, StoreError> {
-        let mut bytes = Vec::new();
-        match File::open(&self.log) {
-            Ok(mut f) => {
-                f.read_to_end(&mut bytes).map_err(|e| io(&self.log, e))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io(&self.log, e)),
-        }
-        // Lines that end in a newline are complete; what follows the last newline is a torn tail.
-        let complete_to = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
-        let mut lines: Vec<&[u8]> = bytes[..complete_to].split(|b| *b == b'\n').collect();
-        lines.pop(); // what follows the final newline: nothing
-        let mut records = Vec::new();
-        let mut good_to = 0usize;
-        let mut repaired = None;
-        for (k, line) in lines.iter().enumerate() {
-            let seq = k as u64 + 1;
-            let parsed = std::str::from_utf8(line)
-                .map_err(|_| "not text".to_owned())
-                .and_then(|l| unframe(l, seq));
-            match parsed {
-                Ok(p) => {
-                    records.push(p);
-                    good_to += line.len() + 1;
-                }
-                Err(why) if k + 1 == lines.len() && complete_to == bytes.len() => {
-                    // The last record, finished writing but damaged: a torn write.
-                    repaired = Some(format!("record {seq}: {why}"));
-                }
-                Err(why) => return Err(StoreError::Corrupt { line: seq, why }),
-            }
-        }
-        if complete_to < bytes.len() {
-            repaired = Some(format!(
-                "{} byte(s) after record {}",
-                bytes.len() - complete_to,
-                records.len()
-            ));
-        }
+        let bytes = read_log(&self.log)?;
+        let (records, good_to, repaired) = parse_log(&bytes)?;
         if good_to < bytes.len() {
             let f = OpenOptions::new()
                 .write(true)

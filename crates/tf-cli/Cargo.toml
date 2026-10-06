@@ -28,3 +28,4 @@ tf-strategy.workspace = true
 tf-ledger.workspace = true
 tf-budget.workspace = true
 tf-catalog.workspace = true
+tf-workspace.workspace = true

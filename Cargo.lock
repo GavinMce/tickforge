@@ -132,6 +132,7 @@ dependencies = [
  "tf-risk",
  "tf-strategy",
  "tf-synth",
+ "tf-workspace",
 ]
 
 [[package]]
@@ -233,6 +234,19 @@ dependencies = [
  "tf-replay",
  "tf-synth",
  "zstd",
+]
+
+[[package]]
+name = "tf-workspace"
+version = "0.1.0"
+dependencies = [
+ "tf-budget",
+ "tf-catalog",
+ "tf-core",
+ "tf-ledger",
+ "tf-manifest",
+ "tf-risk",
+ "tf-strategy",
 ]
 
 [[package]]

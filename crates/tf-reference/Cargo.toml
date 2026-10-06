@@ -1,0 +1,15 @@
+[package]
+name = "tf-reference"
+description = "Reference snapshots for the universe filter: from daily bars, a symbology file and Alpaca's asset list"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-universe.workspace = true
+tf-alpaca.workspace = true

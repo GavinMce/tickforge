@@ -374,6 +374,7 @@ dependencies = [
  "tf-params",
  "tf-proposals",
  "tf-provider",
+ "tf-reference",
  "tf-replay",
  "tf-risk",
  "tf-strategy",
@@ -460,6 +461,14 @@ name = "tf-provider"
 version = "0.1.0"
 dependencies = [
  "tf-core",
+]
+
+[[package]]
+name = "tf-reference"
+version = "0.1.0"
+dependencies = [
+ "tf-alpaca",
+ "tf-universe",
 ]
 
 [[package]]

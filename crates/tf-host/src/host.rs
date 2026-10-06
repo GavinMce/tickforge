@@ -215,7 +215,7 @@ pub struct Host<S: LedgerStore> {
 /// A break the ingest queue reported: events of one kind lost between two times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GapNote {
-    pub trades: bool,
+    pub lost: tf_ingest::Lost,
     pub count: u64,
     pub first_ts: Nanos,
     pub last_ts: Nanos,
@@ -983,9 +983,9 @@ impl<S: LedgerStore> Host<S> {
     }
 
     /// The ingest queue lost events between two times: noted for the report.
-    pub fn on_gap(&mut self, trades: bool, count: u64, first_ts: Nanos, last_ts: Nanos) {
+    pub fn on_gap(&mut self, lost: tf_ingest::Lost, count: u64, first_ts: Nanos, last_ts: Nanos) {
         self.gaps.push(GapNote {
-            trades,
+            lost,
             count,
             first_ts,
             last_ts,

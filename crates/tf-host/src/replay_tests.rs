@@ -814,3 +814,83 @@ fn promotions_the_scanner_makes_are_in_the_log_and_replay_the_same() {
     let r = replay_events(log, &cfg, &reference(), &defs, &tape).unwrap();
     assert!(compare(log, &r.log, &reference().symbols).is_equal());
 }
+
+#[test]
+fn a_log_cut_short_by_a_crash_can_still_be_read_as_far_as_it_goes() {
+    let cfg = config(2);
+    let tape = market(8, flat);
+    let h = {
+        let mut h = host(&cfg).record();
+        certify_all(&mut h, &cfg, &two(), &tape);
+        for e in &tape {
+            h.on_event(e).unwrap();
+        }
+        h
+    };
+    let log = h.log().unwrap();
+    let text = log.render();
+    // The whole text reads as complete; with the last line gone, and with a record half written.
+    assert_eq!(Log::parse_partial(&text).unwrap(), (log.clone(), true));
+    let cut = text.trim_end().rsplit_once('\n').unwrap().0.to_owned();
+    let (partial, complete) = Log::parse_partial(&cut).unwrap();
+    assert!(!complete);
+    assert_eq!(&partial, log);
+    let half = format!("{cut}\nd 12 3 1 1");
+    assert!(
+        Log::parse_partial(&half).is_err(),
+        "a damaged line is an error, not a shorter log"
+    );
+    let fewer = text
+        .lines()
+        .take(text.lines().count() - 4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (p2, complete) = Log::parse_partial(&fewer).unwrap();
+    assert!(
+        !complete && p2.recs.len() == log.recs.len() - 3,
+        "{} vs {}",
+        p2.recs.len(),
+        log.recs.len()
+    );
+    assert_eq!(
+        log.header(),
+        text.lines().take(3).collect::<Vec<_>>().join("\n") + "\n"
+    );
+    assert_eq!(log.footer(), format!("end {}\n", log.recs.len()));
+}
+
+#[test]
+fn symbol_names_make_a_table_that_keeps_the_ids_even_when_names_repeat_or_are_missing() {
+    let t = crate::symbol_table(&[
+        Some("AAPL".into()),
+        None,
+        Some("AAPL".into()),
+        Some("MSFT".into()),
+        Some("AAPL".into()),
+    ]);
+    let names: Vec<&str> = (0..5).map(|i| t.name(i).unwrap()).collect();
+    assert_eq!(names, ["AAPL", "#1", "AAPL~1", "MSFT", "AAPL~2"]);
+    assert_eq!(t.get("MSFT"), Some(3));
+}
+
+#[test]
+fn events_after_the_live_days_end_are_not_replayed() {
+    let cfg = config(2);
+    let tape = market(14, flat);
+    let defs = two();
+    // The live day ended at second 10; the tape (a capture) holds four more seconds.
+    let cut = tape
+        .iter()
+        .position(|e| e.ts_recv() >= T0 + 10 * SEC)
+        .unwrap();
+    let mut live = host(&cfg).record();
+    certify_all(&mut live, &cfg, &defs, &tape);
+    for e in &tape[..cut] {
+        live.on_event(e).unwrap();
+    }
+    live.end_of_day(T0 + 10 * SEC).unwrap();
+    let log = live.log().unwrap();
+    let r = replay_events(log, &cfg, &reference(), &defs, &tape).unwrap();
+    assert_eq!(r.events, cut as u64);
+    assert!(compare(log, &r.log, &reference().symbols).is_equal());
+}

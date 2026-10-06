@@ -755,3 +755,61 @@ fn instrument_ids_carry_from_one_file_to_the_next() {
         "30 keeps the id it had, 40 gets the next one"
     );
 }
+
+#[test]
+fn a_tap_sees_every_record_before_it_is_mapped_and_can_stop_the_stream() {
+    use std::sync::{Arc, Mutex};
+    let bytes = dbn(Schema::Trades, |e| {
+        e.encode_record(
+            &SymbolMappingMsg::new(7, 0, SType::RawSymbol, "A", SType::RawSymbol, "A", 0, 0)
+                .unwrap(),
+        )
+        .unwrap();
+        for i in 0..5 {
+            e.encode_record(&trade(81, 7, 1, 10 + i, 5 * D, 1, i as u32))
+                .unwrap();
+        }
+        e.encode_record(&SystemMsg::heartbeat(99)).unwrap();
+    });
+    // Every record, including the ones that become no event.
+    let seen: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let s2 = seen.clone();
+    let mut d = Decoder::new(&bytes[..])
+        .unwrap()
+        .with_tap(Box::new(move |r| {
+            s2.lock().unwrap().push(r.header().rtype);
+            Ok(())
+        }));
+    let n = std::iter::from_fn(|| d.next_item().unwrap()).count();
+    assert_eq!(n, 7, "mapping, five trades, heartbeat");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [rtype::SYMBOL_MAPPING, 0, 0, 0, 0, 0, rtype::SYSTEM]
+    );
+    // A refusal ends the stream with its words, and nothing after it is mapped.
+    let mut count = 0;
+    let mut d = Decoder::new(&bytes[..])
+        .unwrap()
+        .with_tap(Box::new(move |_| {
+            count += 1;
+            if count == 3 {
+                Err("the disk is full".to_owned())
+            } else {
+                Ok(())
+            }
+        }));
+    let mut got = 0;
+    let err = loop {
+        match d.next_item() {
+            Ok(Some(_)) => got += 1,
+            Ok(None) => panic!("ended without the refusal"),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(got, 2);
+    assert!(
+        matches!(&err, DecodeError::Tap(m) if m == "the disk is full"),
+        "{err}"
+    );
+    assert_eq!(err.to_string(), "tap: the disk is full");
+}

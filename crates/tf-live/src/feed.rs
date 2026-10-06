@@ -79,6 +79,15 @@ impl FeedShared {
     }
 }
 
+/// Keeps the provider's own bytes: the raw capture. A refusal stops the session, because a day that
+/// cannot be kept is not one to go on trading blind.
+pub trait RawSink: Send {
+    fn record(&mut self, rec: &dbn::RecordRef<'_>) -> Result<(), String>;
+}
+
+/// A sink shared by every session of the day.
+pub type SharedSink = Arc<Mutex<dyn RawSink>>;
+
 /// What the thread hands back when it stops, so a new session can carry on from it.
 pub struct Returned {
     pub producer: Producer,
@@ -102,6 +111,7 @@ impl LiveFeed {
         producer: Producer,
         instruments: InstrumentMap,
         start: Option<Nanos>,
+        sink: Option<SharedSink>,
     ) -> Result<LiveFeed, Box<(LiveError, Returned)>> {
         let session = match open(cfg, start) {
             Ok(s) => s,
@@ -123,7 +133,17 @@ impl LiveFeed {
         // The gateway sends the DBN header as soon as the session starts; a decoder cannot be built
         // before it comes, and a gateway that never sends it is a stalled one.
         let decoder = match Decoder::new(reader) {
-            Ok(d) => d.with_instruments(instruments),
+            Ok(d) => {
+                let d = d.with_instruments(instruments);
+                match sink {
+                    Some(sink) => d.with_tap(Box::new(move |rec| {
+                        sink.lock()
+                            .map_err(|_| "the capture's lock is poisoned".to_owned())?
+                            .record(rec)
+                    })),
+                    None => d,
+                }
+            }
             Err(e) => {
                 return Err(Box::new((
                     LiveError::Protocol(format!("no DBN header from the gateway: {e}")),

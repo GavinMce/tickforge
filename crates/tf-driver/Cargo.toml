@@ -1,0 +1,29 @@
+[package]
+name = "tf-driver"
+description = "The live day driver: feed, ingest queue, host, raw capture and decision log wired together"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-capture.workspace = true
+tf-core.workspace = true
+tf-host.workspace = true
+tf-ingest.workspace = true
+tf-ledger.workspace = true
+tf-live.workspace = true
+tf-provider.workspace = true
+tf-universe.workspace = true
+dbn = { version = "0.71" }
+
+[dev-dependencies]
+tf-budget.workspace = true
+tf-databento.workspace = true
+tf-engine.workspace = true
+tf-risk.workspace = true
+tf-strategy.workspace = true

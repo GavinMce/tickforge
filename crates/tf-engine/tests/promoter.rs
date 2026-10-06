@@ -455,7 +455,7 @@ fn a_pinned_symbol_is_never_demoted_until_it_is_released() {
     let ev = burst_then_quiet();
     let r = run_with(&ev, 1, PromoterConfig::default(), scanner(), |p, e| {
         if e.ts_recv() >= T0 + 125 * SEC {
-            p.pin(0);
+            p.pin(0, 0);
         }
     });
     assert!(
@@ -475,9 +475,9 @@ fn a_pinned_symbol_is_never_demoted_until_it_is_released() {
     let released = run_with(&ev, 1, PromoterConfig::default(), scanner(), |p, e| {
         let t = e.ts_recv();
         if (T0 + 125 * SEC..T0 + 300 * SEC).contains(&t) {
-            p.pin(0);
+            p.pin(0, 0);
         } else if t >= T0 + 300 * SEC {
-            p.unpin(0);
+            p.unpin(0, 0);
         }
     });
     let d = released

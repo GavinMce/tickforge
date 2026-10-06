@@ -242,7 +242,7 @@ fn reviews_fall_on_a_grid_of_event_time_and_a_gap_gives_one() {
     let at = |w: &mut World, r: &mut CrossRunner<Probe>, ts: u64, id: u32| {
         let ev = trade(id, ts, 10 * D);
         w.feed(&ev);
-        r.on_event(w.market(), &ev);
+        r.on_event(w.market(), None, &ev);
     };
     at(&mut w, &mut r, SEC / 2, 0); // first event: the grid starts, no review
     assert_eq!(r.reviews(), 0);
@@ -277,9 +277,9 @@ fn reviews_see_the_members_and_their_intents_are_stamped() {
     for (ts, id) in [(1, 0), (2, 1), (3, 1), (4, 2), (5, 2), (6, 2)] {
         let ev = trade(id, ts, 10 * D);
         w.feed(&ev);
-        r.on_event(w.market(), &ev);
+        r.on_event(w.market(), None, &ev);
     }
-    r.advance_to(w.market(), SEC + 5);
+    r.advance_to(w.market(), None, SEC + 5);
     let out = r.drain_intents();
     // Symbol 2 has the most trades but is not a member: the top of the members is 1.
     assert_eq!(out.len(), 1);
@@ -297,7 +297,7 @@ fn reviews_see_the_members_and_their_intents_are_stamped() {
     // A review runs at the time it is noticed (here the time we advanced to), not at the grid line.
     assert_eq!(r.strategy().reviews, [(SEC + 5, 2)]);
     // advance_to also fires the timer set by that review once its time comes.
-    r.advance_to(w.market(), SEC + 5 + SEC / 2);
+    r.advance_to(w.market(), None, SEC + 5 + SEC / 2);
     assert_eq!(r.strategy().timers, [SEC + 5 + SEC / 2]);
     // An intent the strategy gets wrong is refused and counted, not emitted (qty 0).
     struct Bad;
@@ -322,8 +322,8 @@ fn reviews_see_the_members_and_their_intents_are_stamped() {
         }
     }
     let mut b = CrossRunner::new(Bad, Members::from_ids([0]));
-    b.on_event(w.market(), &trade(0, 1, D));
-    b.on_event(w.market(), &trade(0, SEC, D));
+    b.on_event(w.market(), None, &trade(0, 1, D));
+    b.on_event(w.market(), None, &trade(0, SEC, D));
     assert_eq!(
         (b.reviews(), b.invalid_intents(), b.drain_intents().len()),
         (1, 1, 0)
@@ -337,7 +337,7 @@ fn member_events_reach_only_members_and_membership_can_change() {
     let feed = |w: &mut World, r: &mut CrossRunner<Probe>, ts: u64, id: u32| {
         let ev = trade(id, ts, 10 * D);
         w.feed(&ev);
-        r.on_event(w.market(), &ev);
+        r.on_event(w.market(), None, &ev);
     };
     for (ts, id) in [(1, 0), (2, 1), (3, 2), (4, 3), (5, 1)] {
         feed(&mut w, &mut r, ts, id);
@@ -358,6 +358,7 @@ fn member_events_reach_only_members_and_membership_can_change() {
     let before = r.member_events();
     r.on_event(
         w.market(),
+        None,
         &Event::TierChange(tf_core::TierChange {
             hdr: Header {
                 ts_event: 8,
@@ -382,8 +383,8 @@ fn strategies_share_one_tier0_and_each_sees_its_own_members() {
     for ts in 1..=40u64 {
         let ev = trade((ts % 6) as u32, ts * SEC / 8, 10 * D);
         w.feed(&ev);
-        a.on_event(w.market(), &ev);
-        b.on_event(w.market(), &ev);
+        a.on_event(w.market(), None, &ev);
+        b.on_event(w.market(), None, &ev);
     }
     assert!(a.reviews() >= 4 && a.reviews() == b.reviews());
     assert!(
@@ -429,7 +430,7 @@ fn a_replay_of_the_same_events_gives_the_same_intents_and_reviews() {
                 (10 + (i % 5) as i64) * D,
             );
             w.feed(&ev);
-            r.on_event(w.market(), &ev);
+            r.on_event(w.market(), None, &ev);
         }
         (
             r.drain_intents(),
@@ -458,7 +459,7 @@ fn order_updates_reach_the_strategy() {
         reject: None,
         ts: 0,
     };
-    r.on_order_update(&w.tier0, &u);
+    r.on_order_update(&w.tier0, None, &u);
     assert_eq!(r.strategy().updates, 1);
 }
 
@@ -488,11 +489,224 @@ fn a_strategy_that_does_not_want_member_events_gets_none_and_still_reviews_on_ti
     for i in 0..30u64 {
         let ev = trade((i % 2) as u32, i * SEC / 10 + 1, 10 * D);
         w.feed(&ev);
-        r.on_event(w.market(), &ev);
+        r.on_event(w.market(), None, &ev);
     }
     // Events at 0.1 s .. 2.9 s: reviews at the first event at or after 1 s and 2 s, each with its timer.
     assert_eq!(
         (r.reviews(), r.member_events(), r.strategy().0),
         (2, 0, 202)
+    );
+}
+
+// ---- shared Tier 1 (E18-S04) ----
+
+use tf_core::TierAction;
+use tf_engine::{Denied, Grant, Promoter, PromoterConfig, ScannerConfig, tier_reason};
+
+fn tier1(max: usize) -> Promoter {
+    let cfg = PromoterConfig {
+        max_tier1: max,
+        min_dwell_secs: 0,
+        ..PromoterConfig::default()
+    };
+    Promoter::new(
+        cfg,
+        ScannerConfig {
+            min_volume: 1_000,
+            ..ScannerConfig::default()
+        },
+        16,
+    )
+    .unwrap()
+}
+
+/// Asks for Tier 1 for the ids it is given at each review, and pins `pin` once.
+struct Wanter {
+    id: u16,
+    wants: Vec<u32>,
+    pin: Option<u32>,
+    unpin_at_review: Option<u32>,
+    reviews: u32,
+    grants: Vec<Option<Grant>>,
+    revoked: Vec<u32>,
+}
+
+impl Wanter {
+    fn new(id: u16, wants: &[u32]) -> Self {
+        Wanter {
+            id,
+            wants: wants.to_vec(),
+            pin: None,
+            unpin_at_review: None,
+            reviews: 0,
+            grants: vec![],
+            revoked: vec![],
+        }
+    }
+}
+
+impl CrossStrategy for Wanter {
+    fn id(&self) -> StrategyId {
+        StrategyId(self.id)
+    }
+
+    fn period(&self) -> u64 {
+        SEC
+    }
+
+    fn on_review(&mut self, ctx: &mut Ctx<'_>, _view: &MemberView<'_>) {
+        self.reviews += 1;
+        for w in self.wants.clone() {
+            self.grants.push(ctx.request_tier1(w));
+        }
+        if let Some(p) = self.pin {
+            ctx.pin_tier1(p);
+        }
+        if self.unpin_at_review == Some(self.reviews) {
+            ctx.unpin_tier1(self.pin.unwrap());
+        }
+    }
+
+    fn on_tier1_revoked(&mut self, _ctx: &mut Ctx<'_>, _view: &MemberView<'_>, id: u32) {
+        self.revoked.push(id);
+    }
+}
+
+fn review_both(
+    w: &World,
+    p: &mut Promoter,
+    a: &mut CrossRunner<Wanter>,
+    b: &mut CrossRunner<Wanter>,
+    ts: u64,
+) {
+    let ev = trade(0, ts, 10 * D);
+    a.on_event(w.market(), Some(p), &ev);
+    b.on_event(w.market(), Some(p), &ev);
+}
+
+#[test]
+fn strategies_share_tier_one_by_priority_and_every_denial_is_counted() {
+    let mut w = World::new(16);
+    let mut p = tier1(2);
+    p.set_priority(2, 5);
+    let all = Members::from_ids(0..16);
+    let mut a = CrossRunner::new(Wanter::new(1, &[10, 11, 12]), all.clone());
+    let mut b = CrossRunner::new(Wanter::new(2, &[12]), all);
+    w.feed(&trade(0, 1, 10 * D));
+    // First events set the grid; the reviews come at 1 s.
+    review_both(&w, &mut p, &mut a, &mut b, 1);
+    assert_eq!(a.reviews(), 0);
+    review_both(&w, &mut p, &mut a, &mut b, SEC);
+    // Strategy 1 (default priority) got 10 and 11 and was denied 12; strategy 2 (priority 5) then
+    // evicted the lowest id of the two to get 12.
+    assert_eq!(
+        a.strategy().grants,
+        [
+            Some(Grant::Promoted),
+            Some(Grant::Promoted),
+            Some(Grant::Denied(Denied::Full))
+        ]
+    );
+    assert_eq!(
+        b.strategy().grants,
+        [Some(Grant::PromotedByEviction { evicted: 10 })]
+    );
+    assert_eq!(p.promoted(), [11, 12]);
+    // The changes each runner's requests caused are theirs to hand to the tape, in order.
+    let ta = a.drain_tier_events();
+    let tb = b.drain_tier_events();
+    assert_eq!(
+        ta.iter()
+            .map(|c| (c.hdr.instrument, c.action))
+            .collect::<Vec<_>>(),
+        [(10, TierAction::Promote), (11, TierAction::Promote)]
+    );
+    assert_eq!(
+        tb.iter()
+            .map(|c| (c.hdr.instrument, c.action, c.reason))
+            .collect::<Vec<_>>(),
+        [
+            (10, TierAction::Demote, tier_reason::EVICTED),
+            (12, TierAction::Promote, tier_reason::STRATEGY_REQUEST)
+        ]
+    );
+    // Counted per strategy, never lost.
+    let st = p.owner_stats();
+    let (s1, s2) = (st[0].1, st[1].1);
+    assert_eq!(
+        (s1.requests, s1.promoted, s1.denied_full, s1.lost),
+        (3, 2, 1, 1)
+    );
+    assert_eq!(
+        (s2.requests, s2.promoted, s2.evicted_for, s2.denied_full),
+        (1, 1, 1, 0)
+    );
+    assert!(
+        p.metrics_text()
+            .contains("tier1_denied_full{strategy=\"1\"} 1")
+    );
+    // The host tells the loser, which hears of exactly the symbol it lost.
+    for (owner, id) in p.drain_revoked() {
+        assert_eq!(owner, 1);
+        a.on_tier1_revoked(w.market(), Some(&mut p), id);
+    }
+    assert_eq!(a.strategy().revoked, [10]);
+    // Without a promoter a request has no answer.
+    let mut lone = CrossRunner::new(Wanter::new(3, &[1]), Members::from_ids(0..16));
+    lone.on_event(w.market(), None, &trade(0, 1, D));
+    lone.on_event(w.market(), None, &trade(0, SEC, D));
+    assert_eq!(lone.strategy().grants, [None]);
+}
+
+#[test]
+fn two_strategies_pinning_one_symbol_do_not_release_each_other() {
+    let mut w = World::new(16);
+    let mut p = tier1(2);
+    let all = Members::from_ids(0..16);
+    let mut a = CrossRunner::new(Wanter::new(1, &[7]), all.clone());
+    let mut b = CrossRunner::new(Wanter::new(2, &[7]), all);
+    a.strategy_mut().pin = Some(7);
+    b.strategy_mut().pin = Some(7);
+    a.strategy_mut().unpin_at_review = Some(1);
+    w.feed(&trade(0, 1, 10 * D));
+    review_both(&w, &mut p, &mut a, &mut b, 1);
+    review_both(&w, &mut p, &mut a, &mut b, SEC);
+    // A pinned then unpinned in the same review; B's pin stands.
+    assert!(p.is_pinned(7) && p.is_pinned_by(2, 7) && !p.is_pinned_by(1, 7));
+    assert_eq!(b.strategy().grants, [Some(Grant::Already)]);
+}
+
+#[test]
+fn a_strategy_can_release_what_it_asked_for() {
+    struct Once(Vec<(bool, bool)>, u32);
+    impl CrossStrategy for Once {
+        fn id(&self) -> StrategyId {
+            StrategyId(6)
+        }
+        fn period(&self) -> u64 {
+            SEC
+        }
+        fn on_review(&mut self, ctx: &mut Ctx<'_>, _v: &MemberView<'_>) {
+            self.1 += 1;
+            if self.1 == 1 {
+                ctx.request_tier1(3);
+            }
+            let before = ctx.wants_tier1(3);
+            if self.1 == 2 {
+                ctx.release_tier1(3);
+            }
+            self.0.push((before, ctx.wants_tier1(3)));
+        }
+    }
+    let w = World::new(16);
+    let mut p = tier1(2);
+    let mut r = CrossRunner::new(Once(vec![], 0), Members::new());
+    for ts in [1, SEC, 2 * SEC] {
+        r.on_event(w.market(), Some(&mut p), &trade(0, ts, D));
+    }
+    assert_eq!(r.strategy().0, [(true, true), (true, false)]);
+    assert!(
+        p.is_promoted(3),
+        "released but not yet cold: it leaves at the cool-down, not at once"
     );
 }

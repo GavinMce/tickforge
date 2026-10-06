@@ -108,7 +108,8 @@ pub struct Ctx<'a> {
     timers: &'a mut Timers,
     bars: &'a mut Option<MtfBars>,
     params: &'a Option<ParamStore>,
-    promoter: &'a mut Option<Promoter>,
+    promoter: Option<&'a mut Promoter>,
+    tier_out: &'a mut Vec<tf_core::TierChange>,
 }
 
 /// Why a request about multi-timeframe bars failed.
@@ -127,6 +128,7 @@ impl<'a> Ctx<'a> {
         strategy: StrategyId,
         tier0: &'a Tier0,
         state: &'a mut CtxState,
+        promoter: Option<&'a mut Promoter>,
     ) -> Ctx<'a> {
         Ctx {
             now,
@@ -138,7 +140,8 @@ impl<'a> Ctx<'a> {
             timers: &mut state.timers,
             bars: &mut state.bars,
             params: &state.params,
-            promoter: &mut state.promoter,
+            promoter,
+            tier_out: &mut state.tier_out,
         }
     }
 }
@@ -152,7 +155,8 @@ pub(crate) struct CtxState {
     pub(crate) timers: Timers,
     bars: Option<MtfBars>,
     params: Option<ParamStore>,
-    promoter: Option<Promoter>,
+    /// Tier changes the strategy's requests caused, for the host to put on the tape.
+    pub(crate) tier_out: Vec<tf_core::TierChange>,
 }
 
 impl Ctx<'_> {
@@ -174,7 +178,7 @@ impl Ctx<'_> {
     /// Tier 1 state (rings and pullback features) of `id`, if the host has a promoter and
     /// the symbol is promoted ([`Host::with_promoter`]).
     pub fn tier1(&self, id: InstrumentId) -> Option<&Tier1Symbol> {
-        self.promoter.as_ref()?.symbol(id)
+        self.promoter.as_deref()?.symbol(id)
     }
 
     /// Whether the host has a promoter at all ([`Host::with_promoter`]).
@@ -184,21 +188,51 @@ impl Ctx<'_> {
 
     /// Whether `id` is in Tier 1.
     pub fn is_promoted(&self, id: InstrumentId) -> bool {
-        self.promoter.as_ref().is_some_and(|p| p.is_promoted(id))
+        self.promoter.as_deref().is_some_and(|p| p.is_promoted(id))
     }
 
-    /// Keep `id` in Tier 1 while the strategy holds a position in it: a pinned symbol is
-    /// never demoted. Release it with [`Ctx::unpin_tier1`] when the position is closed.
+    /// Keep `id` in Tier 1 while the strategy holds a position or a working order in it: a held
+    /// symbol is never demoted or evicted. Holds are counted per strategy, so another strategy
+    /// letting go of the symbol does not release this one's. Release it with
+    /// [`Ctx::unpin_tier1`] when the position is closed and the orders are done.
     pub fn pin_tier1(&mut self, id: InstrumentId) {
-        if let Some(p) = self.promoter.as_mut() {
-            p.pin(id);
+        let owner = self.strategy.0;
+        if let Some(p) = self.promoter.as_deref_mut() {
+            p.pin(owner, id);
         }
     }
 
     pub fn unpin_tier1(&mut self, id: InstrumentId) {
-        if let Some(p) = self.promoter.as_mut() {
-            p.unpin(id);
+        let owner = self.strategy.0;
+        if let Some(p) = self.promoter.as_deref_mut() {
+            p.unpin(owner, id);
         }
+    }
+
+    /// Ask for `id` to be in Tier 1 for as long as the strategy wants it. The answer says whether it
+    /// was granted (already there, promoted, or promoted by evicting a symbol nobody holds and of
+    /// lower priority) or why not; a denial is counted against this strategy. `None` if the host has
+    /// no promoter. See `tf_engine::claims` for the priority rule.
+    pub fn request_tier1(&mut self, id: InstrumentId) -> Option<tf_engine::Grant> {
+        let owner = self.strategy.0;
+        let now = self.now;
+        let p = self.promoter.as_deref_mut()?;
+        Some(p.request(owner, id, now, self.tier_out))
+    }
+
+    /// The strategy no longer wants `id` in Tier 1 (its hold, if any, is separate: see `unpin_tier1`).
+    pub fn release_tier1(&mut self, id: InstrumentId) {
+        let owner = self.strategy.0;
+        if let Some(p) = self.promoter.as_deref_mut() {
+            p.release(owner, id);
+        }
+    }
+
+    /// Whether this strategy has an interest in `id` (it is lost when the symbol is evicted).
+    pub fn wants_tier1(&self, id: InstrumentId) -> bool {
+        self.promoter
+            .as_deref()
+            .is_some_and(|p| p.is_wanted_by(self.strategy.0, id))
     }
 
     /// The parameter store, if the host has one ([`Host::with_params`]). Changes arrive as
@@ -405,7 +439,8 @@ impl<S: Strategy> Host<S> {
             timers: &mut self.timers,
             bars: &mut self.bars,
             params: &self.params,
-            promoter: &mut self.promoter,
+            promoter: self.promoter.as_mut(),
+            tier_out: &mut self.tier_events,
         };
         f(&mut self.strategy, &mut ctx)
     }

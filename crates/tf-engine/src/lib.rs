@@ -8,6 +8,7 @@
 //! [`MtfBars`], which allocate one box when a symbol is promoted or tracked; neither allocates per event.
 
 mod bars;
+mod claims;
 mod ewma;
 mod indicators;
 mod mtf;
@@ -17,6 +18,7 @@ mod tier0;
 mod tier1;
 
 pub use bars::{Bar, RollingBars, WINDOW_SECS};
+pub use claims::{DEFAULT_PRIORITY, Denied, Grant, Owner, OwnerStats};
 pub use ewma::{Ewma, EwmaVar};
 pub use indicators::{
     Atr, Ema, Extremes, OpeningRange, RateOfChange, RollingVwap, Rsi, Seed, Sma, Vwap,

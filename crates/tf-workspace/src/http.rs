@@ -10,11 +10,15 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-use crate::{Source, js, overview, run_detail, runs};
+use crate::{ExplorerError, Source, js, overview, run_detail, runs};
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 1024;
 const COOKIE: &str = "tf_session";
+const PAGE_CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+/// The explorer is one self-contained page with its own inline script and style, and the data it
+/// shows is embedded in it: it may run that script but can load nothing and send nothing anywhere.
+const EXPLORER_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
@@ -32,6 +36,7 @@ pub struct Response {
     pub content_type: &'static str,
     pub extra: Vec<(&'static str, String)>,
     pub body: String,
+    pub csp: &'static str,
 }
 
 impl Response {
@@ -41,6 +46,7 @@ impl Response {
             content_type,
             extra: Vec::new(),
             body: body.into(),
+            csp: PAGE_CSP,
         }
     }
 
@@ -64,6 +70,7 @@ impl Response {
             400 => "Bad Request",
             401 => "Unauthorized",
             404 => "Not Found",
+            422 => "Unprocessable Content",
             405 => "Method Not Allowed",
             413 => "Payload Too Large",
             _ => "Internal Server Error",
@@ -72,11 +79,12 @@ impl Response {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut h = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nConnection: close\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: {}\r\nConnection: close\r\n",
             self.status,
             self.reason(),
             self.content_type,
-            self.body.len()
+            self.body.len(),
+            self.csp
         );
         for (k, v) in &self.extra {
             h.push_str(&format!("{k}: {v}\r\n"));
@@ -156,6 +164,58 @@ const LOGIN: &str = "<!doctype html><meta charset=utf-8><meta name=viewport cont
 const HOME: &str = include_str!("ui/index.html");
 const APP_JS: &str = include_str!("ui/app.js");
 
+fn escape(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            '\'' => "&#39;".to_owned(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+fn notice(status: u16, title: &str, why: &str) -> Response {
+    Response::new(
+        status,
+        "text/html",
+        format!(
+            "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{t}</title><style>body{{font:16px system-ui;margin:3rem auto;max-width:40rem;padding:0 1rem}}</style><h1>{t}</h1><p>{w}</p><p><a href=/>Back to the overview</a></p>",
+            t = escape(title),
+            w = escape(why)
+        ),
+    )
+}
+
+/// A stored run in the trade explorer: the whole page, replayed and checked against what was stored.
+fn explorer(src: &Source, run: &str) -> Response {
+    if run.len() < 8 || run.len() > 64 || !run.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return notice(
+            404,
+            "No such run",
+            "A run is named by its hash, at least 8 hex digits.",
+        );
+    }
+    let Some(e) = &src.explorer else {
+        return notice(
+            404,
+            "No run store",
+            "This service was not given a run store to open runs from.",
+        );
+    };
+    match e.open(run) {
+        Ok(page) => {
+            let mut r = Response::new(200, "text/html", page);
+            r.csp = EXPLORER_CSP;
+            r
+        }
+        Err(ExplorerError::NotFound(m)) => notice(404, "No such run", &m),
+        Err(ExplorerError::Refused(m)) => notice(422, "This run cannot be opened", &m),
+    }
+}
+
 /// Answers one request. Reads the ledger and run store named by `src`; writes nothing.
 pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     if req.method == "POST" && req.path == "/login" {
@@ -180,6 +240,12 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     }
     if req.path == "/health" {
         return Response::json(200, "{\"ok\":true}");
+    }
+    if let Some(run) = req.path.strip_prefix("/explorer/") {
+        if !signed_in(req, token) {
+            return Response::new(401, "text/html", LOGIN);
+        }
+        return explorer(src, run);
     }
     let known = matches!(
         req.path.as_str(),

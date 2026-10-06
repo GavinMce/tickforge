@@ -35,6 +35,15 @@ must be hosted behind sign-in, and the safest thing it can be is unable to act.
   with no inline script. The script makes GET requests only and puts everything it receives into
   the page as text, never as markup (a test bans `innerHTML` and its relatives), so a strategy
   or group name cannot inject script.
+- **The explorer is served as the one page that may run its own script.** A stored backtest opens
+  at `/explorer/HASH` (only 8 to 64 hex digits are passed on). The program hosting the service
+  supplies the replay (`tf serve` hands it the same replay-and-check `tf explore` does), so the
+  service stays free of the CLI and a run that no longer reproduces is refused with the reason,
+  never shown. The page is one self-contained document with its data embedded, so it gets its own
+  policy: inline script and style allowed, but nothing may be loaded, sent, framed or submitted
+  (`connect-src 'none'`). The viewer's request for web fonts from a third party was removed (it
+  falls back to system fonts), because a page behind sign-in should not tell anyone else it was
+  opened. Its Back link accepts only one of this site's run addresses.
 - **What this is not.** It speaks plain HTTP, has no per-user identity, no rate limit on failed
   sign-ins and no TLS. The token is the cookie value, so it must only ever cross a TLS link.
   Hosting it for real (TLS, identity provider, deployment) is E17-S17, after E13-S02, and is not done here.

@@ -90,9 +90,14 @@ pub(crate) fn serve_cmd(args: &[String]) -> Result<(), String> {
         );
     }
     eprintln!("serving the workspace read-only on http://{}", c.addr);
+    let explorer = c
+        .store
+        .clone()
+        .map(|dir| tf_workspace::Explorer::new(move |run| super::explore::page_for(&dir, run)));
     let src = Source {
         ledger: c.source_ledger,
         store: c.store,
+        explorer,
     };
     serve(&listener, &src, &token, None);
     Ok(())

@@ -127,6 +127,7 @@ fn src(dir: &Path) -> Source {
     Source {
         ledger: Some((dir.to_owned(), Kind::Paper)),
         store: None,
+        ..Source::default()
     }
 }
 
@@ -246,6 +247,7 @@ fn without_budgets_or_without_a_ledger_the_overview_says_what_is_missing() {
     let none = Source {
         ledger: None,
         store: None,
+        ..Source::default()
     };
     assert_eq!(
         overview(&none).unwrap(),
@@ -348,6 +350,7 @@ fn signing_in_sets_an_http_only_same_site_cookie_and_a_wrong_token_does_not() {
     let s = Source {
         ledger: None,
         store: None,
+        ..Source::default()
     };
     let post = |body: &str| Request {
         method: "POST".into(),
@@ -461,6 +464,7 @@ fn over_a_socket_the_server_answers_reads_refuses_writes_and_survives_garbage() 
     let s = Source {
         ledger: None,
         store: None,
+        ..Source::default()
     };
     let t = std::thread::spawn(move || serve(&l, &s, TOKEN, Some(8)));
     let ok = exchange(addr, b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n");
@@ -834,6 +838,7 @@ fn a_stored_backtest_has_no_trades_here_and_points_to_the_explorer() {
     let s = Source {
         ledger: None,
         store: Some(store.clone()),
+        ..Source::default()
     };
     let id = r.key().hex();
     let d = run_detail(&s, "momentum", &id).unwrap().unwrap();
@@ -846,4 +851,120 @@ fn a_stored_backtest_has_no_trades_here_and_points_to_the_explorer() {
         "{d}"
     );
     let _ = std::fs::remove_dir_all(&store);
+}
+
+static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn fake_explorer() -> crate::Explorer {
+    use crate::ExplorerError::{NotFound, Refused};
+    crate::Explorer::new(|run| {
+        ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match run {
+            "aaaaaaaa" => Ok("<!doctype html><title>EXPLORER PAGE</title>".to_owned()),
+            "bbbbbbbb" => Err(Refused(
+                "the code changed <b>behaviour</b> & the run no longer reproduces".into(),
+            )),
+            _ => Err(NotFound(format!("no stored run starts with {run}"))),
+        }
+    })
+}
+
+#[test]
+fn the_explorer_opens_a_stored_run_only_after_sign_in_and_under_its_own_policy() {
+    let s = Source {
+        explorer: Some(fake_explorer()),
+        ..Source::default()
+    };
+    assert_eq!(handle(&s, TOKEN, &get("/explorer/aaaaaaaa")).status, 401);
+    assert!(
+        handle(&s, TOKEN, &get("/explorer/aaaaaaaa"))
+            .body
+            .contains("type=password")
+    );
+    let ok = handle(&s, TOKEN, &signed("/explorer/aaaaaaaa"));
+    assert_eq!(ok.status, 200);
+    assert!(ok.body.contains("EXPLORER PAGE"));
+    // The page may run its own script but can neither load nor send anything.
+    assert!(
+        ok.csp.contains("script-src 'unsafe-inline'") && ok.csp.contains("connect-src 'none'"),
+        "{}",
+        ok.csp
+    );
+    assert!(ok.csp.contains("frame-ancestors 'none'") && ok.csp.contains("form-action 'none'"));
+    assert!(
+        String::from_utf8(ok.to_bytes())
+            .unwrap()
+            .contains(&format!("Content-Security-Policy: {}", ok.csp))
+    );
+    // Every other page keeps the strict policy.
+    let home = handle(&s, TOKEN, &signed("/"));
+    assert!(
+        !home.csp.contains("unsafe-inline'; style") && home.csp.contains("script-src 'self'"),
+        "{}",
+        home.csp
+    );
+    // A run that cannot be opened says why, as text and not as markup.
+    let refused = handle(&s, TOKEN, &signed("/explorer/bbbbbbbb"));
+    assert_eq!(refused.status, 422);
+    assert!(
+        refused
+            .body
+            .contains("&lt;b&gt;behaviour&lt;/b&gt; &amp; the run"),
+        "{}",
+        refused.body
+    );
+    assert!(!refused.body.contains("<b>behaviour"));
+    assert!(refused.body.contains("href=/"));
+    assert_eq!(handle(&s, TOKEN, &signed("/explorer/cccccccc")).status, 404);
+    // Only hex run names of a sensible length reach the explorer at all.
+    let asked = ASKED.load(std::sync::atomic::Ordering::SeqCst);
+    for bad in [
+        "/explorer/",
+        "/explorer/aaaa",
+        "/explorer/../x",
+        "/explorer/gggggggg",
+        &format!("/explorer/{}", "a".repeat(65)),
+        "/explorer/aaaaaaaa/x",
+    ] {
+        let r = handle(&s, TOKEN, &signed(bad));
+        assert_eq!(r.status, 404, "{bad}");
+        assert!(!r.body.contains("EXPLORER PAGE"), "{bad}");
+    }
+    assert_eq!(
+        ASKED.load(std::sync::atomic::Ordering::SeqCst),
+        asked,
+        "a name that is not 8 to 64 hex digits is never passed on"
+    );
+    // Reading only: nothing else is accepted on that path.
+    let post = Request {
+        method: "POST".into(),
+        ..signed("/explorer/aaaaaaaa")
+    };
+    assert_eq!(handle(&s, TOKEN, &post).status, 405);
+    // Without a run store there is nothing to open.
+    let none = handle(&Source::default(), TOKEN, &signed("/explorer/aaaaaaaa"));
+    assert_eq!(none.status, 404);
+    assert!(none.body.contains("run store"));
+}
+
+#[test]
+fn the_page_links_a_stored_run_to_the_explorer_and_back_to_the_run() {
+    let app = include_str!("ui/app.js");
+    assert!(app.contains("\"/explorer/\" + encodeURIComponent(run.id) + \"?back=\""));
+    assert!(app.contains("Open in trade explorer"));
+    // The viewer only accepts a way back that is one of this site's run addresses.
+    let viewer = tf_backtest::export::fragment("{}");
+    assert!(viewer.contains("id=\"back\"") && viewer.contains("Back to the run"));
+    assert!(
+        viewer.contains(r"/^\/#\/s\/[\w.~%-]+(\/[\w.~%-]+)?$/.test(to)"),
+        "the back link is validated"
+    );
+}
+
+#[test]
+fn the_explorer_page_asks_nobody_else_for_anything() {
+    let viewer = tf_backtest::export::fragment("{}");
+    for outside in ["https://", "http://", "//fonts", "@import", "src=\"http"] {
+        assert!(!viewer.contains(outside), "the viewer refers to {outside}");
+    }
 }

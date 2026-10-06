@@ -22,9 +22,44 @@ use tf_strategy::intent::Side;
 
 pub mod http;
 
+/// Why a stored run was not opened in the explorer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExplorerError {
+    /// No stored run by that name.
+    NotFound(String),
+    /// The run exists but cannot be shown (not a kind that can be replayed, rules missing, or the
+    /// code no longer reproduces it); the text says which.
+    Refused(String),
+}
+
+/// Opens a stored run in the trade explorer: given a run's hash (or a prefix), the complete page.
+/// The service does not know how to replay a run; the program that hosts it does.
+#[derive(Clone)]
+pub struct Explorer(std::sync::Arc<dyn Fn(&str) -> Result<String, ExplorerError> + Send + Sync>);
+
+impl Explorer {
+    pub fn new(
+        f: impl Fn(&str) -> Result<String, ExplorerError> + Send + Sync + 'static,
+    ) -> Explorer {
+        Explorer(std::sync::Arc::new(f))
+    }
+
+    pub fn open(&self, run: &str) -> Result<String, ExplorerError> {
+        (self.0)(run)
+    }
+}
+
+impl std::fmt::Debug for Explorer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Explorer")
+    }
+}
+
 /// Where the service reads from.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Source {
+    /// How to open a stored backtest in the explorer, if this process can.
+    pub explorer: Option<Explorer>,
     /// The order ledger of the paper or live account, and which of the two it is.
     pub ledger: Option<(PathBuf, Kind)>,
     /// The run store of backtests.
@@ -146,7 +181,9 @@ pub fn run_detail(src: &Source, strategy: &str, id: &str) -> Result<Option<Strin
         return Ok(Some(format!(
             "{{\"run\":{},\"trades\":null,\"curve\":null,\"refused\":[],\"note\":{}}}",
             run_json(run),
-            js("A stored backtest: its trades are in the explorer (tf explore with this id).")
+            js(
+                "A stored backtest. Its trades, the scanner hit and why the strategy decided as it did are in the trade explorer."
+            )
         )));
     };
     let (dir, kind) = src.ledger.as_ref().ok_or("no ledger")?;

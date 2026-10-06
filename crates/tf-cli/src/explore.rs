@@ -322,6 +322,16 @@ pub(crate) fn explore(args: &[String]) -> Result<(), String> {
     open_runs(&stored, &rules, &out)
 }
 
+/// The explorer page for one stored run, replayed and checked as `tf explore` does, for the workspace
+/// service to serve.
+pub(crate) fn page_for(store: &Path, prefix: &str) -> Result<String, tf_workspace::ExplorerError> {
+    use tf_workspace::ExplorerError;
+    let stored = load_run(store, prefix).map_err(ExplorerError::NotFound)?;
+    let rules: Vec<String> = crate::rules_cmd::store_rules(store).into_iter().collect();
+    let r = replay(&stored, &rules).map_err(|e| ExplorerError::Refused(e.to_string()))?;
+    Ok(page(&bundle(&[r.json], None)))
+}
+
 /// Replay one stored run, or two of one session, and write the explorer page for them.
 pub(crate) fn open_runs(stored: &[RunResult], rules: &[String], out: &str) -> Result<(), String> {
     let mut runs = Vec::new();
@@ -621,6 +631,47 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("cannot rebuild this run exactly")
         );
+    }
+
+    #[test]
+    fn the_workspace_gets_the_replayed_page_or_the_reason_it_cannot_have_one() {
+        use tf_workspace::ExplorerError;
+        let dir = scratch("page-for");
+        let store = tf_manifest::DirStore::new(&dir);
+        let r = stored(&FLAGS);
+        store.put(&r).unwrap();
+        let hash = r.key().hex();
+        let page = page_for(&dir, &hash[..12]).unwrap();
+        assert!(page.contains("Trade Explorer") && page.contains("\"trades\":[{"));
+        assert!(
+            page.contains("id=\"back\""),
+            "the viewer can link back to the run"
+        );
+        // Not stored, and too short to be a name.
+        assert!(matches!(
+            page_for(&dir, "deadbeefdeadbeef"),
+            Err(ExplorerError::NotFound(_))
+        ));
+        assert!(matches!(
+            page_for(&dir, "dead"),
+            Err(ExplorerError::NotFound(_))
+        ));
+        // Stored but no longer reproduced: refused, with the reason, not shown.
+        let mut t = RunResult::new(r.manifest().clone(), r.events, r.event_hash);
+        for (k, v) in r.metrics() {
+            t = t
+                .with_metric(k, if k == "pnl_net" { v + 1 } else { *v })
+                .unwrap();
+        }
+        let drift_dir = scratch("page-for-drift");
+        tf_manifest::DirStore::new(&drift_dir).put(&t).unwrap();
+        let drift = page_for(&drift_dir, &t.key().hex());
+        let Err(ExplorerError::Refused(why)) = drift else {
+            panic!("a run that does not reproduce must be refused")
+        };
+        assert!(why.contains("`pnl_net`"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&drift_dir);
     }
 
     #[test]

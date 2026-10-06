@@ -1,6 +1,4 @@
 <title>Trade Explorer</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
 /* Layout: a blotter on the left, the chart with its transport controls in the centre,
    and the evidence (why it entered, features, the order) on the right. Narrow screens stack. */
@@ -99,7 +97,9 @@ header.top .meta b { color: var(--ink); font-weight: 500; }
 .seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
 .spacer { flex: 1 1 auto; }
 .modebar { padding: 8px 12px; border-bottom: 1px solid var(--line); }
-button.other { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+a.other { text-decoration: none; display: inline-block; }
+a.other[hidden] { display: none; }
+a.other, button.other { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer; }
 button.other:hover { background: var(--panel-2); }
 .pill.same { background: var(--panel-2); color: var(--ink-2); }
 .pill.changed { background: var(--warn-bg); color: var(--amber); }
@@ -152,6 +152,7 @@ dl.kv dt { color: var(--ink-2); } dl.kv dd { margin: 0; font-family: var(--font-
 
 <div id="app">
   <header class="top">
+    <a class="other" id="back" hidden>&#8249; Back to the run</a>
     <h1>Trade Explorer</h1>
     <div class="meta" id="runmeta"></div>
     <div class="seg" id="runseg" role="group" aria-label="Run" hidden></div>
@@ -191,6 +192,12 @@ dl.kv dt { color: var(--ink-2); } dl.kv dd { margin: 0; font-family: var(--font-
 
 <script id="tf-data" type="application/json">__TF_DATA__</script>
 <script>
+// Opened from the workspace, the page is given where to go back to (a run's own address on the same
+// site, nothing else is accepted); opened as a file it has no such link.
+(function () {
+  const to = new URLSearchParams(location.search).get("back");
+  if (to && /^\/#\/s\/[\w.~%-]+(\/[\w.~%-]+)?$/.test(to)) { const a = document.getElementById("back"); a.href = to; a.hidden = false; }
+})();
 "use strict";
 /* ---------- data ---------- */
 /* One run, or {runs: [A, B], compare}. The runs share one session, so the tape in each is the same. */

@@ -14,11 +14,12 @@ pub mod protocol;
 pub mod provider;
 pub mod session;
 pub mod sha256;
+pub mod testing;
 
 #[cfg(test)]
 mod tests;
 
-pub use feed::{FeedShared, LiveFeed, Returned, State};
+pub use feed::{FeedShared, LiveFeed, RawSink, Returned, SharedSink, State};
 pub use protocol::{ApiKey, LiveError, Sub, Symbols};
 pub use provider::{LiveProvider, MAX_SESSIONS};
 pub use session::{Config, Login, login};

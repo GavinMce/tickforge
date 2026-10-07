@@ -47,5 +47,7 @@ pub use host::{
     AdmitError, GapNote, Host, HostConfig, HostError, REASON_FLATTEN, Reference, SlotState,
     StopReason, StrategyStats,
 };
-pub use replay::{ReplayError, Replayed, Report, replay, replay_capture, replay_events, report};
+pub use replay::{
+    ReplayError, Replayed, Report, replay, replay_capture, replay_events, report, symbol_table,
+};
 pub use runner::{DynRunner, runner};

@@ -7,6 +7,7 @@
 //!   exists only so production code can sit behind the [`clock::Clock`] trait.
 
 pub mod clock;
+pub mod dedupe;
 pub mod encode;
 pub mod event;
 pub mod hash;
@@ -14,6 +15,7 @@ pub mod ids;
 pub mod px;
 
 pub use clock::{Clock, SimClock, SystemClock};
+pub use dedupe::Dedupe;
 pub use encode::{DecodeError, Decoder, SCHEMA_VERSION};
 pub use event::{
     CancelError, CancelErrorKind, Correction, Event, EventKind, Header, News, ParamChange,

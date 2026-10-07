@@ -7,7 +7,7 @@ use tf_ingest::{
 };
 use tf_provider::{Capabilities, Poll, Provider, ProviderError, Subscription, WireFormat};
 
-use crate::feed::{FeedShared, LiveFeed, State};
+use crate::feed::{FeedShared, LiveFeed, SharedSink, State};
 use crate::session::Config;
 
 /// Sessions the Standard plan allows per dataset.
@@ -24,6 +24,7 @@ pub struct LiveProvider {
     gaps: Vec<Gap>,
     /// The last event time delivered, to resume from.
     last_ts: Nanos,
+    sink: Option<SharedSink>,
 }
 
 fn source(e: impl std::fmt::Display) -> ProviderError {
@@ -51,12 +52,19 @@ impl LiveProvider {
             sub: None,
             gaps: Vec::new(),
             last_ts: 0,
+            sink: None,
         })
+    }
+
+    /// Keep every record the gateway sends, as it is read, in `sink` (the raw capture).
+    pub fn with_sink(mut self, sink: SharedSink) -> Self {
+        self.sink = Some(sink);
+        self
     }
 
     fn start(&mut self, resume: Option<Nanos>) -> Result<(), ProviderError> {
         let (producer, instruments) = self.spare.take().ok_or(ProviderError::NotConnected)?;
-        match LiveFeed::start(&self.cfg, producer, instruments, resume) {
+        match LiveFeed::start(&self.cfg, producer, instruments, resume, self.sink.clone()) {
             Ok(f) => {
                 self.feed = Some(f);
                 Ok(())
@@ -99,6 +107,16 @@ impl LiveProvider {
     /// (the trait's `poll` keeps them aside).
     pub fn recv(&mut self) -> Option<Delivery> {
         let d = self.consumer.try_recv()?;
+        match &d {
+            Delivery::Event(e) => self.last_ts = self.last_ts.max(e.ts_recv()),
+            Delivery::Gap(g) => self.gaps.push(*g),
+        }
+        Some(d)
+    }
+
+    /// [`LiveProvider::recv`], waiting up to `timeout` for something to arrive.
+    pub fn recv_timeout(&mut self, timeout: std::time::Duration) -> Option<Delivery> {
+        let d = self.consumer.recv_timeout(timeout)?;
         match &d {
             Delivery::Event(e) => self.last_ts = self.last_ts.max(e.ts_recv()),
             Delivery::Gap(g) => self.gaps.push(*g),

@@ -36,6 +36,7 @@ tf-universe = { path = "crates/tf-universe" }
 tf-reference = { path = "crates/tf-reference" }
 tf-host = { path = "crates/tf-host" }
 tf-live = { path = "crates/tf-live" }
+tf-driver = { path = "crates/tf-driver" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

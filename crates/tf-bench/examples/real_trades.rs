@@ -1,7 +1,9 @@
 //! Feeds a real day's trades (a Databento CSV, zstd-compressed, as `tf`'s measurement notes
 //! describe) through the Tier 0 state at full speed and reports how fast it goes, second by second.
 //!
-//! `cargo run --release -p tf-bench --example real_trades -- FILE.csv.zst`
+//! `cargo run --release -p tf-bench --example real_trades -- FILE.csv.zst [YYYY-MM-DD]`
+//!
+//! With a date, the session-by-session state (premarket, regular, after-hours) is switched on for that day.
 //!
 //! The file comes from the Databento historical API with `schema=trades`, `encoding=csv`,
 //! `compression=zstd`, `pretty_px=true`, `pretty_ts=true`. Only Tier 0 is exercised: this
@@ -77,6 +79,16 @@ fn main() {
     }
 
     let mut tier0 = Tier0::new(ids.len());
+    if let Some(date) = std::env::args().nth(2) {
+        let p: Vec<i32> = date.split('-').map(|x| x.parse().expect("date")).collect();
+        let d = tf_calendar::Date::new(p[0], p[1] as u8, p[2] as u8).expect("date");
+        tier0.set_day(
+            tf_calendar::Calendar::us_equities()
+                .times(d)
+                .unwrap()
+                .expect("trading day"),
+        );
+    }
     let whole = Instant::now();
     let mut per_second: Vec<(u64, usize, f64)> = Vec::with_capacity(buckets.len());
     for (sec, r) in &buckets {

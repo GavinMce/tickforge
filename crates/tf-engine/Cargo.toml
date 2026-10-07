@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 tf-core.workspace = true
+tf-calendar.workspace = true
 
 [dev-dependencies]
 tf-synth.workspace = true

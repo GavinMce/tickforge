@@ -69,3 +69,4 @@ How:
 | [0050](0050-one-engine-thread-takes-the-queue-and-the-feed-thread-keeps-the-bytes.md) | One engine thread takes the queue, and the feed thread keeps the bytes | Accepted |
 | [0051](0051-strategy-ideas-are-researched-and-graded-first-and-a-refinement-is-tested-against-its-plain-version.md) | Strategy ideas are researched and graded first, and a refinement is tested against its plain version | Accepted |
 | [0052](0052-the-calendar-is-a-daylight-saving-rule-and-a-table-of-closures-with-no-time-zone-database.md) | The calendar is a daylight-saving rule and a table of closures, with no time-zone database | Accepted |
+| [0053](0053-session-state-is-a-second-array-placed-by-arrival-time.md) | Session state is a second array beside Tier 0, placed by arrival time | Accepted |

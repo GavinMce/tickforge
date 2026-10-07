@@ -20,7 +20,8 @@
 
 use tf_core::{Event, InstrumentId, Nanos, Px, StatusKind};
 
-use crate::RollingBars;
+use crate::{RollingBars, SessionState, Sessions};
+use tf_calendar::SessionTimes;
 
 /// A quote side: price and size.
 pub type Level = (Px, u32);
@@ -69,6 +70,7 @@ impl SymbolState {
 pub struct Tier0 {
     states: Vec<SymbolState>,
     windows: Vec<RollingBars>,
+    sessions: Sessions,
     unknown: u64,
 }
 
@@ -78,6 +80,7 @@ impl Tier0 {
         Tier0 {
             states: vec![SymbolState::default(); id_space],
             windows: vec![RollingBars::new(); id_space],
+            sessions: Sessions::new(id_space),
             unknown: 0,
         }
     }
@@ -98,6 +101,22 @@ impl Tier0 {
         self.windows.get(id as usize)
     }
 
+    /// What is known about a symbol by session (premarket, regular, after-hours); nothing until
+    /// [`Tier0::set_day`]. Kept apart from the day-wide fields above, which count every trade.
+    pub fn session(&self, id: InstrumentId) -> Option<&SessionState> {
+        self.sessions.state(id)
+    }
+
+    /// Start the session-by-session state for a day with these boundaries (`tf_calendar::Calendar::times`).
+    pub fn set_day(&mut self, times: SessionTimes) {
+        self.sessions.set_day(times);
+    }
+
+    /// The boundaries set by [`Tier0::set_day`].
+    pub fn day(&self) -> Option<&SessionTimes> {
+        self.sessions.day()
+    }
+
     /// Events skipped because their instrument is outside the table.
     pub fn unknown_events(&self) -> u64 {
         self.unknown
@@ -108,6 +127,7 @@ impl Tier0 {
     pub fn reset_day(&mut self) {
         self.states.fill(SymbolState::default());
         self.windows.fill(RollingBars::new());
+        self.sessions.clear();
     }
 
     pub fn on_event(&mut self, ev: &Event) {
@@ -120,6 +140,7 @@ impl Tier0 {
             self.unknown += 1;
             return;
         };
+        self.sessions.on_event(ev);
         match ev {
             Event::Trade(t) => {
                 s.last_px = Some(t.px);

@@ -320,6 +320,7 @@ name = "tf-bench"
 version = "0.1.0"
 dependencies = [
  "tf-alpaca",
+ "tf-calendar",
  "tf-core",
  "tf-engine",
  "tf-provider",
@@ -430,6 +431,7 @@ dependencies = [
 name = "tf-engine"
 version = "0.1.0"
 dependencies = [
+ "tf-calendar",
  "tf-core",
  "tf-synth",
 ]
@@ -440,6 +442,7 @@ version = "0.1.0"
 dependencies = [
  "dbn",
  "tf-budget",
+ "tf-calendar",
  "tf-capture",
  "tf-core",
  "tf-databento",

@@ -29,6 +29,7 @@ mod daily;
 mod def;
 mod equiv;
 mod host;
+pub mod library;
 mod replay;
 pub mod research;
 mod runner;
@@ -39,6 +40,8 @@ mod bars_tests;
 mod daily_tests;
 #[cfg(test)]
 mod exit_tests;
+#[cfg(test)]
+mod library_tests;
 #[cfg(test)]
 mod replay_tests;
 #[cfg(test)]

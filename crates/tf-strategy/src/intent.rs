@@ -8,7 +8,9 @@
 //! Rules checked by [`Intent::validate`], so a malformed intent is refused where
 //! it is created rather than discovered at the broker:
 //! - an **open** carries broker-side protective orders (a stop, optionally a
-//!   target); a **close** carries none;
+//!   target); a **close** carries none. The one exception is an open decided in the extended hours, where the broker
+//!   takes no protective orders at all ([`crate::session_rules`]): it carries none, and the strategy holds its own
+//!   exits ([`crate::exits`]);
 //! - a short sale is its own side, [`Side::SellShort`], never inferred from the
 //!   position, so the gateway applies the short checks to it;
 //! - the stop and target sit on the correct side of where the order may fill: the
@@ -115,6 +117,8 @@ pub enum Tif {
     Day,
     /// Fill what is possible now, cancel the rest.
     Ioc,
+    /// Good until cancelled: it is not expired at the end of the day.
+    Gtc,
 }
 
 /// A request from a strategy. `Copy`, so it moves through queues without allocating.
@@ -199,7 +203,14 @@ impl Intent {
         }
         match (self.purpose, &self.protect) {
             (Purpose::Close, Some(_)) => return Err(IntentError::UnexpectedProtection),
-            (Purpose::Open, None) => return Err(IntentError::MissingProtection),
+            (Purpose::Open, None) => {
+                // The broker accepts no stop in the extended hours: there the strategy holds its exits itself.
+                return if crate::session_rules::is_extended_hours(self.ts) == Some(true) {
+                    Ok(())
+                } else {
+                    Err(IntentError::MissingProtection)
+                };
+            }
             (Purpose::Close, None) => return Ok(()),
             (Purpose::Open, Some(_)) => {}
         }

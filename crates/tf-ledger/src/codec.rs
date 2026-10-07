@@ -246,6 +246,7 @@ fn intent_tokens(i: &Intent) -> String {
     let tif = match i.tif {
         Tif::Day => "day",
         Tif::Ioc => "ioc",
+        Tif::Gtc => "gtc",
     };
     format!(
         "{} {} {} {side} {} {purpose} {pricing} {protect} {tif} {} {}",
@@ -308,6 +309,7 @@ fn parse_intent(t: &[&str]) -> Result<Intent, CodecError> {
     let tif = match *tif {
         "day" => Tif::Day,
         "ioc" => Tif::Ioc,
+        "gtc" => Tif::Gtc,
         o => return err(format!("unknown time in force `{o}`")),
     };
     Ok(Intent {

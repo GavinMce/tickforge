@@ -37,6 +37,8 @@ mod bars_tests;
 #[cfg(test)]
 mod daily_tests;
 #[cfg(test)]
+mod exit_tests;
+#[cfg(test)]
 mod replay_tests;
 #[cfg(test)]
 mod tests;

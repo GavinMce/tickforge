@@ -28,6 +28,7 @@ fn fill(inst: u32, side: Side, qty: u32, cents: i64, slippage_cents: i64) -> Fil
         px: px(cents),
         ts: 0,
         slippage: px(slippage_cents).raw(),
+        leg: None,
     }
 }
 

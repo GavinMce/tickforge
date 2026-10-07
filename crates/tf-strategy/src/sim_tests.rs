@@ -482,3 +482,546 @@ fn a_strategy_trades_against_the_sim_and_hears_back_in_event_order() {
 fn the_same_stream_gives_the_same_fills() {
     assert_eq!(backtest(), backtest());
 }
+
+// ---- protective orders (E19-S05) ----
+
+mod legs {
+    use super::*;
+    use crate::OrderId;
+    use crate::broker::{Broker, Kind, Leg, Submission, check_events};
+    use crate::testing::{BracketScenario, T0, bracket_scenarios};
+
+    fn play(s: &BracketScenario, protective: bool) -> (SimBroker, Vec<crate::broker::BrokerEvent>) {
+        let mut b = SimBroker::new(
+            SimConfig {
+                latency_ns: 0,
+                borrow_bps_per_year: 0,
+            },
+            1,
+        );
+        if protective {
+            b = b.with_protective_orders();
+        }
+        assert_eq!(b.place(&s.intent, OrderId(7)), Submission::Accepted);
+        for e in &s.market {
+            b.observe(e);
+        }
+        let events = b.take_events();
+        (b, events)
+    }
+
+    #[test]
+    fn every_scripted_scenario_gives_exactly_the_expected_events_and_a_lawful_sequence() {
+        for s in bracket_scenarios() {
+            let (b, events) = play(&s, true);
+            let kinds: Vec<Kind> = events.iter().map(|e| e.kind).collect();
+            assert_eq!(kinds, s.expected, "{}", s.name);
+            assert!(events.iter().all(|e| e.order == OrderId(7)));
+            check_events(&events, |_| Some(s.intent.qty))
+                .unwrap_or_else(|f| panic!("{}: {f:?}", s.name));
+            assert_eq!(b.position(0), s.position, "{}", s.name);
+            // The position the fills add up to is the position.
+            let net: i64 = b
+                .fills()
+                .iter()
+                .map(|f| {
+                    if f.side.is_buy() {
+                        i64::from(f.qty)
+                    } else {
+                        -i64::from(f.qty)
+                    }
+                })
+                .sum();
+            assert_eq!(net, s.position, "{}", s.name);
+        }
+    }
+
+    #[test]
+    fn without_asking_for_them_protective_orders_do_nothing() {
+        // The same market, legs off: the entry fills and the position stays, whatever the price does.
+        for s in bracket_scenarios() {
+            let (b, events) = play(&s, false);
+            let kinds: Vec<Kind> = events.iter().map(|e| e.kind).collect();
+            let entry: Vec<Kind> = s
+                .expected
+                .iter()
+                .copied()
+                .filter(|k| !matches!(k, Kind::LegFill { .. }))
+                .collect();
+            assert_eq!(kinds, entry, "{}", s.name);
+            let filled: i64 = entry
+                .iter()
+                .map(|k| match k {
+                    Kind::Fill { qty, .. } => i64::from(*qty),
+                    _ => 0,
+                })
+                .sum();
+            assert_eq!(b.position(0).abs(), filled);
+        }
+    }
+
+    #[test]
+    fn a_leg_fill_is_a_fill_with_its_leg_and_the_slippage_against_its_trigger() {
+        let s = &bracket_scenarios()[0];
+        let (b, _) = play(s, true);
+        let f = b.fills();
+        assert_eq!(f.len(), 2);
+        assert_eq!((f[0].leg, f[0].side), (None, Side::Buy));
+        let l = f[1];
+        assert_eq!(
+            (l.leg, l.side, l.qty, l.px, l.intent, l.order),
+            (
+                Some(Leg::Stop),
+                Side::Sell,
+                100,
+                Px::from_cents(940),
+                s.intent.id,
+                OrderId(7)
+            )
+        );
+        // Stopped at 9.40 against a 9.50 trigger: 0.10 a share worse.
+        assert_eq!(l.slippage, Px::from_cents(10).raw());
+        assert_eq!(l.ts, T0 + 4 * 1_000_000_000);
+        // A target that fills better than its price improves on it: sold at 11.02 against 11.00.
+        let (b, _) = play(&bracket_scenarios()[1], true);
+        assert_eq!(b.fills()[1].slippage, -Px::from_cents(2).raw());
+    }
+
+    fn sim(latency: u64) -> SimBroker {
+        SimBroker::new(
+            SimConfig {
+                latency_ns: latency,
+                borrow_bps_per_year: 0,
+            },
+            1,
+        )
+        .with_protective_orders()
+    }
+
+    fn halt(sec: u64, kind: tf_core::StatusKind) -> Event {
+        Event::Status(tf_core::Status {
+            hdr: Header {
+                ts_event: T0 + sec * 1_000_000_000,
+                ts_recv: T0 + sec * 1_000_000_000,
+                seq: sec,
+                instrument: 0,
+                provider: ProviderId::Synthetic,
+            },
+            kind,
+            lo: Px::ZERO,
+            hi: Px::ZERO,
+        })
+    }
+
+    #[test]
+    fn nothing_fills_while_halted_and_the_stop_waits_for_the_resume() {
+        let s = &bracket_scenarios()[0];
+        let mut b = sim(0);
+        b.place(&s.intent, OrderId(7));
+        // Entry, then a halt; the gap and the trade through the stop happen in the halt's shadow (a trade report
+        // during a halt is a late print), and the stop fills only once trading resumes.
+        b.observe(&s.market[0]);
+        b.observe(&halt(2, tf_core::StatusKind::TradingHalt));
+        b.observe(&s.market[1]);
+        b.observe(&s.market[2]);
+        assert_eq!(b.position(0), 100, "halted: no exit");
+        b.observe(&halt(5, tf_core::StatusKind::TradingResume));
+        assert_eq!(b.position(0), 0);
+        let kinds: Vec<Kind> = b.take_events().iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, s.expected);
+    }
+
+    #[test]
+    fn a_leg_never_takes_the_position_past_flat_and_legs_end_with_the_day() {
+        let s = &bracket_scenarios()[0];
+        let mut b = sim(0);
+        b.place(&s.intent, OrderId(7));
+        b.observe(&s.market[0]);
+        assert_eq!(b.position(0), 100);
+        // Another order sells the whole position (the broker would refuse it while the legs stand; here it
+        // happens): the legs then have nothing to sell and a stop through the market must not go short.
+        let mut sell = s.intent;
+        sell.id.seq = 2;
+        sell.side = Side::Sell;
+        sell.purpose = Purpose::Close;
+        sell.protect = None;
+        sell.pricing = Pricing::Limit(Px::from_cents(900));
+        b.place(&sell, OrderId(8));
+        b.observe(&quote_at(2, 999, 1000));
+        assert_eq!(b.position(0), 0);
+        b.observe(&quote_at(3, 940, 941));
+        b.observe(&trade_at(4, 941));
+        assert_eq!(b.position(0), 0, "the stop found nothing to sell");
+        // A fresh position's legs end with the day: after it, a trade through the stop does nothing.
+        let mut b = sim(0);
+        b.place(&s.intent, OrderId(7));
+        b.observe(&s.market[0]);
+        b.end_of_day(T0 + 2 * 1_000_000_000);
+        b.observe(&s.market[1]);
+        b.observe(&s.market[2]);
+        assert_eq!(b.position(0), 100);
+    }
+
+    fn quote_at(sec: u64, bid: i64, ask: i64) -> Event {
+        Event::Quote(tf_core::Quote {
+            hdr: Header {
+                ts_event: T0 + sec * 1_000_000_000,
+                ts_recv: T0 + sec * 1_000_000_000,
+                seq: sec,
+                instrument: 0,
+                provider: ProviderId::Synthetic,
+            },
+            bid_px: Px::from_cents(bid),
+            ask_px: Px::from_cents(ask),
+            bid_sz: 500,
+            ask_sz: 500,
+        })
+    }
+
+    fn trade_at(sec: u64, px: i64) -> Event {
+        Event::Trade(tf_core::Trade {
+            hdr: Header {
+                ts_event: T0 + sec * 1_000_000_000,
+                ts_recv: T0 + sec * 1_000_000_000,
+                seq: sec,
+                instrument: 0,
+                provider: ProviderId::Synthetic,
+            },
+            px: Px::from_cents(px),
+            size: 10,
+            flags: tf_core::TradeFlags::NONE,
+        })
+    }
+
+    #[test]
+    fn latency_delays_the_entry_and_the_legs_follow_it() {
+        let s = &bracket_scenarios()[0];
+        let mut b = sim(2 * 1_000_000_000);
+        b.place(&s.intent, OrderId(7));
+        // The entry reaches the venue at +2 s, so the +1 s quote is not what it sees... it sees the +3 s one.
+        for e in &s.market {
+            b.observe(e);
+        }
+        let kinds: Vec<Kind> = b.take_events().iter().map(|e| e.kind).collect();
+        // At +2 s the book is 9.99/10.00 (from +1 s): the order fills on arrival, then the gap and the stop.
+        assert_eq!(kinds, s.expected);
+        assert_eq!(b.fills()[0].ts, T0 + 2 * 1_000_000_000);
+    }
+
+    // ---- extended hours ----
+
+    /// A copy of the first scenario's intent decided `hours` from the regular-session instant `T0` (11:00 New York).
+    fn at(hours: i64, mut i: crate::Intent) -> crate::Intent {
+        i.ts = (T0 as i64 + hours * 3_600 * 1_000_000_000) as u64;
+        i
+    }
+
+    #[test]
+    fn extended_hours_orders_must_be_plain_limit_orders_day_or_good_til_cancelled() {
+        use crate::session_rules::ExtendedHoursRefusal as R;
+        let bracket = bracket_scenarios()[0].intent;
+        let mut plain = bracket;
+        plain.protect = None;
+        plain.purpose = Purpose::Open;
+        let mut ioc = plain;
+        ioc.tif = crate::Tif::Ioc;
+        let mut gtc = plain;
+        gtc.tif = crate::Tif::Gtc;
+        let refused = |i: crate::Intent| match sim(0).place(&i, OrderId(1)) {
+            Submission::Refused { code, message } => Some((code, message)),
+            Submission::Accepted => None,
+            o => panic!("{o:?}"),
+        };
+        // 08:00 (premarket) and 17:00 New York time (after-hours); 11:00 is the regular session.
+        for hours in [-3, 6] {
+            let (code, message) = refused(at(hours, bracket)).expect("a bracket is refused");
+            assert_eq!(
+                (code, message.as_str()),
+                (422, R::ProtectiveOrders.message()),
+                "{hours}"
+            );
+            let (code, message) = refused(at(hours, ioc)).expect("an IOC is refused");
+            assert_eq!(
+                (code, message.as_str()),
+                (422, R::TimeInForce.message()),
+                "{hours}"
+            );
+            assert!(
+                refused(at(hours, plain)).is_none(),
+                "a day limit order is fine at {hours}"
+            );
+            assert!(
+                refused(at(hours, gtc)).is_none(),
+                "and so is a good-til-cancelled one"
+            );
+        }
+        // The same orders are all accepted in the regular session.
+        for i in [bracket, plain, ioc, gtc] {
+            assert!(refused(at(0, i)).is_none());
+        }
+        // The boundaries: 09:29:59 is the premarket, 09:30:00 the regular session; 15:59:59 and 16:00:00 likewise.
+        let open = tf_calendar::Calendar::us_equities()
+            .times(tf_calendar::Date::new(2026, 10, 2).unwrap())
+            .unwrap()
+            .unwrap();
+        let mut i = bracket;
+        i.ts = open.open - 1;
+        assert!(refused(i).is_some());
+        i.ts = open.open;
+        assert!(refused(i).is_none());
+        i.ts = open.close - 1;
+        assert!(refused(i).is_none());
+        i.ts = open.close;
+        assert!(refused(i).is_some());
+        i.ts = open.after_hours_end;
+        assert!(
+            refused(i).is_none(),
+            "after 20:00 the market is closed, not extended hours"
+        );
+        // An instant the calendar cannot place is the regular session (and a Saturday is no session at all).
+        i.ts = 100 * 1_000_000_000;
+        assert!(refused(i).is_none());
+        i.ts = (tf_calendar::Date::new(2026, 10, 3).unwrap().days() as u64 * 86_400 + 12 * 3600)
+            * 1_000_000_000;
+        assert!(refused(i).is_none());
+    }
+
+    #[test]
+    fn the_old_submit_path_refuses_the_same_orders_and_a_good_til_cancelled_one_outlives_the_day() {
+        let bracket = bracket_scenarios()[0].intent;
+        let mut b = sim(0);
+        b.submit(&at(-3, bracket));
+        let u = b.drain_updates();
+        assert_eq!(u.len(), 1);
+        assert_eq!(
+            (u[0].state, u[0].reject),
+            (OrderState::Rejected, Some(crate::RejectReason::Broker))
+        );
+        assert_eq!(b.open_orders(), 0);
+        // A day order resting far from the market expires at the end of the day; a good-til-cancelled one stays.
+        let mut rest = bracket;
+        rest.protect = None;
+        rest.pricing = Pricing::Limit(Px::from_cents(100));
+        let mut gtc = rest;
+        gtc.id.seq = 2;
+        gtc.tif = crate::Tif::Gtc;
+        let mut b = sim(0);
+        b.submit(&rest);
+        b.submit(&gtc);
+        b.observe(&quote_at(1, 999, 1000));
+        assert_eq!(b.open_orders(), 2);
+        b.end_of_day(T0 + 2 * 1_000_000_000);
+        assert_eq!(
+            b.open_orders(),
+            1,
+            "the good-til-cancelled order is still working"
+        );
+        let states: Vec<_> = b
+            .drain_updates()
+            .iter()
+            .map(|u| (u.intent.seq, u.state))
+            .collect();
+        assert!(states.contains(&(1, OrderState::Expired)));
+        assert!(!states.contains(&(2, OrderState::Expired)));
+    }
+
+    fn after_entry(i: crate::Intent, bid_ask: (i64, i64)) -> SimBroker {
+        let mut b = sim(0);
+        b.place(&i, OrderId(7));
+        b.observe(&quote_at(1, bid_ask.0, bid_ask.1));
+        assert_eq!(b.position(0).abs(), 100, "the entry filled");
+        b.take_events();
+        b
+    }
+
+    fn legs_of(b: &mut SimBroker) -> Vec<(Leg, u32, Px)> {
+        b.take_events()
+            .iter()
+            .filter_map(|e| match e.kind {
+                Kind::LegFill { leg, qty, px } => Some((leg, qty, px)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_trade_exactly_at_the_trigger_arms_the_stop_for_a_long_and_for_a_short() {
+        let long = bracket_scenarios()[0].intent; // buy at 10.00, stop 9.50
+        let mut b = after_entry(long, (999, 1000));
+        b.observe(&quote_at(2, 940, 941));
+        b.observe(&trade_at(3, 951));
+        assert!(legs_of(&mut b).is_empty(), "one tick above the trigger");
+        b.observe(&trade_at(4, 950));
+        assert_eq!(legs_of(&mut b), [(Leg::Stop, 100, Px::from_cents(940))]);
+        let short = bracket_scenarios()[4].intent; // sell short at 10.00, stop 10.50
+        let mut b = after_entry(short, (1000, 1001));
+        b.observe(&quote_at(2, 1059, 1060));
+        b.observe(&trade_at(3, 1049));
+        assert!(legs_of(&mut b).is_empty());
+        b.observe(&trade_at(4, 1050));
+        assert_eq!(legs_of(&mut b), [(Leg::Stop, 100, Px::from_cents(1060))]);
+        // The buy at 10.60 against a 10.50 trigger is 0.10 worse a share.
+        assert_eq!(b.fills().last().unwrap().slippage, Px::from_cents(10).raw());
+    }
+
+    #[test]
+    fn a_target_fills_at_exactly_its_price_for_a_long_and_a_short_and_not_a_tick_short() {
+        let long = bracket_scenarios()[0].intent; // target 11.00
+        let mut b = after_entry(long, (999, 1000));
+        b.observe(&quote_at(2, 1099, 1100));
+        assert!(legs_of(&mut b).is_empty());
+        b.observe(&quote_at(3, 1100, 1101));
+        assert_eq!(legs_of(&mut b), [(Leg::Target, 100, Px::from_cents(1100))]);
+        let short = bracket_scenarios()[4].intent; // target 9.00
+        let mut b = after_entry(short, (1000, 1001));
+        b.observe(&quote_at(2, 900, 901));
+        assert!(legs_of(&mut b).is_empty());
+        b.observe(&quote_at(3, 899, 900));
+        assert_eq!(legs_of(&mut b), [(Leg::Target, 100, Px::from_cents(900))]);
+    }
+
+    #[test]
+    fn a_triggered_stop_waits_for_a_bid_and_a_short_stop_limit_waits_for_its_price() {
+        let long = bracket_scenarios()[0].intent;
+        let mut b = after_entry(long, (999, 1000));
+        // The stop is armed with no bid in the book: nothing to sell to.
+        b.observe(&quote_at(2, 0, 941));
+        b.observe(&trade_at(3, 945));
+        assert!(legs_of(&mut b).is_empty());
+        assert_eq!(b.position(0), 100);
+        b.observe(&quote_at(4, 940, 941));
+        assert_eq!(legs_of(&mut b), [(Leg::Stop, 100, Px::from_cents(940))]);
+        // A short's stop-limit: trigger 10.50, limit 10.60. At 10.65 it does not fill; at 10.60 exactly it does.
+        let mut short = bracket_scenarios()[4].intent;
+        short.protect = Some(crate::Protective {
+            stop_limit: Some(Px::from_cents(1060)),
+            ..short.protect.unwrap()
+        });
+        let mut b = after_entry(short, (1000, 1001));
+        b.observe(&quote_at(2, 1064, 1065));
+        b.observe(&trade_at(3, 1055));
+        assert!(legs_of(&mut b).is_empty());
+        b.observe(&quote_at(4, 1059, 1060));
+        assert_eq!(legs_of(&mut b), [(Leg::Stop, 100, Px::from_cents(1060))]);
+        assert_eq!(b.position(0), 0);
+    }
+
+    #[test]
+    fn a_trade_in_another_instrument_does_not_arm_this_ones_stop() {
+        let long = bracket_scenarios()[0].intent;
+        let mut b = SimBroker::new(
+            SimConfig {
+                latency_ns: 0,
+                borrow_bps_per_year: 0,
+            },
+            2,
+        )
+        .with_protective_orders();
+        b.place(&long, OrderId(7));
+        b.observe(&quote_at(1, 999, 1000));
+        b.take_events();
+        // A trade of instrument 1 at a price through instrument 0's stop.
+        let other = Event::Trade(tf_core::Trade {
+            hdr: Header {
+                ts_event: T0 + 2 * 1_000_000_000,
+                ts_recv: T0 + 2 * 1_000_000_000,
+                seq: 2,
+                instrument: 1,
+                provider: ProviderId::Synthetic,
+            },
+            px: Px::from_cents(900),
+            size: 10,
+            flags: tf_core::TradeFlags::NONE,
+        });
+        b.observe(&other);
+        b.observe(&quote_at(3, 940, 941));
+        b.observe(&trade_at(3, 960));
+        assert_eq!(
+            b.position(0),
+            100,
+            "instrument 0's own trade (9.60) is above its stop"
+        );
+    }
+
+    fn open_more(b: &mut SimBroker, seq: u64, qty: u32) {
+        // An opening order with no protective orders (the simulator does not validate): 50 more shares.
+        let mut i = bracket_scenarios()[0].intent;
+        i.id.seq = seq;
+        i.qty = qty;
+        i.protect = None;
+        b.place(&i, OrderId(seq));
+    }
+
+    #[test]
+    fn the_legs_sell_only_what_they_protect_and_only_what_is_held() {
+        let long = bracket_scenarios()[0].intent;
+        // More shares are held than the legs protect: 150 held, 100 protected. The stop sells 100.
+        let mut b = after_entry(long, (999, 1000));
+        open_more(&mut b, 2, 50);
+        b.observe(&quote_at(2, 999, 1000));
+        assert_eq!(b.position(0), 150);
+        b.observe(&quote_at(3, 940, 941));
+        b.observe(&trade_at(3, 945));
+        assert_eq!(legs_of(&mut b), [(Leg::Stop, 100, Px::from_cents(940))]);
+        assert_eq!(b.position(0), 50, "the 50 nobody protected are still held");
+        // The legs' own fills count against what they protect: a target that takes 30 first leaves 70 for the rest
+        // (not 120, though 120 shares are held).
+        let mut b = after_entry(long, (999, 1000));
+        open_more(&mut b, 2, 50);
+        b.observe(&quote_at(2, 999, 1000));
+        let mut q = quote_at(3, 1105, 1106);
+        if let Event::Quote(x) = &mut q {
+            x.bid_sz = 30;
+        }
+        b.observe(&q);
+        b.observe(&quote_at(4, 1105, 1106));
+        assert_eq!(
+            legs_of(&mut b),
+            [
+                (Leg::Target, 30, Px::from_cents(1105)),
+                (Leg::Target, 70, Px::from_cents(1105))
+            ]
+        );
+        assert_eq!(b.position(0), 50);
+        // Fewer shares are held than protected (another order sold 40): the stop sells the 60 that are left.
+        let mut b = after_entry(long, (999, 1000));
+        let mut sell = long;
+        sell.id.seq = 3;
+        sell.side = Side::Sell;
+        sell.purpose = Purpose::Close;
+        sell.protect = None;
+        sell.qty = 40;
+        sell.pricing = Pricing::Limit(Px::from_cents(900));
+        b.place(&sell, OrderId(8));
+        b.observe(&quote_at(2, 999, 1000));
+        assert_eq!(b.position(0), 60);
+        b.observe(&quote_at(3, 940, 941));
+        b.observe(&trade_at(3, 945));
+        assert_eq!(legs_of(&mut b), [(Leg::Stop, 60, Px::from_cents(940))]);
+        assert_eq!(b.position(0), 0);
+    }
+
+    #[test]
+    fn two_protected_orders_share_what_one_quote_shows() {
+        // Two entries of 60 shares each, both with a target at 11.00; the bid shows 100 shares at 11.05: the targets
+        // take 100 between them (60 and 40), not 120.
+        let mut a = bracket_scenarios()[0].intent;
+        a.qty = 60;
+        let mut c = a;
+        c.id.seq = 2;
+        let mut b = sim(0);
+        b.place(&a, OrderId(7));
+        b.place(&c, OrderId(8));
+        b.observe(&quote_at(1, 999, 1000));
+        assert_eq!(b.position(0), 120);
+        b.take_events();
+        let mut q = quote_at(2, 1105, 1106);
+        if let Event::Quote(x) = &mut q {
+            x.bid_sz = 100;
+        }
+        b.observe(&q);
+        let got: Vec<u32> = legs_of(&mut b).iter().map(|l| l.1).collect();
+        assert_eq!(got, [60, 40]);
+        assert_eq!(b.position(0), 20);
+    }
+}

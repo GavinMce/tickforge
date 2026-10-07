@@ -10,9 +10,11 @@ use tf_core::{Event, Nanos};
 use tf_strategy::broker::{Broker, BrokerEvent, CancelOutcome, Submission};
 use tf_strategy::intent::Intent;
 use tf_strategy::lifecycle::OrderId;
+use tf_strategy::session_rules::ExtendedHoursRefusal;
 
 use crate::client::{Alpaca, Cancel, Submission as Sent, SubmitError, Transport};
 use crate::events::{Frame, Outcome, ParseError, parse_frame};
+use crate::wire::RequestError;
 
 pub struct AlpacaBroker<T: Transport> {
     alpaca: Alpaca<T>,
@@ -106,8 +108,12 @@ impl<T: Transport> Broker for AlpacaBroker<T> {
                 self.unsure.insert(order);
                 Submission::Unknown
             }
+            // An order the broker's own rules would refuse is refused here with the status it would answer.
             Err(SubmitError::Request(e)) => Submission::Refused {
-                code: 0,
+                code: match e {
+                    RequestError::ExtendedHours(_) => ExtendedHoursRefusal::CODE,
+                    _ => 0,
+                },
                 message: e.to_string(),
             },
         }

@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tf-calendar.workspace = true
 tf-core.workspace = true
 tf-engine.workspace = true
 tf-params.workspace = true

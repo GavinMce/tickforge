@@ -511,3 +511,51 @@ fn a_run_that_never_uses_the_broker_interface_keeps_no_event_log() {
     assert_eq!(b.fills().len(), 1);
     assert!(b.take_events().is_empty());
 }
+
+#[test]
+fn a_protective_leg_may_fill_after_its_parent_is_complete_but_not_before_it_was_acknowledged() {
+    use crate::broker::Leg;
+    let leg = |ts, qty| {
+        ev(
+            1,
+            ts,
+            Kind::LegFill {
+                leg: Leg::Stop,
+                qty,
+                px: Px::from_cents(950),
+            },
+        )
+    };
+    let sz = |_: OrderId| Some(100);
+    let fill = Kind::Fill {
+        qty: 100,
+        px: Px::from_cents(1000),
+    };
+    // Acknowledged, filled in full (the parent has ended), then the stop fills: lawful.
+    let ok = [ev(1, 1, Kind::Ack), ev(1, 2, fill), leg(3, 100), leg(4, 10)];
+    assert_eq!(check_events(&ok, sz), Ok(()));
+    // A leg of an order never acknowledged.
+    let bad = [leg(1, 100)];
+    let f = check_events(&bad, sz).unwrap_err();
+    assert_eq!(f.index, 0);
+    assert!(
+        f.why.contains("before the parent was acknowledged"),
+        "{}",
+        f.why
+    );
+    // A leg fill of no shares, and time going backwards, are still refused.
+    let zero = [ev(1, 1, Kind::Ack), leg(2, 0)];
+    assert!(
+        check_events(&zero, sz)
+            .unwrap_err()
+            .why
+            .contains("no shares")
+    );
+    let back = [ev(1, 5, Kind::Ack), ev(1, 2, fill)];
+    assert!(
+        check_events(&back, sz)
+            .unwrap_err()
+            .why
+            .contains("backwards")
+    );
+}

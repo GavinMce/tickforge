@@ -894,3 +894,71 @@ fn events_after_the_live_days_end_are_not_replayed() {
     assert_eq!(r.events, cut as u64);
     assert!(compare(log, &r.log, &reference().symbols).is_equal());
 }
+
+#[test]
+fn the_days_of_a_history_store_replay_through_the_hosts_replay_path_unchanged() {
+    // The live day and its capture, as above.
+    let bytes = dbn_day(10, 0);
+    let (events, symbols) = live_events(&bytes);
+    let cfg = config(2);
+    let reference = crate::Reference {
+        symbols,
+        snapshot: snapshot(),
+    };
+    let defs = two();
+    let mut live = Host::new(
+        cfg.clone(),
+        reference.clone(),
+        MemStore::from_records(vec![]),
+    )
+    .unwrap()
+    .record();
+    for d in &defs {
+        let cert = certify(d, &cfg, &reference, &events, 9).unwrap();
+        live.add_strategy(d, &cert).unwrap();
+    }
+    for e in &events {
+        live.on_event(e).unwrap();
+    }
+    live.end_of_day(events.last().unwrap().ts_recv()).unwrap();
+    let log = live.log().unwrap().clone();
+    let cap = scratch("hist-cap");
+    write_capture(&cap, &bytes);
+    let segments = tf_capture::list(&cap).unwrap();
+    assert!(segments.len() >= 3);
+
+    // The same files kept as the days of a history store: a file per day under dataset and schema, a manifest that
+    // says what each is, verified.
+    let store = scratch("hist-store");
+    let kept = store.join("XNAS.BASIC").join("trades");
+    fs::create_dir_all(&kept).unwrap();
+    for (i, e) in segments.iter().enumerate() {
+        fs::copy(
+            cap.join(&e.file),
+            kept.join(format!("2026-10-{:02}.dbn.zst", i + 1)),
+        )
+        .unwrap();
+    }
+    let (m, rep) = tf_history::index(&store, "XNAS.BASIC", "trades", "ALL_SYMBOLS").unwrap();
+    assert_eq!(rep.days, segments.len());
+    assert_eq!(m.days.len(), segments.len());
+    assert!(tf_history::verify(&store).unwrap().is_clean());
+
+    // The host's own replay path, given the store's days instead of a capture's segments: the same verdict, the
+    // same event count.
+    let files = tf_history::files(&store, "XNAS.BASIC", "trades", None, None).unwrap();
+    assert_eq!(files.len(), segments.len());
+    let from_store = crate::replay_files(&files, &log, &cfg, snapshot(), &defs, 0).unwrap();
+    assert!(from_store.verdict.is_equal(), "{}", from_store.text());
+    assert_eq!(from_store.events, events.len() as u64);
+    let from_capture = replay_capture(&cap, &log, &cfg, snapshot(), &defs, 0).unwrap();
+    assert_eq!(from_store.events, from_capture.events);
+    // A day altered after it was stored is not replayed, and verify names it.
+    let first = kept.join("2026-10-01.dbn.zst");
+    let mut b = fs::read(&first).unwrap();
+    let mid = b.len() / 2;
+    b[mid] ^= 1;
+    fs::write(&first, b).unwrap();
+    assert!(tf_history::verify(&store).unwrap().problems[0].contains("altered"));
+    let _ = (fs::remove_dir_all(&cap), fs::remove_dir_all(&store));
+}

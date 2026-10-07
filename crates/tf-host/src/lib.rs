@@ -54,6 +54,7 @@ pub use host::{
     SlotState, StopReason, StrategyStats,
 };
 pub use replay::{
-    ReplayError, Replayed, Report, replay, replay_capture, replay_events, report, symbol_table,
+    ReplayError, Replayed, Report, replay, replay_capture, replay_events, replay_files, report,
+    symbol_table,
 };
 pub use runner::{DynRunner, runner};

@@ -1,0 +1,22 @@
+[package]
+name = "tf-history"
+description = "The research history store: Databento days kept as zstd DBN files with a manifest, verified, and replayed through the Provider interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tf-capture.workspace = true
+tf-manifest.workspace = true
+dbn = { version = "0.71" }
+
+[dev-dependencies]
+tf-core.workspace = true
+tf-provider.workspace = true
+zstd = "0.13"
+time = "0.3"

@@ -34,6 +34,7 @@ tf-ingest = { path = "crates/tf-ingest" }
 tf-capture = { path = "crates/tf-capture" }
 tf-universe = { path = "crates/tf-universe" }
 tf-reference = { path = "crates/tf-reference" }
+tf-history = { path = "crates/tf-history" }
 tf-host = { path = "crates/tf-host" }
 tf-live = { path = "crates/tf-live" }
 tf-driver = { path = "crates/tf-driver" }

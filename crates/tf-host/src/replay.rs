@@ -285,7 +285,30 @@ pub fn replay_capture(
     live_drops: u64,
 ) -> Result<Report, ReplayError> {
     let cap = |e: tf_capture::Error| ReplayError::Capture(e.to_string());
-    let mut first = CaptureReplay::open(dir).map_err(cap)?;
+    // Checked and listed by the capture's own manifest, then replayed as files.
+    let files: Vec<std::path::PathBuf> = {
+        let open = CaptureReplay::open(dir).map_err(cap)?;
+        drop(open);
+        tf_capture::list(dir)
+            .map_err(cap)?
+            .iter()
+            .map(|e| dir.join(&e.file))
+            .collect()
+    };
+    replay_files(&files, live, cfg, snapshot, defs, live_drops)
+}
+
+/// [`replay_capture`] over zstd-compressed DBN files in the order given: the segments of a capture, or the days of a
+/// history store (E19-S07). The same two passes, so the same instrument numbering.
+pub fn replay_files(
+    files: &[std::path::PathBuf],
+    live: &Log,
+    cfg: &HostConfig,
+    snapshot: Snapshot,
+    defs: &[StrategyDef],
+    live_drops: u64,
+) -> Result<Report, ReplayError> {
+    let mut first = CaptureReplay::from_files(files.to_vec());
     let mut sink = Vec::new();
     loop {
         sink.clear();
@@ -307,7 +330,7 @@ pub fn replay_capture(
     let reference = Reference { symbols, snapshot };
     let mut cfg = cfg.clone();
     cfg.id_space = live.id_space;
-    let mut second = CaptureReplay::open(dir).map_err(cap)?;
+    let mut second = CaptureReplay::from_files(files.to_vec());
     // The live run dropped what the gateway sent twice after a reconnect; the capture holds it, so the
     // replay drops it the same way.
     let mut dedupe = tf_core::Dedupe::new();

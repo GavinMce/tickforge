@@ -23,6 +23,7 @@ mod store;
 
 pub use manifest::{DataRange, Manifest, SCHEMA};
 pub use result::RunResult;
+pub use sha256::{Sha256, sha256};
 pub use store::{DirStore, Put, Source};
 
 #[cfg(test)]

@@ -162,7 +162,16 @@ impl CaptureReplay {
                 return Err(Error::Damaged(format!("{} is listed but missing", e.file)));
             }
         }
-        Ok(CaptureReplay {
+        Ok(CaptureReplay::from_files(
+            listed.iter().map(|e| dir.join(&e.file)).collect(),
+        ))
+    }
+
+    /// Replay zstd-compressed DBN files, in the order given, as one stream: ids are numbered in the order first seen
+    /// and carry from file to file, exactly as for a capture. A capture's segments are such files; so is each day of
+    /// a history store (E19-S07). The files are not checked here (see `verify` for a capture).
+    pub fn from_files(files: Vec<PathBuf>) -> CaptureReplay {
+        CaptureReplay {
             caps: Capabilities {
                 provider: ProviderId::Databento,
                 max_connections: 1,
@@ -171,7 +180,7 @@ impl CaptureReplay {
                 replay_window_secs: None,
                 wire: WireFormat::Binary,
             },
-            files: listed.iter().map(|e| dir.join(&e.file)).collect(),
+            files,
             next_file: 0,
             current: None,
             ids: InstrumentMap::default(),
@@ -179,7 +188,7 @@ impl CaptureReplay {
             keep_zero_size: false,
             notices: 0,
             skipped: 0,
-        })
+        }
     }
 
     pub fn keep_zero_size(mut self, keep: bool) -> Self {

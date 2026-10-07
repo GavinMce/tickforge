@@ -7,6 +7,7 @@
 //! - [`lifecycle`]: the gateway's decisions and the state of an order.
 //! - [`trend`]: an example strategy on the indicator and bar APIs (EMA cross, VWAP reclaim).
 //! - [`momentum`]: Strategy 1, long side.
+//! - [`random_entries`]: T14, the null strategy: entries at random times on random names, the same exits (E19-S28).
 //! - [`closing_reversal`]: T04, the day's biggest losers into the close (E19-S18).
 //! - [`rules`]: entry conditions as data, with the per-decision evidence.
 //! - [`report`]: what a backtest earned, risked and paid, overall and per scenario.
@@ -26,6 +27,7 @@ pub mod exits;
 pub mod intent;
 pub mod lifecycle;
 pub mod momentum;
+pub mod random_entries;
 pub mod report;
 pub mod rule_diff;
 pub mod rules;
@@ -47,6 +49,7 @@ pub use lifecycle::{
 pub use momentum::{
     Decline, DeclineReason, EntryTrace, MomentumLong, MomentumParams, MomentumStats, tunable_specs,
 };
+pub use random_entries::{RandomEntries, RandomEntriesParams, RandomEntriesStats};
 pub use report::{Report, ReportBuilder, Stats};
 pub use rules::{Evaluation, RuleError, RuleSet};
 pub use sim::{
@@ -70,6 +73,8 @@ mod exits_tests;
 mod momentum_tests;
 #[cfg(test)]
 mod params_tests;
+#[cfg(test)]
+mod random_tests;
 #[cfg(test)]
 mod report_tests;
 #[cfg(test)]

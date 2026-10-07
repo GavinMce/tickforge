@@ -2,6 +2,7 @@
 //! what a record is and [`cost`] for the costs.
 
 pub(crate) mod cost;
+pub mod null;
 mod run;
 pub mod stats;
 mod trips;

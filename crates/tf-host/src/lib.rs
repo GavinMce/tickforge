@@ -33,6 +33,8 @@ mod replay;
 mod runner;
 
 #[cfg(test)]
+mod bars_tests;
+#[cfg(test)]
 mod daily_tests;
 #[cfg(test)]
 mod replay_tests;
@@ -44,8 +46,8 @@ pub use daily::{CaptureFacts, DailyReport, StrategySection, SystemInputs, System
 pub use def::{Build, Certificate, Route, StrategyDef};
 pub use equiv::{Answer, Difference, Log, Rec, Verdict, compare, symbols_fingerprint};
 pub use host::{
-    AdmitError, GapNote, Host, HostConfig, HostError, REASON_FLATTEN, Reference, SlotState,
-    StopReason, StrategyStats,
+    AdmitError, BarsConfig, GapNote, Host, HostConfig, HostError, REASON_FLATTEN, Reference,
+    SlotState, StopReason, StrategyStats,
 };
 pub use replay::{
     ReplayError, Replayed, Report, replay, replay_capture, replay_events, report, symbol_table,

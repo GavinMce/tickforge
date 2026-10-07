@@ -42,6 +42,8 @@ pub(crate) enum Plan {
 pub(crate) struct Trader {
     id: u16,
     plan: Plan,
+    /// Ask for the bars of the first two members at the first review.
+    claim_bars: bool,
     reviews: u32,
     seen: Vec<OrderState>,
     revoked: Vec<u32>,
@@ -93,6 +95,11 @@ impl CrossStrategy for Trader {
 
     fn on_review(&mut self, ctx: &mut Ctx<'_>, view: &MemberView<'_>) {
         self.reviews += 1;
+        if self.claim_bars && self.reviews == 1 {
+            for id in view.ids().take(2) {
+                let _ = ctx.track_bars(id);
+            }
+        }
         match self.plan {
             Plan::Buy { qty, n } if self.reviews <= n => self.buy(ctx, view, qty),
             Plan::BuyThenPanic { qty, n, at } => {
@@ -213,6 +220,7 @@ pub(crate) fn config(strategies: u32) -> HostConfig {
         },
         min_certified_events: 10,
         start_ts: 0,
+        bars: None,
     }
 }
 
@@ -264,6 +272,17 @@ pub(crate) fn flat(_: u32, _: u64) -> i64 {
 }
 
 pub(crate) fn def(id: u16, universe: &str, plan: Plan, route: Route) -> StrategyDef {
+    def_claiming(id, universe, plan, route, false)
+}
+
+/// [`def`], and the strategy asks for the shared bars of its first two members.
+pub(crate) fn def_claiming(
+    id: u16,
+    universe: &str,
+    plan: Plan,
+    route: Route,
+    claim_bars: bool,
+) -> StrategyDef {
     StrategyDef {
         id,
         name: format!("trader{id}"),
@@ -275,6 +294,7 @@ pub(crate) fn def(id: u16, universe: &str, plan: Plan, route: Route) -> Strategy
             runner(Trader {
                 id,
                 plan,
+                claim_bars,
                 reviews: 0,
                 seen: vec![],
                 revoked: vec![],
@@ -1002,6 +1022,7 @@ impl CrossStrategy for Counting {
             Trader {
                 id: 1,
                 plan: Plan::Buy { qty: 100, n: 1 },
+                claim_bars: false,
                 reviews: 0,
                 seen: vec![],
                 revoked: vec![],

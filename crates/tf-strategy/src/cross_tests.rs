@@ -76,6 +76,8 @@ fn a_selection_becomes_members_and_unknown_names_are_reported() {
 struct World {
     tier0: Tier0,
     refs: Vec<RefInfo>,
+    /// The engine's shared bars (capacity 4); fed with every event by `feed`.
+    bars: tf_engine::SharedBars,
 }
 
 impl World {
@@ -89,11 +91,13 @@ impl World {
                 };
                 n
             ],
+            bars: tf_engine::SharedBars::new(tf_engine::MtfConfig::default(), n, 4),
         }
     }
 
     fn feed(&mut self, ev: &Event) {
         self.tier0.on_event(ev);
+        self.bars.on_event(ev, &mut Vec::new());
     }
 
     fn market(&self) -> Market<'_> {
@@ -242,7 +246,7 @@ fn reviews_fall_on_a_grid_of_event_time_and_a_gap_gives_one() {
     let at = |w: &mut World, r: &mut CrossRunner<Probe>, ts: u64, id: u32| {
         let ev = trade(id, ts, 10 * D);
         w.feed(&ev);
-        r.on_event(w.market(), None, &ev);
+        r.on_event(w.market(), None, None, &ev);
     };
     at(&mut w, &mut r, SEC / 2, 0); // first event: the grid starts, no review
     assert_eq!(r.reviews(), 0);
@@ -277,9 +281,9 @@ fn reviews_see_the_members_and_their_intents_are_stamped() {
     for (ts, id) in [(1, 0), (2, 1), (3, 1), (4, 2), (5, 2), (6, 2)] {
         let ev = trade(id, ts, 10 * D);
         w.feed(&ev);
-        r.on_event(w.market(), None, &ev);
+        r.on_event(w.market(), None, None, &ev);
     }
-    r.advance_to(w.market(), None, SEC + 5);
+    r.advance_to(w.market(), None, None, SEC + 5);
     let out = r.drain_intents();
     // Symbol 2 has the most trades but is not a member: the top of the members is 1.
     assert_eq!(out.len(), 1);
@@ -297,7 +301,7 @@ fn reviews_see_the_members_and_their_intents_are_stamped() {
     // A review runs at the time it is noticed (here the time we advanced to), not at the grid line.
     assert_eq!(r.strategy().reviews, [(SEC + 5, 2)]);
     // advance_to also fires the timer set by that review once its time comes.
-    r.advance_to(w.market(), None, SEC + 5 + SEC / 2);
+    r.advance_to(w.market(), None, None, SEC + 5 + SEC / 2);
     assert_eq!(r.strategy().timers, [SEC + 5 + SEC / 2]);
     // An intent the strategy gets wrong is refused and counted, not emitted (qty 0).
     struct Bad;
@@ -322,8 +326,8 @@ fn reviews_see_the_members_and_their_intents_are_stamped() {
         }
     }
     let mut b = CrossRunner::new(Bad, Members::from_ids([0]));
-    b.on_event(w.market(), None, &trade(0, 1, D));
-    b.on_event(w.market(), None, &trade(0, SEC, D));
+    b.on_event(w.market(), None, None, &trade(0, 1, D));
+    b.on_event(w.market(), None, None, &trade(0, SEC, D));
     assert_eq!(
         (b.reviews(), b.invalid_intents(), b.drain_intents().len()),
         (1, 1, 0)
@@ -337,7 +341,7 @@ fn member_events_reach_only_members_and_membership_can_change() {
     let feed = |w: &mut World, r: &mut CrossRunner<Probe>, ts: u64, id: u32| {
         let ev = trade(id, ts, 10 * D);
         w.feed(&ev);
-        r.on_event(w.market(), None, &ev);
+        r.on_event(w.market(), None, None, &ev);
     };
     for (ts, id) in [(1, 0), (2, 1), (3, 2), (4, 3), (5, 1)] {
         feed(&mut w, &mut r, ts, id);
@@ -358,6 +362,7 @@ fn member_events_reach_only_members_and_membership_can_change() {
     let before = r.member_events();
     r.on_event(
         w.market(),
+        None,
         None,
         &Event::TierChange(tf_core::TierChange {
             hdr: Header {
@@ -383,8 +388,8 @@ fn strategies_share_one_tier0_and_each_sees_its_own_members() {
     for ts in 1..=40u64 {
         let ev = trade((ts % 6) as u32, ts * SEC / 8, 10 * D);
         w.feed(&ev);
-        a.on_event(w.market(), None, &ev);
-        b.on_event(w.market(), None, &ev);
+        a.on_event(w.market(), None, None, &ev);
+        b.on_event(w.market(), None, None, &ev);
     }
     assert!(a.reviews() >= 4 && a.reviews() == b.reviews());
     assert!(
@@ -430,7 +435,7 @@ fn a_replay_of_the_same_events_gives_the_same_intents_and_reviews() {
                 (10 + (i % 5) as i64) * D,
             );
             w.feed(&ev);
-            r.on_event(w.market(), None, &ev);
+            r.on_event(w.market(), None, None, &ev);
         }
         (
             r.drain_intents(),
@@ -459,7 +464,7 @@ fn order_updates_reach_the_strategy() {
         reject: None,
         ts: 0,
     };
-    r.on_order_update(&w.tier0, None, &u);
+    r.on_order_update(&w.tier0, None, None, &u);
     assert_eq!(r.strategy().updates, 1);
 }
 
@@ -489,7 +494,7 @@ fn a_strategy_that_does_not_want_member_events_gets_none_and_still_reviews_on_ti
     for i in 0..30u64 {
         let ev = trade((i % 2) as u32, i * SEC / 10 + 1, 10 * D);
         w.feed(&ev);
-        r.on_event(w.market(), None, &ev);
+        r.on_event(w.market(), None, None, &ev);
     }
     // Events at 0.1 s .. 2.9 s: reviews at the first event at or after 1 s and 2 s, each with its timer.
     assert_eq!(
@@ -580,8 +585,8 @@ fn review_both(
     ts: u64,
 ) {
     let ev = trade(0, ts, 10 * D);
-    a.on_event(w.market(), Some(p), &ev);
-    b.on_event(w.market(), Some(p), &ev);
+    a.on_event(w.market(), Some(p), None, &ev);
+    b.on_event(w.market(), Some(p), None, &ev);
 }
 
 #[test]
@@ -648,13 +653,13 @@ fn strategies_share_tier_one_by_priority_and_every_denial_is_counted() {
     // The host tells the loser, which hears of exactly the symbol it lost.
     for (owner, id) in p.drain_revoked() {
         assert_eq!(owner, 1);
-        a.on_tier1_revoked(w.market(), Some(&mut p), id);
+        a.on_tier1_revoked(w.market(), Some(&mut p), None, id);
     }
     assert_eq!(a.strategy().revoked, [10]);
     // Without a promoter a request has no answer.
     let mut lone = CrossRunner::new(Wanter::new(3, &[1]), Members::from_ids(0..16));
-    lone.on_event(w.market(), None, &trade(0, 1, D));
-    lone.on_event(w.market(), None, &trade(0, SEC, D));
+    lone.on_event(w.market(), None, None, &trade(0, 1, D));
+    lone.on_event(w.market(), None, None, &trade(0, SEC, D));
     assert_eq!(lone.strategy().grants, [None]);
 }
 
@@ -702,11 +707,337 @@ fn a_strategy_can_release_what_it_asked_for() {
     let mut p = tier1(2);
     let mut r = CrossRunner::new(Once(vec![], 0), Members::new());
     for ts in [1, SEC, 2 * SEC] {
-        r.on_event(w.market(), Some(&mut p), &trade(0, ts, D));
+        r.on_event(w.market(), Some(&mut p), None, &trade(0, ts, D));
     }
     assert_eq!(r.strategy().0, [(true, true), (true, false)]);
     assert!(
         p.is_promoted(3),
         "released but not yet cold: it leaves at the cool-down, not at once"
     );
+}
+
+// ---- shared bars (E19-S03) ----
+
+mod shared_bars {
+    use super::*;
+    use crate::strategy::{BarsError, Host, Strategy};
+    use crate::{MtfBars, MtfConfig, Timeframe};
+    use std::collections::BTreeSet;
+    use tf_engine::{BarsStats, SharedBars, SymbolBars, TrackError};
+
+    const T0: u64 = 1_767_571_200 * SEC;
+
+    /// A cross strategy that claims bars for the symbols it wants on the first event it sees of each,
+    /// and optionally lets them all go after a number of events.
+    struct BarUser {
+        id: u16,
+        want: Vec<u32>,
+        release_after: Option<u64>,
+        let_go: bool,
+        /// Ask again right after asking, and let go twice.
+        twice: bool,
+        claimed: BTreeSet<u32>,
+        results: Vec<(u32, Result<(), BarsError>)>,
+        events: u64,
+        /// What `ctx.bars` showed for each symbol at the last event.
+        reads: Vec<(u32, bool)>,
+    }
+
+    impl BarUser {
+        fn new(id: u16, want: &[u32]) -> Self {
+            BarUser {
+                id,
+                want: want.to_vec(),
+                release_after: None,
+                let_go: false,
+                twice: false,
+                claimed: BTreeSet::new(),
+                results: Vec::new(),
+                events: 0,
+                reads: Vec::new(),
+            }
+        }
+    }
+
+    impl CrossStrategy for BarUser {
+        const WANTS_MEMBER_EVENTS: bool = true;
+
+        fn id(&self) -> StrategyId {
+            StrategyId(self.id)
+        }
+        fn period(&self) -> u64 {
+            60 * SEC
+        }
+        fn on_review(&mut self, _: &mut Ctx<'_>, _: &MemberView<'_>) {}
+        fn on_member_event(&mut self, ctx: &mut Ctx<'_>, _: &MemberView<'_>, ev: &Event) {
+            let i = ev.instrument();
+            self.events += 1;
+            if !self.let_go && self.want.contains(&i) && self.claimed.insert(i) {
+                self.results.push((i, ctx.track_bars(i)));
+                if self.twice {
+                    self.results.push((i, ctx.track_bars(i)));
+                    assert!(ctx.untrack_bars(i), "it had the claim");
+                    assert!(!ctx.untrack_bars(i), "and has not any more");
+                    assert!(ctx.bars(i).is_none());
+                    self.results.push((i, ctx.track_bars(i)));
+                }
+            }
+            if self.release_after == Some(self.events) {
+                self.let_go = true;
+                for i in std::mem::take(&mut self.claimed) {
+                    assert!(ctx.untrack_bars(i));
+                }
+            }
+            self.reads = (0..4).map(|i| (i, ctx.bars(i).is_some())).collect();
+        }
+    }
+
+    /// The same thing for one symbol at a time, on the per-symbol host. It keeps a copy of the bars it
+    /// sees after every event, so they can be compared with the shared ones.
+    struct PerSymbol {
+        want: Vec<u32>,
+        tracked: BTreeSet<u32>,
+        last: Vec<Option<Box<SymbolBars>>>,
+    }
+
+    impl Strategy for PerSymbol {
+        fn id(&self) -> StrategyId {
+            StrategyId(99)
+        }
+        fn on_event(&mut self, ctx: &mut Ctx<'_>, ev: &Event) {
+            let i = ev.instrument();
+            if self.want.contains(&i) && self.tracked.insert(i) {
+                ctx.track_bars(i).unwrap();
+            }
+            for s in 0..self.last.len() {
+                if let Some(b) = ctx.bars(s as u32) {
+                    self.last[s] = Some(Box::new(*b));
+                }
+            }
+        }
+        fn on_timer(&mut self, _: &mut Ctx<'_>, _: TimerId) {}
+    }
+
+    fn stream(n: usize, symbols: u32, seed: u64) -> Vec<Event> {
+        let mut x = seed;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut ts = T0 + 3_600 * SEC;
+        (0..n)
+            .map(|_| {
+                ts += next() % (4 * SEC);
+                let px = 1000 + (next() % 300) as i64;
+                Event::Trade(Trade {
+                    hdr: Header {
+                        ts_event: ts,
+                        ts_recv: ts,
+                        seq: ts,
+                        instrument: (next() % u64::from(symbols)) as u32,
+                        provider: ProviderId::Synthetic,
+                    },
+                    px: Px::from_cents(px),
+                    size: 1 + (next() % 90) as u32,
+                    flags: TradeFlags::NONE,
+                })
+            })
+            .collect()
+    }
+
+    fn same(a: &SymbolBars, b: &SymbolBars) {
+        for tf in Timeframe::ALL {
+            assert_eq!(a.closed_total(tf), b.closed_total(tf), "{tf:?}");
+            assert_eq!(a.forming(tf), b.forming(tf), "{tf:?}");
+            for i in 0..a.closed_len(tf) {
+                assert_eq!(a.closed(tf, i), b.closed(tf, i), "{tf:?} {i}");
+            }
+        }
+    }
+
+    fn per_symbol_host(want: &[u32], events: &[Event]) -> Vec<Option<Box<SymbolBars>>> {
+        let strat = PerSymbol {
+            want: want.to_vec(),
+            tracked: BTreeSet::new(),
+            last: vec![None; 4],
+        };
+        let mut h = Host::new(strat, 4).with_bars(MtfBars::new(MtfConfig::default(), 4, 4));
+        for e in events {
+            h.on_event(e);
+        }
+        h.strategy().last.clone()
+    }
+
+    #[test]
+    fn a_cross_strategy_reads_exactly_the_bars_a_per_symbol_host_builds() {
+        // Two hours of random trades in four symbols; the strategy wants three of them.
+        let events = stream(6000, 4, 0x1234_5678_9abc_def1);
+        let want = [0u32, 1, 3];
+        let alone = per_symbol_host(&want, &events);
+
+        let mut w = World::new(4);
+        let mut r = CrossRunner::new(BarUser::new(7, &want), Members::from_ids(0..4));
+        for e in &events {
+            w.feed(e);
+            let m = Market {
+                tier0: &w.tier0,
+                refs: &w.refs,
+            };
+            r.on_event(m, None, Some(&mut w.bars), e);
+        }
+        assert!(r.strategy().results.iter().all(|(_, res)| res.is_ok()));
+        assert_eq!(r.strategy().results.len(), 3);
+        let mut checked = 0;
+        for i in 0..4u32 {
+            let got = w.bars.symbol(7, i);
+            match (got, &alone[i as usize]) {
+                (Some(g), Some(a)) => {
+                    same(g, a);
+                    checked += 1;
+                }
+                (None, None) => assert!(!want.contains(&i)),
+                _ => panic!(
+                    "symbol {i}: shared {} alone {}",
+                    got.is_some(),
+                    alone[i as usize].is_some()
+                ),
+            }
+        }
+        assert_eq!(checked, 3);
+        assert!(
+            w.bars.symbol(7, 0).unwrap().closed_total(Timeframe::M1) > 100,
+            "a real stretch of minutes"
+        );
+        // What the strategy saw through its context was the same bars: a symbol it did not claim reads
+        // as nothing.
+        assert_eq!(
+            r.strategy().reads,
+            [(0, true), (1, true), (2, false), (3, true)]
+        );
+    }
+
+    #[test]
+    fn one_strategy_letting_go_does_not_stop_anothers_bars() {
+        let events = stream(4000, 4, 0xfeed_beef_0bad_f00d);
+        let alone = per_symbol_host(&[0, 1], &events);
+        let mut w = World::new(4);
+        let mut a = BarUser::new(1, &[0, 1]);
+        a.release_after = Some(500);
+        let mut a = CrossRunner::new(a, Members::from_ids(0..4));
+        let mut b = CrossRunner::new(BarUser::new(2, &[0, 1]), Members::from_ids(0..4));
+        for (k, e) in events.iter().enumerate() {
+            w.feed(e);
+            let m = Market {
+                tier0: &w.tier0,
+                refs: &w.refs,
+            };
+            a.on_event(m, None, Some(&mut w.bars), e);
+            b.on_event(m, None, Some(&mut w.bars), e);
+            if k == 499 {
+                // Strategy 1 has let go of everything by now; strategy 2 still has both.
+                assert!(!w.bars.is_claimed_by(1, 0) && !w.bars.is_claimed_by(1, 1));
+                assert_eq!(w.bars.owners_of(0), [2]);
+            }
+        }
+        assert!(
+            w.bars.symbol(1, 0).is_none(),
+            "the one that let go reads nothing"
+        );
+        for i in 0..2u32 {
+            same(
+                w.bars.symbol(2, i).unwrap(),
+                alone[i as usize].as_ref().unwrap(),
+            );
+        }
+        // The second strategy joined symbols the first had started, and the first's release cost nothing.
+        let st: std::collections::BTreeMap<_, _> = w.bars.stats().into_iter().collect();
+        assert_eq!((st[&1].started, st[&1].released), (2, 2));
+        assert_eq!((st[&2].started, st[&2].joined), (0, 2));
+    }
+
+    #[test]
+    fn a_request_past_the_bound_is_refused_to_the_strategy_and_counted() {
+        let mut w = World::new(8);
+        w.bars = SharedBars::new(MtfConfig::default(), 8, 2);
+        let mut a = CrossRunner::new(BarUser::new(1, &[0, 1]), Members::from_ids(0..8));
+        let mut b = CrossRunner::new(BarUser::new(2, &[2, 0, 9]), Members::from_ids(0..8));
+        for (k, id) in [0u32, 1, 2, 0].into_iter().enumerate() {
+            let e = trade(id, SEC * (k as u64 + 1), 10 * D);
+            w.feed(&e);
+            let m = Market {
+                tier0: &w.tier0,
+                refs: &w.refs,
+            };
+            a.on_event(m, None, Some(&mut w.bars), &e);
+            b.on_event(m, None, Some(&mut w.bars), &e);
+        }
+        assert_eq!(a.strategy().results, [(0, Ok(())), (1, Ok(()))]);
+        // Symbol 2 does not fit; symbol 0 is already tracked, so it costs nothing.
+        assert_eq!(
+            b.strategy().results,
+            [(0, Ok(())), (2, Err(BarsError::Track(TrackError::Full)))]
+        );
+        let st: std::collections::BTreeMap<_, _> = w.bars.stats().into_iter().collect();
+        assert_eq!(
+            st[&2],
+            BarsStats {
+                requests: 2,
+                started: 0,
+                joined: 1,
+                already: 0,
+                refused_full: 1,
+                refused_unknown: 0,
+                released: 0,
+            }
+        );
+        assert!(
+            w.bars
+                .metrics_text()
+                .contains("bars_refused_full{strategy=\"2\"} 1")
+        );
+    }
+
+    #[test]
+    fn asking_twice_is_told_so_and_letting_go_is_a_release() {
+        let mut w = World::new(4);
+        let mut u = BarUser::new(1, &[0]);
+        u.twice = true;
+        let mut r = CrossRunner::new(u, Members::from_ids(0..4));
+        let e = trade(0, SEC, 10 * D);
+        w.feed(&e);
+        let m = Market {
+            tier0: &w.tier0,
+            refs: &w.refs,
+        };
+        r.on_event(m, None, Some(&mut w.bars), &e);
+        assert_eq!(
+            r.strategy().results,
+            [
+                (0, Ok(())),
+                (0, Err(BarsError::Track(TrackError::AlreadyTracked))),
+                (0, Ok(())),
+            ]
+        );
+        assert_eq!(w.bars.tracked(), 1, "it asked again after letting go");
+    }
+
+    #[test]
+    fn without_shared_bars_a_claim_says_so() {
+        let mut w = World::new(4);
+        let mut r = CrossRunner::new(BarUser::new(1, &[0]), Members::from_ids(0..4));
+        let e = trade(0, SEC, 10 * D);
+        w.feed(&e);
+        let m = Market {
+            tier0: &w.tier0,
+            refs: &w.refs,
+        };
+        r.on_event(m, None, None, &e);
+        assert_eq!(r.strategy().results, [(0, Err(BarsError::NotConfigured))]);
+        assert_eq!(
+            r.strategy().reads,
+            [(0, false), (1, false), (2, false), (3, false)]
+        );
+    }
 }

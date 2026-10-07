@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use tf_core::{Event, InstrumentId, NANOS_PER_SEC, Nanos, Px, SymbolTable, TierChange};
-use tf_engine::{Promoter, PromoterConfig, ScannerConfig, Tier0};
+use tf_engine::{BarClose, MtfConfig, Promoter, PromoterConfig, ScannerConfig, SharedBars, Tier0};
 use tf_ledger::{Journal, JournalError, LedgerStore};
 use tf_risk::{Budgets, Limits, LossTier};
 use tf_strategy::broker::{Broker, BrokerEvent, CancelOutcome, Kind, Submission};
@@ -34,6 +34,17 @@ pub struct HostConfig {
     pub min_certified_events: u64,
     /// Event time the ledger starts at.
     pub start_ts: Nanos,
+    /// Bars shared by the strategies (E19-S03); `None` for a host whose strategies need none, in which case
+    /// their `track_bars` says it is not configured.
+    pub bars: Option<BarsConfig>,
+}
+
+/// The engine's shared multi-timeframe bars: how they are aligned and how many symbols may be tracked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BarsConfig {
+    pub mtf: MtfConfig,
+    /// A hard bound; about 40 KB a symbol.
+    pub max_tracked: usize,
 }
 
 /// What is known about each symbol before the session: the names of the instrument ids and the snapshot
@@ -176,6 +187,9 @@ pub struct Host<S: LedgerStore> {
     refs: Vec<RefInfo>,
     tier0: Tier0,
     promoter: Promoter,
+    bars: Option<SharedBars>,
+    /// Reused so that closing bars allocates nothing; the closes themselves are not used by the host.
+    bar_closes: Vec<BarClose>,
     journal: Journal<S>,
     sim: SimBroker,
     paper: Option<Box<dyn Broker>>,
@@ -244,6 +258,10 @@ impl<S: LedgerStore> Host<S> {
             .map_err(|e| HostError::Ledger(JournalError::Structure(e.0.to_owned())))?;
         Ok(Host {
             tier0: Tier0::new(cfg.id_space),
+            bars: cfg
+                .bars
+                .map(|b| SharedBars::new(b.mtf, cfg.id_space, b.max_tracked)),
+            bar_closes: Vec::new(),
             sim: SimBroker::new(cfg.sim, cfg.id_space),
             refs,
             promoter,
@@ -462,6 +480,10 @@ impl<S: LedgerStore> Host<S> {
             self.journal.mark(t.hdr.instrument, t.px);
         }
         self.tier0.on_event(ev);
+        if let Some(b) = self.bars.as_mut() {
+            self.bar_closes.clear();
+            b.on_event(ev, &mut self.bar_closes);
+        }
         let tier_before = self.tier_tape.len();
         self.promoter.on_event(&self.tier0, ev, &mut self.tier_tape);
         self.log_tiers(tier_before);
@@ -471,8 +493,9 @@ impl<S: LedgerStore> Host<S> {
             }
             let (tier0, refs) = (&self.tier0, &self.refs[..]);
             let promoter = &mut self.promoter;
+            let bars = self.bars.as_mut();
             if guarded(slot, |r| {
-                r.on_event(Market { tier0, refs }, Some(promoter), ev)
+                r.on_event(Market { tier0, refs }, Some(promoter), bars, ev)
             }) {
                 self.broke.push(slot.id);
                 continue;
@@ -540,10 +563,11 @@ impl<S: LedgerStore> Host<S> {
             };
             let (tier0, refs) = (&self.tier0, &self.refs[..]);
             let promoter = &mut self.promoter;
+            let bars = self.bars.as_mut();
             let slot = &mut self.slots[k];
             if slot.state == SlotState::Running
                 && guarded(slot, |r| {
-                    r.on_tier1_revoked(Market { tier0, refs }, Some(promoter), id)
+                    r.on_tier1_revoked(Market { tier0, refs }, Some(promoter), bars, id)
                 })
             {
                 self.broke.push(owner);
@@ -566,6 +590,7 @@ impl<S: LedgerStore> Host<S> {
                         "strategy {} crossed its soft loss limit",
                         e.strategy
                     ));
+                    self.release_bars(e.strategy);
                     self.cancel_opens(e.strategy, ts)?;
                 }
                 LossTier::Hard => {
@@ -768,8 +793,9 @@ impl<S: LedgerStore> Host<S> {
 
     fn deliver(&mut self, k: usize, u: &OrderUpdate) {
         let (tier0, promoter) = (&self.tier0, &mut self.promoter);
+        let bars = self.bars.as_mut();
         let slot = &mut self.slots[k];
-        if guarded(slot, |r| r.on_order_update(tier0, Some(promoter), u)) {
+        if guarded(slot, |r| r.on_order_update(tier0, Some(promoter), bars, u)) {
             self.broke.push(slot.id);
         }
     }
@@ -813,7 +839,16 @@ impl<S: LedgerStore> Host<S> {
         }
     }
 
+    /// A strategy that has stopped needs no bars: its claims go, and the bars of a symbol nobody else
+    /// claims go with them.
+    fn release_bars(&mut self, strategy: u16) {
+        if let Some(b) = self.bars.as_mut() {
+            b.release_all(strategy);
+        }
+    }
+
     fn begin_flatten(&mut self, strategy: u16, ts: Nanos) -> Result<(), HostError> {
+        self.release_bars(strategy);
         if let Some(k) = self.slot_index(strategy) {
             self.slots[k].flattening = true;
         }
@@ -950,6 +985,11 @@ impl<S: LedgerStore> Host<S> {
 
     pub fn tier0(&self) -> &Tier0 {
         &self.tier0
+    }
+
+    /// The shared bars, if the host was configured with them ([`HostConfig::bars`]).
+    pub fn bars(&self) -> Option<&SharedBars> {
+        self.bars.as_ref()
     }
 
     /// Start the session-by-session state for a day (premarket, regular session, after-hours) with the

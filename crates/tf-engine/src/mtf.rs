@@ -6,18 +6,28 @@
 //! and the bar still forming.
 //!
 //! Rules, all deliberate and tested:
-//! - **Alignment.** Bars of 1m to 1h start on multiples of their length since the
-//!   Unix epoch. Day bars start at a configured offset into the UTC day
-//!   ([`MtfConfig::day_open_offset_secs`], for example the 09:30 New York open as
-//!   14:30 or 13:30 UTC). There is no time-zone database: the offset is fixed, so
-//!   across a daylight-saving change the caller must change it.
+//! - **Alignment** ([`Alignment`], one choice for the whole aggregator).
+//!   - *Clock.* Bars of 1m to 1h start on multiples of their length since the Unix epoch (so an hourly
+//!     bar is a UTC clock hour: 09:00 New York time in summer, 08:00 in winter). Day bars start at a
+//!     configured offset into the UTC day (`day_open_offset_secs`). There is no time-zone database: the
+//!     offset is fixed, so across a daylight-saving change the caller must change it.
+//!   - *Session.* The calendar ([`tf_calendar`]) places every trade in the premarket (from 04:00), the regular
+//!     session or after-hours (to 20:00). Hourly bars start at the beginning of their session and run an
+//!     hour each, the last one cut short at the session's end: 09:30, 10:30 ... 14:30, then the 15:30 to 16:00
+//!     stub (09:30 to 12:30 and the 12:30 to 13:00 stub on an early close). The day bar is the trading day, 04:00
+//!     to 20:00 New York time, whatever the offset from UTC is that day. 1m, 5m and 15m bars are epoch-aligned as
+//!     before (a session boundary is always a multiple of 15 minutes, so none straddles one). A trade outside
+//!     every session, or on a day the calendar cannot answer for, is not placed in any bar and is counted
+//!     ([`MtfBars::unplaced`]). Gap filling is a clock-alignment option and is ignored in session alignment.
 //! - **Time.** Trades are placed by `ts_recv`, which is non-decreasing. A stale
 //!   timestamp counts in the latest second seen.
 //! - **Closing.** A bar closes when a trade arrives in a later interval, or when
 //!   [`MtfBars::advance_to`] is told time has passed its end, so a quiet symbol's
-//!   bar still closes on time. Every close is reported, in order.
+//!   bar still closes on time. Every close is reported, in order. Time is looked at for every tracked
+//!   symbol only when some forming bar is due, not on every trade, so the cost of a trade does not grow
+//!   with the number of tracked symbols.
 //! - **Empty intervals.** By default there is no bar for an interval with no trades.
-//!   With [`MtfConfig::fill_gaps`], flat bars (open = high = low = close = the previous
+//!   With [`MtfConfig::fill_gaps`] (clock alignment), flat bars (open = high = low = close = the previous
 //!   close, no volume) fill the interval, up to [`BAR_DEPTH`] of them.
 //! - **Corrections and cancels** are ignored. A closed bar is never rewound; the
 //!   storage side can apply corrections after the fact.
@@ -27,6 +37,7 @@
 //! is `Copy` and boxed once when tracking starts). A symbol is about 40 KB, so the
 //! tracked set is bounded: 1,000 symbols is about 40 MB.
 
+use tf_calendar::Calendar;
 use tf_core::{Event, InstrumentId, NANOS_PER_SEC, Nanos, Px};
 
 /// Closed bars kept per symbol and timeframe.
@@ -63,30 +74,147 @@ impl Timeframe {
     pub const fn index(self) -> usize {
         self as usize
     }
+}
 
-    /// The start (in seconds) of the bar containing second `sec`.
-    fn start_of(self, sec: u64, cfg: &MtfConfig) -> u64 {
-        let len = self.secs();
-        match self {
-            Timeframe::Day => {
-                let off = cfg.day_open_offset_secs % len;
-                // Before the first offset of the epoch day, fall back to the epoch day.
-                if sec < off {
-                    return 0;
-                }
-                (sec - off) / len * len + off
-            }
-            _ => sec / len * len,
+/// How bars are aligned (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alignment {
+    /// Epoch-aligned bars; day bars start `day_open_offset_secs` after 00:00 UTC.
+    Clock { day_open_offset_secs: u64 },
+    /// Hourly and day bars follow the trading sessions of the calendar.
+    Session,
+}
+
+impl Default for Alignment {
+    fn default() -> Self {
+        Alignment::Clock {
+            day_open_offset_secs: 0,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MtfConfig {
-    /// Seconds after 00:00 UTC at which a day bar starts.
-    pub day_open_offset_secs: u64,
-    /// Fill empty intervals with flat bars.
+    pub alignment: Alignment,
+    /// Fill empty intervals with flat bars (clock alignment only).
     pub fill_gaps: bool,
+}
+
+impl MtfConfig {
+    /// Clock alignment with a day bar starting `day_open_offset_secs` after 00:00 UTC.
+    pub fn clock(day_open_offset_secs: u64, fill_gaps: bool) -> MtfConfig {
+        MtfConfig {
+            alignment: Alignment::Clock {
+                day_open_offset_secs,
+            },
+            fill_gaps,
+        }
+    }
+
+    /// Session alignment from the calendar.
+    pub fn session() -> MtfConfig {
+        MtfConfig {
+            alignment: Alignment::Session,
+            fill_gaps: false,
+        }
+    }
+}
+
+/// The boundaries of one trading day in seconds since the epoch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DaySecs {
+    pre: u64,
+    open: u64,
+    close: u64,
+    end: u64,
+}
+
+/// Decides where the bar containing a second starts and ends, for a whole aggregator. In session
+/// alignment it looks the day up in the calendar once and keeps it until a trade falls outside it.
+#[derive(Clone, Debug)]
+pub struct Placer {
+    cfg: MtfConfig,
+    day: Option<DaySecs>,
+}
+
+impl Placer {
+    pub fn new(cfg: MtfConfig) -> Placer {
+        Placer { cfg, day: None }
+    }
+
+    pub fn config(&self) -> &MtfConfig {
+        &self.cfg
+    }
+
+    fn day_for(&mut self, sec: u64) -> Option<DaySecs> {
+        if let Some(d) = self.day {
+            if sec >= d.pre && sec < d.end {
+                return Some(d);
+            }
+        }
+        let ns = sec.checked_mul(NANOS_PER_SEC)?;
+        let cal = Calendar::us_equities();
+        let date = cal.date_of(ns).ok()?;
+        let t = cal.times(date).ok()??;
+        let d = DaySecs {
+            pre: t.premarket / NANOS_PER_SEC,
+            open: t.open / NANOS_PER_SEC,
+            close: t.close / NANOS_PER_SEC,
+            end: t.after_hours_end / NANOS_PER_SEC,
+        };
+        if sec >= d.pre && sec < d.end {
+            self.day = Some(d);
+            Some(d)
+        } else {
+            None
+        }
+    }
+
+    /// The `[start, end)` seconds of the bar of timeframe `tf` that contains `sec`; `None` for a second
+    /// that belongs to no bar (session alignment, outside every session).
+    pub fn span(&mut self, tf: Timeframe, sec: u64) -> Option<(u64, u64)> {
+        let len = tf.secs();
+        match self.cfg.alignment {
+            Alignment::Clock {
+                day_open_offset_secs,
+            } => {
+                let start = match tf {
+                    Timeframe::Day => {
+                        let off = day_open_offset_secs % len;
+                        // Before the first offset of the epoch day, fall back to the epoch day.
+                        if sec < off {
+                            0
+                        } else {
+                            (sec - off) / len * len + off
+                        }
+                    }
+                    _ => sec / len * len,
+                };
+                Some((start, start + len))
+            }
+            Alignment::Session => {
+                let d = self.day_for(sec)?;
+                Some(match tf {
+                    Timeframe::Day => (d.pre, d.end),
+                    Timeframe::H1 => {
+                        let (from, to) = if sec < d.open {
+                            (d.pre, d.open)
+                        } else if sec < d.close {
+                            (d.open, d.close)
+                        } else {
+                            (d.close, d.end)
+                        };
+                        let start = from + (sec - from) / len * len;
+                        (start, (start + len).min(to))
+                    }
+                    _ => {
+                        let start = sec / len * len;
+                        (start, start + len)
+                    }
+                })
+            }
+        }
+    }
 }
 
 /// One bar. `start_sec` is the interval start, in seconds since the epoch.
@@ -156,6 +284,8 @@ struct Series {
     /// Closed bars pushed so far (flat fills included).
     n: u64,
     forming: Option<TfBar>,
+    /// Second at which the forming bar ends (the next interval's start, or the session's end for a stub).
+    forming_end: u64,
 }
 
 impl Series {
@@ -173,6 +303,7 @@ impl Series {
             }; BAR_DEPTH],
             n: 0,
             forming: None,
+            forming_end: 0,
         }
     }
 
@@ -208,43 +339,58 @@ impl SymbolBars {
     }
 
     /// A trade. Every bar this closes (a flat filler included), in order, is appended to
-    /// `out` with its timeframe.
+    /// `out` with its timeframe. False if the placer puts the trade in no bar (session alignment,
+    /// outside every session): nothing is kept then, but time still passes.
     pub fn on_trade(
         &mut self,
-        cfg: &MtfConfig,
+        placer: &mut Placer,
         ts: Nanos,
         px: Px,
         size: u32,
         out: &mut Vec<(Timeframe, TfBar)>,
-    ) {
+    ) -> bool {
         let sec = (ts / NANOS_PER_SEC).max(self.now_sec);
         self.now_sec = sec;
+        let fill = placer.cfg.fill_gaps && matches!(placer.cfg.alignment, Alignment::Clock { .. });
+        let mut placed = true;
         for tf in Timeframe::ALL {
-            let start = tf.start_of(sec, cfg);
             let s = &mut self.series[tf.index()];
+            let Some((start, end)) = placer.span(tf, sec) else {
+                placed = false;
+                // The trade is in no bar, but time has passed for the bars already forming.
+                if let Some(f) = s.forming.filter(|_| sec >= s.forming_end) {
+                    s.push(f);
+                    s.forming = None;
+                    out.push((tf, f));
+                }
+                continue;
+            };
             match s.forming {
                 Some(ref mut f) if f.start_sec == start => f.add(px, size),
                 Some(f) => {
                     s.push(f);
                     out.push((tf, f));
                     s.forming = None;
-                    Self::open_new(s, tf, cfg, start, px, size, out);
+                    Self::open_new(s, tf, fill, start, end, px, size, out);
                 }
-                None => Self::open_new(s, tf, cfg, start, px, size, out),
+                None => Self::open_new(s, tf, fill, start, end, px, size, out),
             }
         }
+        placed
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open_new(
         s: &mut Series,
         tf: Timeframe,
-        cfg: &MtfConfig,
+        fill_gaps: bool,
         start: u64,
+        end: u64,
         px: Px,
         size: u32,
         out: &mut Vec<(Timeframe, TfBar)>,
     ) {
-        if cfg.fill_gaps {
+        if fill_gaps {
             if let Some(last) = s.latest().copied() {
                 let len = tf.secs();
                 let mut at = last.start_sec + len;
@@ -263,6 +409,7 @@ impl SymbolBars {
             }
         }
         s.forming = Some(TfBar::first(start, px, size));
+        s.forming_end = end;
     }
 
     /// Time has reached `ts`: close any forming bar whose interval has ended.
@@ -272,13 +419,22 @@ impl SymbolBars {
         for tf in Timeframe::ALL {
             let s = &mut self.series[tf.index()];
             if let Some(f) = s.forming {
-                if sec >= f.start_sec + tf.secs() {
+                if sec >= s.forming_end {
                     s.push(f);
                     s.forming = None;
                     out.push((tf, f));
                 }
             }
         }
+    }
+
+    /// The earliest second at which a forming bar ends, if any bar is forming.
+    pub fn next_due(&self) -> Option<u64> {
+        self.series
+            .iter()
+            .filter(|s| s.forming.is_some())
+            .map(|s| s.forming_end)
+            .min()
     }
 
     /// The `i`th most recent closed bar (0 = latest).
@@ -321,23 +477,33 @@ pub enum TrackError {
 
 /// Bars for a bounded set of tracked symbols.
 pub struct MtfBars {
-    cfg: MtfConfig,
+    placer: Placer,
     slots: Vec<Option<Box<SymbolBars>>>,
     /// Tracked ids in ascending order, so closes are reported deterministically.
     tracked: Vec<InstrumentId>,
     max: usize,
     /// Reused between calls so closing bars does not allocate.
     scratch: Vec<(Timeframe, TfBar)>,
+    /// The latest second any event has shown; a stale timestamp counts in it.
+    now_sec: u64,
+    /// No forming bar ends before this second (`u64::MAX` when none is forming), so time need not be
+    /// offered to every tracked symbol on every trade.
+    next_due: u64,
+    /// Trades that session alignment put in no bar.
+    unplaced: u64,
 }
 
 impl MtfBars {
     pub fn new(cfg: MtfConfig, id_space: usize, max_tracked: usize) -> MtfBars {
         MtfBars {
-            cfg,
+            placer: Placer::new(cfg),
             slots: (0..id_space).map(|_| None).collect(),
             tracked: Vec::new(),
             max: max_tracked,
             scratch: Vec::new(),
+            now_sec: 0,
+            next_due: u64::MAX,
+            unplaced: 0,
         }
     }
 
@@ -370,8 +536,23 @@ impl MtfBars {
         self.tracked.len()
     }
 
+    /// Tracked ids, ascending.
+    pub fn tracked_ids(&self) -> &[InstrumentId] {
+        &self.tracked
+    }
+
+    pub fn max_tracked(&self) -> usize {
+        self.max
+    }
+
     pub fn config(&self) -> &MtfConfig {
-        &self.cfg
+        self.placer.config()
+    }
+
+    /// Trades of tracked symbols that session alignment put in no bar (outside every session, or on a day
+    /// the calendar does not cover).
+    pub fn unplaced(&self) -> u64 {
+        self.unplaced
     }
 
     pub fn symbol(&self, id: InstrumentId) -> Option<&SymbolBars> {
@@ -388,7 +569,14 @@ impl MtfBars {
         let id = t.hdr.instrument;
         if let Some(Some(s)) = self.slots.get_mut(id as usize) {
             self.scratch.clear();
-            s.on_trade(&self.cfg, ts, t.px, t.size, &mut self.scratch);
+            // A stale timestamp counts in the latest second seen by any symbol.
+            let at = ts.max(self.now_sec.saturating_mul(NANOS_PER_SEC));
+            if !s.on_trade(&mut self.placer, at, t.px, t.size, &mut self.scratch) {
+                self.unplaced += 1;
+            }
+            if let Some(due) = s.next_due() {
+                self.next_due = self.next_due.min(due);
+            }
             out.extend(self.scratch.iter().map(|&(timeframe, bar)| BarClose {
                 instrument: id,
                 timeframe,
@@ -399,17 +587,30 @@ impl MtfBars {
 
     /// Time has reached `ts`: close what has ended, for every tracked symbol.
     pub fn advance_to(&mut self, ts: Nanos, out: &mut Vec<BarClose>) {
+        let sec = ts / NANOS_PER_SEC;
+        self.now_sec = self.now_sec.max(sec);
+        if self.now_sec < self.next_due {
+            return;
+        }
+        let mut due = u64::MAX;
         for &id in &self.tracked {
             if let Some(Some(s)) = self.slots.get_mut(id as usize) {
                 self.scratch.clear();
-                s.advance_to(ts, &mut self.scratch);
+                s.advance_to(
+                    self.now_sec.saturating_mul(NANOS_PER_SEC),
+                    &mut self.scratch,
+                );
                 out.extend(self.scratch.iter().map(|&(timeframe, bar)| BarClose {
                     instrument: id,
                     timeframe,
                     bar,
                 }));
+                if let Some(d) = s.next_due() {
+                    due = due.min(d);
+                }
             }
         }
+        self.next_due = due;
     }
 }
 
@@ -448,7 +649,7 @@ mod tests {
             size: u32,
         ) -> Vec<(Timeframe, TfBar)> {
             let mut out = Vec::new();
-            self.on_trade(cfg, ts, px, size, &mut out);
+            self.on_trade(&mut Placer::new(*cfg), ts, px, size, &mut out);
             out
         }
         fn advance(&mut self, ts: Nanos) -> Vec<(Timeframe, TfBar)> {
@@ -583,10 +784,7 @@ mod tests {
 
     #[test]
     fn alignment_is_to_the_epoch_and_the_day_to_the_configured_open() {
-        let cfg = MtfConfig {
-            day_open_offset_secs: 14 * 3600 + 30 * 60,
-            fill_gaps: false,
-        };
+        let cfg = MtfConfig::clock(14 * 3600 + 30 * 60, false);
         let mut b = SymbolBars::new();
         b.trade(&cfg, at(DAY0 + 15 * 3600 + 7 * 60 + 13), px(1000), 1);
         assert_eq!(
@@ -642,10 +840,7 @@ mod tests {
     fn empty_intervals_are_skipped_or_filled_flat() {
         let t0 = DAY0 + 3600;
         let run = |fill: bool| {
-            let cfg = MtfConfig {
-                day_open_offset_secs: 0,
-                fill_gaps: fill,
-            };
+            let cfg = MtfConfig::clock(0, fill);
             let mut b = SymbolBars::new();
             b.trade(&cfg, at(t0 + 10), px(1000), 10);
             b.trade(&cfg, at(t0 + 4 * 60 + 20), px(1050), 20); // minutes 1, 2, 3 had no trades
@@ -674,10 +869,7 @@ mod tests {
         );
         assert_eq!(flat.vwap(), None);
         // A huge gap only fills the last BAR_DEPTH intervals.
-        let cfg = MtfConfig {
-            day_open_offset_secs: 0,
-            fill_gaps: true,
-        };
+        let cfg = MtfConfig::clock(0, true);
         let mut b = SymbolBars::new();
         b.trade(&cfg, at(t0), px(1000), 1);
         b.trade(&cfg, at(t0 + 100 * 3600), px(1000), 1);
@@ -690,14 +882,7 @@ mod tests {
 
     #[test]
     fn closes_carry_their_own_bar_even_when_a_gap_is_filled() {
-        let mut m = MtfBars::new(
-            MtfConfig {
-                day_open_offset_secs: 0,
-                fill_gaps: true,
-            },
-            1,
-            1,
-        );
+        let mut m = MtfBars::new(MtfConfig::clock(0, true), 1, 1);
         m.track(0).unwrap();
         let mut out = Vec::new();
         let t0 = DAY0 + 600;
@@ -878,10 +1063,7 @@ mod tests {
             for fill in [false, true] {
                 let mut rng = SplitMix64::new(seed);
                 let off = rng.next_u64() % 86_400;
-                let cfg = MtfConfig {
-                    day_open_offset_secs: off,
-                    fill_gaps: fill,
-                };
+                let cfg = MtfConfig::clock(off, fill);
                 let mut sec = DAY0 + 1000 + rng.next_u64() % 5000;
                 let mut trades = Vec::new();
                 let mut b = SymbolBars::new();
@@ -1058,6 +1240,369 @@ mod tests {
             0x2234_f04b_92d9_8905,
             "bar digest {:#x}",
             digest(&a, &ca)
+        );
+    }
+
+    // ---- session alignment (E19-S03) ----
+
+    use tf_calendar::{Calendar, Date};
+
+    /// Boundaries of a trading day in seconds since the epoch: premarket, open, close, after-hours end.
+    fn day(y: i32, m: u8, d: u8) -> (u64, u64, u64, u64) {
+        let t = Calendar::us_equities()
+            .times(Date::new(y, m, d).unwrap())
+            .unwrap()
+            .unwrap();
+        (
+            t.premarket / S,
+            t.open / S,
+            t.close / S,
+            t.after_hours_end / S,
+        )
+    }
+
+    fn session_bars() -> MtfBars {
+        MtfBars::new(MtfConfig::session(), 4, 4)
+    }
+
+    fn feed(m: &mut MtfBars, inst: u32, sec: u64, cents: i64, size: u32) -> Vec<BarClose> {
+        let mut out = Vec::new();
+        m.on_event(&trade_ev(inst, at(sec), cents, size), &mut out);
+        out
+    }
+
+    fn starts(m: &MtfBars, id: u32, tf: Timeframe) -> Vec<u64> {
+        let s = m.symbol(id).unwrap();
+        (0..s.closed_len(tf))
+            .rev()
+            .map(|i| s.closed(tf, i).unwrap().start_sec)
+            .collect()
+    }
+
+    #[test]
+    fn the_hand_computed_days_start_where_the_new_york_clock_says() {
+        // The calendar is checked on its own (tf-calendar); this pins the UTC seconds the bars rely on.
+        let days = |y, m, d| Date::new(y, m, d).unwrap().days() as u64 * 86_400;
+        // Summer (UTC-4): the open is 13:30 UTC, premarket 08:00, close 20:00, after-hours end 24:00.
+        let (pre, open, close, end) = day(2026, 10, 2);
+        assert_eq!(
+            (pre, open, close, end),
+            (
+                days(2026, 10, 2) + 8 * 3600,
+                days(2026, 10, 2) + 13 * 3600 + 1800,
+                days(2026, 10, 2) + 20 * 3600,
+                days(2026, 10, 3)
+            )
+        );
+        // Winter (UTC-5): 14:30 UTC.
+        let (pre, open, close, end) = day(2026, 11, 2);
+        assert_eq!(
+            (pre, open, close, end),
+            (
+                days(2026, 11, 2) + 9 * 3600,
+                days(2026, 11, 2) + 14 * 3600 + 1800,
+                days(2026, 11, 2) + 21 * 3600,
+                days(2026, 11, 3) + 3600
+            )
+        );
+    }
+
+    #[test]
+    fn regular_session_hours_start_at_the_open_and_the_last_is_a_half_hour_stub() {
+        for (y, m, d) in [(2026, 10, 2), (2026, 11, 2)] {
+            let (_, open, close, _) = day(y, m, d);
+            let mut b = session_bars();
+            b.track(0).unwrap();
+            // A trade in every hour of the session, the first at the open and the last in the stub.
+            for k in 0..7 {
+                feed(&mut b, 0, open + k * 3600 + 5, 1000 + k as i64, 10);
+            }
+            // Nothing has closed the stub yet; the forming hour is the one starting at 15:30 New York.
+            assert_eq!(
+                b.symbol(0)
+                    .unwrap()
+                    .forming(Timeframe::H1)
+                    .unwrap()
+                    .start_sec,
+                close - 1800
+            );
+            let want: Vec<u64> = (0..6).map(|k| open + k * 3600).collect();
+            assert_eq!(starts(&b, 0, Timeframe::H1), want, "{y}-{m}-{d}");
+            // Time reaching the close closes the stub, at 16:00 and not at 16:30.
+            let mut out = Vec::new();
+            b.advance_to(at(close - 1), &mut out);
+            assert!(out.iter().all(|c| c.timeframe != Timeframe::H1));
+            b.advance_to(at(close), &mut out);
+            let stub: Vec<_> = out
+                .iter()
+                .filter(|c| c.timeframe == Timeframe::H1)
+                .collect();
+            assert_eq!(stub.len(), 1);
+            assert_eq!(stub[0].bar.start_sec, close - 1800);
+            assert_eq!(b.symbol(0).unwrap().closed_len(Timeframe::H1), 7);
+        }
+    }
+
+    #[test]
+    fn the_first_bar_is_at_half_past_nine_on_both_sides_of_each_daylight_saving_change() {
+        // Fridays and Mondays around 8 March 2026 (spring) and 1 November 2026 (autumn), with the open's
+        // UTC time written out by hand: 14:30 in winter, 13:30 in summer.
+        let days = |y, m, d| Date::new(y, m, d).unwrap().days() as u64 * 86_400;
+        let cases = [
+            (2026, 3, 6, 14 * 3600 + 1800),
+            (2026, 3, 9, 13 * 3600 + 1800),
+            (2026, 10, 30, 13 * 3600 + 1800),
+            (2026, 11, 2, 14 * 3600 + 1800),
+        ];
+        for (y, m, d, off) in cases {
+            let want = days(y, m, d) + off;
+            let mut b = session_bars();
+            b.track(0).unwrap();
+            feed(&mut b, 0, want, 1000, 1);
+            let s = b.symbol(0).unwrap();
+            assert_eq!(
+                s.forming(Timeframe::H1).unwrap().start_sec,
+                want,
+                "{y}-{m}-{d}"
+            );
+            assert_eq!(s.forming(Timeframe::M15).unwrap().start_sec, want);
+            // One second earlier is the premarket's last hour, which ends at the open.
+            let mut b = session_bars();
+            b.track(0).unwrap();
+            feed(&mut b, 0, want - 1, 1000, 1);
+            assert_eq!(
+                b.symbol(0)
+                    .unwrap()
+                    .forming(Timeframe::H1)
+                    .unwrap()
+                    .start_sec,
+                want - 1800,
+                "premarket 09:00 to 09:30"
+            );
+        }
+    }
+
+    #[test]
+    fn an_early_close_ends_the_stub_at_one_and_after_hours_at_five() {
+        // Friday 27 November 2026: closes at 13:00 (18:00 UTC), after-hours to 17:00 (22:00 UTC).
+        let (_, open, close, end) = day(2026, 11, 27);
+        assert_eq!((close - open, end - close), (3 * 3600 + 1800, 4 * 3600));
+        let mut b = session_bars();
+        b.track(0).unwrap();
+        for k in 0..4 {
+            feed(&mut b, 0, open + k * 3600, 1000, 1);
+        }
+        assert_eq!(
+            starts(&b, 0, Timeframe::H1),
+            [open, open + 3600, open + 7200]
+        );
+        let stub = b
+            .symbol(0)
+            .unwrap()
+            .forming(Timeframe::H1)
+            .unwrap()
+            .start_sec;
+        assert_eq!(stub, close - 1800, "12:30 to 13:00");
+        // An after-hours trade at 13:00 starts the after-hours hour; the stub is closed by it.
+        let out = feed(&mut b, 0, close, 1001, 1);
+        assert!(
+            out.iter()
+                .any(|c| c.timeframe == Timeframe::H1 && c.bar.start_sec == stub)
+        );
+        assert_eq!(
+            b.symbol(0)
+                .unwrap()
+                .forming(Timeframe::H1)
+                .unwrap()
+                .start_sec,
+            close
+        );
+        // The day bar ends at 17:00.
+        let mut out = Vec::new();
+        b.advance_to(at(end - 1), &mut out);
+        assert!(out.iter().all(|c| c.timeframe != Timeframe::Day));
+        b.advance_to(at(end), &mut out);
+        assert!(out.iter().any(|c| c.timeframe == Timeframe::Day));
+    }
+
+    #[test]
+    fn premarket_and_after_hours_hours_start_at_their_own_session_start() {
+        let (pre, open, close, end) = day(2026, 10, 2);
+        let mut b = session_bars();
+        b.track(0).unwrap();
+        for sec in [pre, pre + 3600, open - 1, close, close + 3600, end - 1] {
+            feed(&mut b, 0, sec, 1000, 1);
+        }
+        let h = starts(&b, 0, Timeframe::H1);
+        // Closed: 04:00, 05:00, the 09:00 stub to 09:30 (hour 5 of the premarket), then 16:00 and 17:00.
+        assert_eq!(h, [pre, pre + 3600, pre + 5 * 3600, close, close + 3600]);
+        assert_eq!(
+            b.symbol(0)
+                .unwrap()
+                .forming(Timeframe::H1)
+                .unwrap()
+                .start_sec,
+            close + 3 * 3600,
+            "19:00 to 20:00"
+        );
+    }
+
+    #[test]
+    fn the_day_bar_is_the_whole_trading_day_whatever_the_offset_from_utc() {
+        for (y, m, d) in [(2026, 10, 2), (2026, 11, 2)] {
+            let (pre, open, close, end) = day(y, m, d);
+            let mut b = session_bars();
+            b.track(0).unwrap();
+            for sec in [pre, open, close, end - 1] {
+                feed(&mut b, 0, sec, 1000, 1);
+            }
+            let f = b.symbol(0).unwrap().forming(Timeframe::Day).unwrap();
+            assert_eq!((f.start_sec, f.trades), (pre, 4), "{y}-{m}-{d}");
+            // The next trading day's premarket opens a new day bar and closes this one.
+            let (npre, ..) = day(y, m, if d == 2 { 5 } else { 3 });
+            let out = feed(&mut b, 0, npre, 1000, 1);
+            let c: Vec<_> = out
+                .iter()
+                .filter(|c| c.timeframe == Timeframe::Day)
+                .collect();
+            assert_eq!(c.len(), 1);
+            assert_eq!((c[0].bar.start_sec, c[0].bar.trades), (pre, 4));
+        }
+    }
+
+    #[test]
+    fn a_trade_that_belongs_to_no_session_is_counted_and_builds_nothing() {
+        let (pre, _, _, end) = day(2026, 10, 2);
+        let mut b = session_bars();
+        b.track(0).unwrap();
+        let weekend = Date::new(2026, 10, 3).unwrap().days() as u64 * 86_400 + 15 * 3600;
+        let far = Date::new(2031, 1, 6).unwrap().days() as u64 * 86_400 + 15 * 3600;
+        // In time order: before the premarket, after after-hours, overnight, a Saturday, a year outside the
+        // calendar's table.
+        for sec in [pre - 1, end, end + 3 * 3600, weekend, far] {
+            assert!(feed(&mut b, 0, sec, 1000, 1).is_empty());
+        }
+        assert_eq!(b.unplaced(), 5);
+        assert_eq!(b.symbol(0).unwrap().closed_total(Timeframe::M1), 0);
+        assert!(b.symbol(0).unwrap().forming(Timeframe::M1).is_none());
+
+        // The boundary seconds themselves are placed: the start of a session belongs to it, its end to
+        // the next, and after-hours' end to nothing.
+        let mut b = session_bars();
+        b.track(0).unwrap();
+        feed(&mut b, 0, pre - 1, 1000, 1);
+        assert_eq!(b.unplaced(), 1);
+        feed(&mut b, 0, pre, 1000, 1);
+        feed(&mut b, 0, end - 1, 1000, 1);
+        assert_eq!(b.unplaced(), 1);
+        assert!(b.symbol(0).unwrap().forming(Timeframe::M1).is_some());
+        // A trade outside every session builds nothing but lets time close what is forming.
+        let out = feed(&mut b, 0, end, 1000, 1);
+        assert_eq!(b.unplaced(), 2);
+        for tf in [Timeframe::M1, Timeframe::H1, Timeframe::Day] {
+            assert!(
+                out.iter().any(|c| c.timeframe == tf),
+                "{tf:?} closes at the end"
+            );
+        }
+        assert!(b.symbol(0).unwrap().forming(Timeframe::Day).is_none());
+    }
+
+    #[test]
+    fn minutes_stay_on_the_epoch_grid_in_session_alignment_and_gap_filling_is_off() {
+        let (_, open, ..) = day(2026, 10, 2);
+        let mut cfg = MtfConfig::session();
+        cfg.fill_gaps = true;
+        let mut b = MtfBars::new(cfg, 1, 1);
+        b.track(0).unwrap();
+        feed(&mut b, 0, open + 5, 1000, 1);
+        feed(&mut b, 0, open + 4 * 60 + 5, 1000, 1);
+        let s = b.symbol(0).unwrap();
+        assert_eq!(s.forming(Timeframe::M5).unwrap().start_sec, open);
+        assert_eq!(s.forming(Timeframe::M15).unwrap().start_sec, open);
+        assert_eq!(
+            s.closed_len(Timeframe::M1),
+            1,
+            "minutes 1 to 3 are not filled"
+        );
+    }
+
+    #[test]
+    fn time_is_offered_to_symbols_only_when_a_bar_is_due() {
+        // A quiet symbol's minute bar closes at the first event at or after its end, exactly once, even
+        // though thousands of trades by another symbol arrive in between.
+        let mut b = MtfBars::new(MtfConfig::default(), 2, 2);
+        b.track(0).unwrap();
+        b.track(1).unwrap();
+        let t0 = DAY0 + 3600;
+        feed(&mut b, 0, t0 + 5, 1000, 1);
+        let mut closed_at = None;
+        for k in 0..200u64 {
+            let sec = t0 + 6 + k;
+            let out = feed(&mut b, 1, sec, 2000, 1);
+            if out
+                .iter()
+                .any(|c| c.instrument == 0 && c.timeframe == Timeframe::M1)
+            {
+                assert!(closed_at.is_none(), "closed twice");
+                closed_at = Some(sec);
+            }
+        }
+        assert_eq!(closed_at, Some(t0 + 60));
+    }
+
+    #[test]
+    fn a_stale_timestamp_counts_in_the_latest_second_any_event_has_shown() {
+        let mut b = MtfBars::new(MtfConfig::default(), 2, 2);
+        b.track(1).unwrap();
+        let t0 = DAY0 + 3600;
+        feed(&mut b, 1, t0 + 130, 1000, 1);
+        // A symbol tracked after that, whose first trade arrives stamped before it: it is placed in the
+        // minute the engine has reached, not in the one it names.
+        b.track(0).unwrap();
+        feed(&mut b, 0, t0 + 20, 1000, 1);
+        assert_eq!(
+            b.symbol(0)
+                .unwrap()
+                .forming(Timeframe::M1)
+                .unwrap()
+                .start_sec,
+            t0 + 120
+        );
+    }
+
+    #[test]
+    fn a_cached_day_does_not_answer_for_a_second_before_it_starts() {
+        let (pre, open, _, end) = day(2026, 10, 2);
+        let mut p = Placer::new(MtfConfig::session());
+        assert!(
+            p.span(Timeframe::M1, open).is_some(),
+            "the day is now cached"
+        );
+        // Asked out of order, a second before the premarket belongs to no bar, though the cache is warm.
+        assert_eq!(p.span(Timeframe::H1, pre - 1), None);
+        assert_eq!(p.span(Timeframe::H1, pre), Some((pre, pre + 3600)));
+        assert_eq!(p.span(Timeframe::H1, end), None);
+        assert_eq!(p.span(Timeframe::Day, end - 1), Some((pre, end)));
+    }
+
+    #[test]
+    fn a_trade_in_no_session_closes_the_bars_whose_time_has_come() {
+        let (_, _, _, end) = day(2026, 10, 2);
+        let mut p = Placer::new(MtfConfig::session());
+        let mut b = SymbolBars::new();
+        let mut out = Vec::new();
+        assert!(b.on_trade(&mut p, at(end - 1), px(1000), 1, &mut out));
+        out.clear();
+        // After-hours ended at `end`: a trade a second later is placed nowhere, and the minute, hour and
+        // day bars that ended with the session close with it, exactly when time reaches `end`.
+        assert!(!b.on_trade(&mut p, at(end), px(1000), 1, &mut out));
+        let tfs: Vec<Timeframe> = out.iter().map(|c| c.0).collect();
+        assert!(
+            tfs.contains(&Timeframe::M1)
+                && tfs.contains(&Timeframe::H1)
+                && tfs.contains(&Timeframe::Day),
+            "{tfs:?}"
         );
     }
 }

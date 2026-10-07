@@ -70,3 +70,4 @@ How:
 | [0051](0051-strategy-ideas-are-researched-and-graded-first-and-a-refinement-is-tested-against-its-plain-version.md) | Strategy ideas are researched and graded first, and a refinement is tested against its plain version | Accepted |
 | [0052](0052-the-calendar-is-a-daylight-saving-rule-and-a-table-of-closures-with-no-time-zone-database.md) | The calendar is a daylight-saving rule and a table of closures, with no time-zone database | Accepted |
 | [0053](0053-session-state-is-a-second-array-placed-by-arrival-time.md) | Session state is a second array beside Tier 0, placed by arrival time | Accepted |
+| [0054](0054-bars-are-shared-by-claims-aligned-to-the-session-by-the-calendar-and-read-through-the-strategys-own-claim.md) | Bars are shared by claims, aligned to the session by the calendar, and read through the strategy's own claim | Accepted |

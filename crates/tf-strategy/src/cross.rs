@@ -17,7 +17,7 @@
 
 use tf_core::TierChange;
 use tf_core::{Event, InstrumentId, Nanos, SymbolTable};
-use tf_engine::{Promoter, SymbolState, Tier0};
+use tf_engine::{Promoter, SharedBars, SymbolState, Tier0};
 use tf_universe::{Change, LiveFeature, LiveView, RefInfo, Selection, Tier0View};
 
 use crate::intent::{Intent, StrategyId};
@@ -304,14 +304,28 @@ impl<S: CrossStrategy> CrossRunner<S> {
         &mut self,
         tier0: &Tier0,
         promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
         now: Nanos,
         f: impl FnOnce(&mut S, &mut Ctx<'_>) -> R,
     ) -> R {
-        let mut ctx = Ctx::shared(now, self.strategy.id(), tier0, &mut self.state, promoter);
+        let mut ctx = Ctx::shared(
+            now,
+            self.strategy.id(),
+            tier0,
+            &mut self.state,
+            promoter,
+            bars,
+        );
         f(&mut self.strategy, &mut ctx)
     }
 
-    fn fire_timers(&mut self, m: Market<'_>, mut promoter: Option<&mut Promoter>, limit: Nanos) {
+    fn fire_timers(
+        &mut self,
+        m: Market<'_>,
+        mut promoter: Option<&mut Promoter>,
+        mut bars: Option<&mut SharedBars>,
+        limit: Nanos,
+    ) {
         let mut fires = 0;
         while let Some((at, id)) = self.state.timers.pop_due(limit) {
             if fires == MAX_TIMER_FIRES_PER_STEP {
@@ -332,12 +346,18 @@ impl<S: CrossStrategy> CrossRunner<S> {
                 m.tier0,
                 &mut self.state,
                 promoter.as_deref_mut(),
+                bars.as_deref_mut(),
             );
             self.strategy.on_timer(&mut ctx, &view, id);
         }
     }
 
-    fn review_if_due(&mut self, m: Market<'_>, promoter: Option<&mut Promoter>) {
+    fn review_if_due(
+        &mut self,
+        m: Market<'_>,
+        promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
+    ) {
         let now = self.now;
         match self.next_review {
             None => self.next_review = Some((now / self.period + 1) * self.period),
@@ -348,8 +368,14 @@ impl<S: CrossStrategy> CrossRunner<S> {
                     market: m,
                     members: &self.members,
                 };
-                let mut ctx =
-                    Ctx::shared(now, self.strategy.id(), m.tier0, &mut self.state, promoter);
+                let mut ctx = Ctx::shared(
+                    now,
+                    self.strategy.id(),
+                    m.tier0,
+                    &mut self.state,
+                    promoter,
+                    bars,
+                );
                 self.strategy.on_review(&mut ctx, &view);
             }
             Some(_) => {}
@@ -359,10 +385,16 @@ impl<S: CrossStrategy> CrossRunner<S> {
     /// One event the engine has applied to `market.tier0`: due timers fire first, then a member's
     /// event is delivered, then a review if one is due.
     #[inline]
-    pub fn on_event(&mut self, market: Market<'_>, promoter: Option<&mut Promoter>, ev: &Event) {
+    pub fn on_event(
+        &mut self,
+        market: Market<'_>,
+        promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
+        ev: &Event,
+    ) {
         let ts = ev.ts_recv();
         if S::WANTS_MEMBER_EVENTS || ts >= self.wake {
-            self.on_event_slow(market, promoter, ev, ts);
+            self.on_event_slow(market, promoter, bars, ev, ts);
         } else {
             self.now = self.now.max(ts);
         }
@@ -372,6 +404,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
         &mut self,
         market: Market<'_>,
         mut promoter: Option<&mut Promoter>,
+        mut bars: Option<&mut SharedBars>,
         ev: &Event,
         ts: Nanos,
     ) {
@@ -382,7 +415,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
             self.now = self.now.max(ts);
             return;
         }
-        self.fire_timers(market, promoter.as_deref_mut(), ts);
+        self.fire_timers(market, promoter.as_deref_mut(), bars.as_deref_mut(), ts);
         self.now = self.now.max(ts);
         if delivers {
             self.events += 1;
@@ -396,10 +429,11 @@ impl<S: CrossStrategy> CrossRunner<S> {
                 market.tier0,
                 &mut self.state,
                 promoter.as_deref_mut(),
+                bars.as_deref_mut(),
             );
             self.strategy.on_member_event(&mut ctx, &view, ev);
         }
-        self.review_if_due(market, promoter);
+        self.review_if_due(market, promoter, bars);
         self.rewake();
     }
 
@@ -413,11 +447,12 @@ impl<S: CrossStrategy> CrossRunner<S> {
         &mut self,
         market: Market<'_>,
         mut promoter: Option<&mut Promoter>,
+        mut bars: Option<&mut SharedBars>,
         ts: Nanos,
     ) {
-        self.fire_timers(market, promoter.as_deref_mut(), ts);
+        self.fire_timers(market, promoter.as_deref_mut(), bars.as_deref_mut(), ts);
         self.now = self.now.max(ts);
-        self.review_if_due(market, promoter);
+        self.review_if_due(market, promoter, bars);
         self.rewake();
     }
 
@@ -425,10 +460,13 @@ impl<S: CrossStrategy> CrossRunner<S> {
         &mut self,
         tier0: &Tier0,
         promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
         update: &OrderUpdate,
     ) {
         let now = self.now;
-        self.call(tier0, promoter, now, |s, c| s.on_order_update(c, update));
+        self.call(tier0, promoter, bars, now, |s, c| {
+            s.on_order_update(c, update)
+        });
         self.rewake();
     }
 
@@ -438,6 +476,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
         &mut self,
         market: Market<'_>,
         promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
         id: InstrumentId,
     ) {
         let now = self.now;
@@ -451,6 +490,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
             market.tier0,
             &mut self.state,
             promoter,
+            bars,
         );
         self.strategy.on_tier1_revoked(&mut ctx, &view, id);
         self.rewake();

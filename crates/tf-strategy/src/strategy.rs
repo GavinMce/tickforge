@@ -183,6 +183,12 @@ impl Ctx<'_> {
         self.tier0.symbol(id)
     }
 
+    /// The session boundaries of the day Tier 0 is on (the calendar's open, close and the rest as UTC nanoseconds), once
+    /// the host has been given the day; `None` before. On an early-close day the close is 13:00 New York time.
+    pub fn day(&self) -> Option<&tf_calendar::SessionTimes> {
+        self.tier0.day()
+    }
+
     /// Rolling windows and one-second bars for an instrument.
     pub fn windows(&self, id: InstrumentId) -> Option<&RollingBars> {
         self.tier0.windows(id)

@@ -1946,7 +1946,35 @@ epics:
       - id: E19-S18
         jira: TIC-172
         title: "T04 closing reversal: the day's biggest losers into the last half hour (docs/research 8c)"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0061. tf_strategy::closing_reversal::ClosingReversal (a CrossStrategy on the ExitBook) with
+          ClosingReversalParams (names, extreme_bp, spread_cap_bp, dollars, collar_permille, stop_permille, ref_minutes,
+          entry_minutes, exit_seconds: parsed and rendered as text, every key once, so another value is another variant),
+          Ctx::day() (the session boundaries Tier 0 holds), and tf_host::library::closing_reversal(id, name, universe, params)
+          for the StrategyDef. At the first review of a day the strategy sets timers from the calendar's close: a snapshot of
+          every member's last price 65 minutes before it, the price at 60 (the last trade at or before, from Tier 0 when its
+          last trade is not later, else from the snapshot: exact but for the one symbol whose event fires the timer), the
+          decision at 30 (so 12:30 on an early-close day, tested on 27 November 2026); it ranks the return from the prior close
+          in parts per million, buys the most negative `names` (ties to the lower instrument number, whatever the sign) at a
+          collar around the ask for an equal dollar amount, skipping names halted, under the short-sale restriction, with no
+          prior close, price or two-sided quote (crossed counts as none), or whose dollars buy no share; the extreme and
+          spread-cap floors keep a name exactly at them; buy-at-15:00 takes the price just before the decision at the same
+          instant. The exit is the ExitBook's time exit 30 seconds before the close, only for what has filled, retried; the
+          host flattens the rest. The framework refuses an opening order in the regular session without a stop, and the rule
+          has none, so each entry carries a disaster stop 10 percent under the ask (stop_permille): off in the simulator, a real
+          order live, and R is measured against it, so T04 is judged in basis points. Tests: 21 from scripted events through
+          a CrossRunner, 6 through the host (fills at the ask at 15:30:00 and the bid at 15:59:30, the early-close day, no day told
+          and no trade, replay equal and a changed afternoon that differs) and the same afternoon as a DBN day through
+          research::run_day with the three trips and their fees worked by hand (gross +31.08, -12.60, +8.32; the first trade's
+          fees 63,466,914 raw from Section 31 and the Trading Activity Fee) and replayed through replay_files to equal.
+          Mutation run, 59 mutants of the strategy: the first valid run left 8 survivors (a run before it had passed a test
+          command cargo rejected, so every mutant looked killed: the runner now proves its command passes unmutated first);
+          dead guards were removed (a decided flag a one-shot timer makes redundant, two price filters return_ppm repeats, a
+          zero-fill test the book repeats) and a test added for the period and for a stop that rounds to nothing; 1 remains,
+          unreachable: the count of entries the framework's own checks refuse, which cannot happen with parameters that pass
+          validate. Narrowed: the strategy has not run over a real captured stretch: no real day is stored and no Databento key
+          is configured where this was built; the afternoon above is scripted. That run, with the twelve months, is E19-S31.
         deps: [E19-S01, E19-S05]
         ac:
           - At 15:30 the strategy ranks its universe by the return from the prior close to the last trade at or before 15:00, buys the most negative N (10, 20 or 40), skips names under a halt, pause or restriction, and sells at 15:59:30; extreme-only and spread-cap variants as parameters
@@ -2063,4 +2091,4 @@ epics:
         deps: [E19-S13, E19-S18]
         ac:
           - "`tf research run` takes strategy definitions by name and parameters (a registry the strategies add to), a store, a date range and a symbol subset (from the screening pass or a list), builds each day's reference snapshot as it was before that session (the E19-S04 columns up to the previous session), and runs tf_host::research::run into a results directory; `tf research show` prints the configuration and a per-variant summary of a directory and refuses one without its configuration"
-          - "Twelve months of trades with quotes for a stated subset of symbols is pulled under a stated cap (about $170 for five symbols at the price paid for one day of two), run through the command, and its time on the development machine stated against the 400.8 s speed test of E19-S13; the Section 31 rate for the fiscal year that began on 1 October 2026 is looked up and added to the cost model first"
+          - "Twelve months of trades with quotes for a stated subset of symbols is pulled under a stated cap (about $170 for five symbols at the price paid for one day of two), run through the command, and its time on the development machine stated against the 400.8 s speed test of E19-S13, with T04 (E19-S18) run over a real captured stretch of it and its decision log replayed equal (E19-S18 had only a scripted afternoon); the Section 31 rate for the fiscal year that began on 1 October 2026 is looked up and added to the cost model first"

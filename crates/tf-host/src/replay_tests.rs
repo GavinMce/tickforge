@@ -501,7 +501,13 @@ pub(crate) fn scratch(name: &str) -> PathBuf {
     d
 }
 
-fn trade_rec(instrument: u32, ts_recv: u64, price: i64, size: u32, sequence: u32) -> TradeMsg {
+pub(crate) fn trade_rec(
+    instrument: u32,
+    ts_recv: u64,
+    price: i64,
+    size: u32,
+    sequence: u32,
+) -> TradeMsg {
     TradeMsg {
         hd: RecordHeader::new::<TradeMsg>(rtype::MBP_0, 81, instrument, ts_recv - 1_000),
         price,
@@ -516,7 +522,7 @@ fn trade_rec(instrument: u32, ts_recv: u64, price: i64, size: u32, sequence: u32
     }
 }
 
-fn quote_rec(instrument: u32, ts_recv: u64, bid: i64, ask: i64) -> Cmbp1Msg {
+pub(crate) fn quote_rec(instrument: u32, ts_recv: u64, bid: i64, ask: i64) -> Cmbp1Msg {
     Cmbp1Msg {
         hd: RecordHeader::new::<Cmbp1Msg>(rtype::CMBP_1, 88, instrument, ts_recv - 500),
         price: 0,
@@ -601,7 +607,7 @@ pub(crate) fn dbn_day_at(base: u64, secs: u64, bump: i64) -> Vec<u8> {
     bytes
 }
 
-fn dbn_bytes<R: dbn::Record + dbn::encode::DbnEncodable>(r: &R) -> Vec<u8> {
+pub(crate) fn dbn_bytes<R: dbn::Record + dbn::encode::DbnEncodable>(r: &R) -> Vec<u8> {
     let mut out = Vec::new();
     // A record is its raw bytes; the stream header is written once, by the caller.
     out.extend_from_slice(dbn::RecordRef::from(r).as_ref());

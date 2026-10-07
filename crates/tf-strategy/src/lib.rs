@@ -7,6 +7,7 @@
 //! - [`lifecycle`]: the gateway's decisions and the state of an order.
 //! - [`trend`]: an example strategy on the indicator and bar APIs (EMA cross, VWAP reclaim).
 //! - [`momentum`]: Strategy 1, long side.
+//! - [`closing_reversal`]: T04, the day's biggest losers into the close (E19-S18).
 //! - [`rules`]: entry conditions as data, with the per-decision evidence.
 //! - [`report`]: what a backtest earned, risked and paid, overall and per scenario.
 //! - [`session_rules`]: what the broker accepts in the extended hours.
@@ -19,6 +20,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
 pub mod broker;
+pub mod closing_reversal;
 pub mod cross;
 pub mod exits;
 pub mod intent;
@@ -33,6 +35,7 @@ pub mod strategy;
 pub mod testing;
 pub mod trend;
 
+pub use closing_reversal::{ClosingReversal, ClosingReversalParams, ClosingReversalStats};
 pub use cross::{CrossRunner, CrossStrategy, Market, MemberView, Members};
 pub use exits::{ExitBook, ExitPlan, ExitReason, ExitStats, flat_by};
 pub use intent::{
@@ -57,6 +60,8 @@ pub use trend::{TrendLong, TrendParams, TrendStats};
 
 #[cfg(test)]
 mod broker_tests;
+#[cfg(test)]
+mod closing_tests;
 #[cfg(test)]
 mod cross_tests;
 #[cfg(test)]

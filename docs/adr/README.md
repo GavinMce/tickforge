@@ -68,3 +68,4 @@ How:
 | [0049](0049-the-live-feed-is-a-small-synchronous-client-not-the-official-async-one.md) | The live feed is a small synchronous client, not the official async one | Accepted |
 | [0050](0050-one-engine-thread-takes-the-queue-and-the-feed-thread-keeps-the-bytes.md) | One engine thread takes the queue, and the feed thread keeps the bytes | Accepted |
 | [0051](0051-strategy-ideas-are-researched-and-graded-first-and-a-refinement-is-tested-against-its-plain-version.md) | Strategy ideas are researched and graded first, and a refinement is tested against its plain version | Accepted |
+| [0052](0052-the-calendar-is-a-daylight-saving-rule-and-a-table-of-closures-with-no-time-zone-database.md) | The calendar is a daylight-saving rule and a table of closures, with no time-zone database | Accepted |

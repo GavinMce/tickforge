@@ -1536,7 +1536,22 @@ epics:
       - id: E19-S01
         jira: TIC-155
         title: "tf-calendar: US equity trading days, sessions and New York time"
-        status: todo
+        status: done
+        evidence: >
+          crates/tf-calendar (ADR 0052; depends on tf-core only): Date (civil dates, weekday), Calendar::{local,
+          date_of, closure, day_kind, is_trading_day, times, session_at, next_trading_day, prev_trading_day,
+          minutes_before_close, closures}; New York time by the US rule in force since 2007, years before it
+          refused; a closure table for 2024 to 2028 (holidays, early closes, the unscheduled closure of 9 January
+          2025) from the NYSE Group releases of 2021, 2024 and 2025, a date outside it an error. 15 tests: the
+          rule agrees with Python zoneinfo for the New York midnight of every day of 2024 to 2028 (1,827) and the
+          second of all ten changes; the table equals the published lists line by line, is sorted and has no
+          weekend entry; open at 13:30 UTC in summer and 14:30 in winter, early closes at 13:00 and 17:00,
+          boundaries to the nanosecond, the 2 October 2026 opening price (13:30:00.3 UTC) and closing price
+          (20:00:00.1 UTC) in the right sessions; next and previous trading day across holidays. About 47 mutants
+          tried; the survivors found (the two-o'clock boundary on the change days, the first and last year, the
+          2007 start) got tests, and two remain that cannot be reached (`>=` for `>` after the equal case is
+          handled). Not done: MtfBars and the driver still use their fixed offset (E19-S03 moves them over); no
+          exchange other than the NYSE calendar.
         ac:
           - A pure crate (no clock, no I/O, no time-zone database) gives, for a UTC time, the New York date, whether it is a trading day and its session (closed, premarket 04:00 to 09:30, regular 09:30 to 16:00 or to 13:00 on an early close, after-hours to 20:00), and for a date the open and close as UTC nanoseconds
           - Daylight saving follows the US rule (second Sunday of March to first Sunday of November, 02:00 local) and agrees with an independent implementation for every day of 2024 to 2028 and at each transition instant

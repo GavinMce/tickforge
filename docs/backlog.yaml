@@ -2120,3 +2120,72 @@ epics:
         ac:
           - "`tf research run` takes strategy definitions by name and parameters (a registry the strategies add to), a store, a date range and a symbol subset (from the screening pass or a list), builds each day's reference snapshot as it was before that session (the E19-S04 columns up to the previous session), and runs tf_host::research::run into a results directory; `tf research show` prints the configuration and a per-variant summary of a directory and refuses one without its configuration"
           - "Twelve months of trades with quotes for a stated subset of symbols is pulled under a stated cap (about $170 for five symbols at the price paid for one day of two), run through the command, and its time on the development machine stated against the 400.8 s speed test of E19-S13, with T04 (E19-S18) run over a real captured stretch of it and its decision log replayed equal (E19-S18 had only a scripted afternoon); the Section 31 rate for the fiscal year that began on 1 October 2026 is looked up and added to the cost model first"
+      - id: E19-S32
+        jira: TIC-186
+        title: "Strategies record why they acted: a trace hook on cross strategies, with traces for T04 and T14"
+        status: todo
+        deps: [E19-S13, E19-S18, E19-S28]
+        ac:
+          - "A cross strategy can hand back traces (default none) that the host collects beside the decision log; recording changes no decision (a test runs a day traced and untraced and compares the logs, as ADR 0025 does for the entry trace)"
+          - "T04's trace at each decision holds the whole cross-section ranked by return (symbol, prior close, the price at 15:00 and whether it came from Tier 0 or the snapshot, the return, the bid and ask at the decision), the names chosen, and for every name not bought the reason (halted, restricted, no quote, no prior close, no price, under the extreme floor, over the spread cap, no share); T14's trace holds its draw (names, times) and the draws skipped with reasons"
+          - "A trace is deterministic text that reads back exactly and a damaged one is refused"
+      - id: E19-S33
+        jira: TIC-187
+        title: "Persist each day's decision log and traces with the results, and an evidence pass that keeps the market around every trade"
+        status: todo
+        deps: [E19-S32, E19-S13]
+        ac:
+          - "A results directory keeps, beside each day's trips, that day's decision log and traces; a day made without them is made again, and two runs leave byte-identical files"
+          - "An optional evidence pass after a day's run reads the day's files once, sequentially, and writes compressed, for every trip, the trades and quotes of its symbol from a stated time before the decision to a stated time after the exit; a trip with none is named; the events kept equal what the host saw (count and hash)"
+          - "The size of a T04 day's evidence and the time the pass adds are stated on a day of real or scripted data, and the results can be viewed with the store not mounted"
+      - id: E19-S34
+        jira: TIC-188
+        title: "Backtest view: research runs in the run catalog, and the trade table"
+        status: todo
+        deps: [E19-S33, E17-S08, E17-S09]
+        ac:
+          - "The run catalog lists a research scenario (its strategies, days, budget tree and cost model) beside the backtests, paper and live runs, kept apart from them; the workspace's backtests view lists scenarios, then days, then strategies"
+          - "A trade table for a strategy and day: symbol, entry and exit times, side, size, prices, net in basis points and dollars, R where it means something, exit reason; sortable and filterable by symbol, side and result; a count of trades the strategy was refused (gateway, broker) beside it"
+          - "Read-only like the rest of the workspace: no route from a request to an order, a budget change or a file write"
+      - id: E19-S35
+        jira: TIC-189
+        title: "Backtest view: replay one trade"
+        status: todo
+        deps: [E19-S34]
+        ac:
+          - "Opening a trade shows the symbol's price and quote chart around it with a replay cursor (play, step, jump to the next marker) that draws only what has happened by the cursor, with markers for the decision, the order sent, the fill (with its latency), the exit decision and the exit fill"
+          - "Beside it: the order lifecycle (every state with its time and the gateway's or broker's answer), the cost breakdown (gross, Section 31 and Trading Activity fees, borrow, slippage against the reference price, net), and the strategy's own evidence for the decision from its trace (for T04 the ranked cross-section with the names chosen against the next ones, the filters and the names skipped with their reasons)"
+          - "A trade of a strategy with no trace shows everything else and says it has none; the page is checked in a browser and its data embedded as for the existing explorer"
+      - id: E19-S36
+        jira: TIC-190
+        title: "Backtest view: replay a day with every strategy and the budget meters"
+        status: todo
+        deps: [E19-S35]
+        ac:
+          - "A day on one timeline for all the scenario's strategies: decisions, orders, fills and refusals with their reasons appear as the cursor passes them, and a jump goes to the next decision of a chosen strategy"
+          - "For each strategy and group the budget in use, the day's profit and loss and the soft and hard loss limits as meters over the day, from the decision log and the budget tree, and a mark where a limit stopped or flattened a strategy"
+      - id: E19-S37
+        jira: TIC-191
+        title: "Backtest view: a day is verified before it is shown"
+        status: todo
+        deps: [E19-S33]
+        ac:
+          - "Before a day is shown its decision log is replayed through the live check (replay_files) and compared with the stored one; a day that replays equal shows a verified mark"
+          - "A day that does not is refused with the first difference, and the revision of the code it was stored at, as ADR 0027 does for the explorer; the evidence is checked against the hash kept with it"
+      - id: E19-S38
+        jira: TIC-192
+        title: "Dev environment: the workspace and the backtest view deployed on the homelab Kubernetes cluster"
+        status: todo
+        deps: [E19-S34, E17-S09]
+        ac:
+          - "A container image of the workspace service and viewer is built in CI; Kustomize manifests are in the repository; they deploy to one namespace of the homelab cluster (Talos, behind Traefik and cert-manager) with TLS, with results and evidence on a persistent volume or a MinIO bucket"
+          - "The deployment tooling names the cluster and refuses any other kubectl context, and never changes the operator's current context (a work cluster is configured on the same machine)"
+          - "Sign-in as E17-S17 decides it (an identity provider is chosen and recorded before this is exposed beyond the LAN); the service stays read-only; a smoke test opens a stored scenario through the deployed address; a runbook gives deploy, upgrade and rollback"
+      - id: E19-S39
+        jira: TIC-193
+        title: "Standard plan go/no-go: criteria fixed in advance and shown on the dev server"
+        status: todo
+        deps: [E19-S38, E18-S09, E19-S30, E19-S31]
+        ac:
+          - "The criteria for buying the plan are written down before the decision, each with a check that can be run or read from the backlog; candidates: the live adapter, driver and capture (done), finished capture segments shipped to MinIO and verified (E06-S08), the operating runbook with alerts and time sync (E18-S09), the Alpaca asset list checked against the real endpoint (E18-S10), the history pull and verify pipeline tried on a small real pull (E19-S30, E19-S31), the Proxmox storage for history mounted and sized, results viewable on the dev server (E19-S35, E19-S38), and the strategy set with its metrics fixed in advance (E18-S08)"
+          - "A page on the dev server shows each criterion's state from the backlog and the checks, and the whole as go or not yet; it says what the month buys (twelve months of history for the gate, E19-S29, and the live forward sample) and what the history costs outside it (about $416 pay-as-you-go for whole-market minute bars alone against $199 for the plan)"

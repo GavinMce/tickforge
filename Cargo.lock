@@ -450,6 +450,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-live"
+version = "0.1.0"
+dependencies = [
+ "dbn",
+ "tf-core",
+ "tf-databento",
+ "tf-ingest",
+ "tf-provider",
+]
+
+[[package]]
 name = "tf-manifest"
 version = "0.1.0"
 dependencies = [

@@ -359,12 +359,46 @@ epics:
           - Decide whether Tier 0 can afford quotes; resize hot-state estimates
       - id: E06-S02
         jira: TIC-50
-        title: Databento live adapter (official Rust client)
-        status: todo
+        title: Databento live adapter (own synchronous client, no async runtime)
+        status: done
         deps: [E01-S06, E05-S02]
+        evidence: >
+          New crate tf-live (ADR 0049): the gateway's text protocol (greeting, CRAM login as SHA-256 of
+          `challenge|key` with the key's last five characters as the bucket, subscription lines of up to 500
+          symbols with `is_last` only on the final one, `start_session`), a login/subscribe/start session
+          over a plain TcpStream with timeouts, one reader thread that decodes the stream with tf-databento
+          and offers every event to the ingest queue (which never blocks it), and `LiveProvider`
+          behind `Provider`: connect, subscribe (a filter), poll, disconnect, reconnect with a resume time
+          (every subscription is replayed from it) that keeps instrument ids across sessions. Prices are the
+          wire's, to the billionth (an exact-price check). Gateway skip notices become a new `Skipped`
+          gap marker in the ingest queue, in order with the events; heartbeats keep a session alive past the
+          stall time and silence past it is reported as a stalled session; an engine that never reads
+          cannot block the feed (200,000 trades into a queue of 64: all accounted for). SHA-256 is
+          written here (60 lines) and checked against the standard's vectors and every padding boundary.
+          15 tests against a fake gateway written from the official client's behaviour; ~30 mutants of the
+          login line, symbol chunking, resume, stall, filter, names and instrument numbering killed.
+          Against the REAL gateway (examples/probe, no data asked for): its greeting (`lsg_version=0.9.4`)
+          and challenge were read, and the login line was accepted well enough that it answered "A live data
+          license is required to access XNAS.BASIC": so the greeting, challenge and login format are
+          confirmed, and everything after login (subscription lines, the stream, heartbeats, intraday
+          replay) is tested only against the fake until the plan is bought. Narrowed: "same provider
+          conformance tests as the synthetic provider" is met by testing the same contract (not connected
+          before connect, wildcard, subscription filter, idempotent connect, disconnect releases, reconnect)
+          rather than by a shared harness; the official `databento` crate was not used (it brings tokio).
         ac:
-          - Maps trades/top-of-book/status records to canonical events with zero rounding on prices
-          - Passes the same provider conformance tests as the synthetic provider
+          - Maps trades, top-of-book and status records to canonical events with zero rounding on prices
+          - Keeps the contract the synthetic provider keeps (connect, subscribe, poll, reconnect, disconnect)
+          - Logs in to the real gateway as far as the plan allows, and says exactly what was and was not checked
+      - id: E18-S12
+        jira: TIC-153
+        title: "Live day driver: feed, ingest queue, host, capture and decision log wired together"
+        status: todo
+        deps: [E06-S02, E06-S04, E18-S05, E18-S06, E18-S07]
+        ac:
+          - One driver loop runs a day from the open to the close, against a fake gateway and against a capture replayed through the same path
+          - The day's raw capture verifies clean and its replay equals the live decision log
+          - A forced disconnect resumes from the last event time with no loss and no double delivery
+          - The daily report is produced with the driver's own measurements (engine lag, queue counters, capture facts); a gateway that stays down is reported
       - id: E06-S03
         jira: TIC-51
         title: Session management with intraday replay and symbol sharding

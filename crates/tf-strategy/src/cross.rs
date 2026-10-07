@@ -171,6 +171,16 @@ impl<'a> MemberView<'a> {
             .flatten()
     }
 
+    /// What the reference snapshot says about a member: the prior close, average volume and, from one-minute
+    /// history, the previous session's high, low and close, the ATR, the volume baselines and the hourly EMA state
+    /// (`None` for a symbol that is not a member; a column the snapshot lacks reads as unknown in it).
+    pub fn reference(&self, id: InstrumentId) -> Option<&'a RefInfo> {
+        self.members
+            .contains(id)
+            .then(|| self.market.refs.get(id as usize))
+            .flatten()
+    }
+
     /// A live measurement of a member (see [`LiveFeature`]).
     pub fn feature(&self, id: InstrumentId, f: LiveFeature) -> Option<i64> {
         if !self.members.contains(id) {

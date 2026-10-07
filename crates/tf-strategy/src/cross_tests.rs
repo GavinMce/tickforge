@@ -87,7 +87,8 @@ impl World {
             refs: vec![
                 RefInfo {
                     price: Some(10 * D),
-                    adv_shares: Some(1000)
+                    adv_shares: Some(1000),
+                    ..RefInfo::default()
                 };
                 n
             ],
@@ -1040,4 +1041,20 @@ mod shared_bars {
             [(0, false), (1, false), (2, false), (3, false)]
         );
     }
+}
+
+#[test]
+fn a_member_view_gives_the_reference_row_of_members_only() {
+    let mut w = World::new(4);
+    w.refs[1].hist.prev_close = Some(7 * D);
+    w.refs[2].hist.prev_close = Some(9 * D);
+    let members = Members::from_ids([1, 3]);
+    let view = MemberView::new(w.market(), &members);
+    assert_eq!(view.reference(1).unwrap().hist.prev_close, Some(7 * D));
+    assert_eq!(view.reference(3).unwrap().price, Some(10 * D));
+    assert!(
+        view.reference(2).is_none(),
+        "a symbol outside the universe reads as nothing"
+    );
+    assert!(view.reference(99).is_none(), "and one outside the id space");
 }

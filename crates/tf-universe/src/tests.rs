@@ -306,7 +306,8 @@ fn world() -> (Tier0, Vec<RefInfo>) {
     let refs = vec![
         RefInfo {
             price: Some(10 * D),
-            adv_shares: Some(1000)
+            adv_shares: Some(1000),
+            ..RefInfo::default()
         };
         6
     ];
@@ -498,4 +499,179 @@ fn a_dynamic_threshold_can_be_a_param() {
     let mut sel = Selector::new(&s).unwrap();
     sel.update(0, &v, &[0, 1, 2, 3]);
     assert_eq!(sel.members(), [2]);
+}
+
+// ---- history columns (E19-S04) ----
+
+#[test]
+fn a_snapshot_and_a_spec_from_before_the_history_columns_keep_their_fingerprints_and_selection() {
+    // Values taken from the code as it was before the columns were added: nothing about an old snapshot, an old
+    // spec or a selection stored from them may move.
+    let s = spec(SPEC);
+    let n = snap();
+    assert_eq!(s.fingerprint(), 0x83f5_4caf_ea37_8012);
+    assert_eq!(n.fingerprint(), 0xb699_fb4a_a458_d822);
+    assert_eq!(Snapshot::parse(&n.render()).unwrap(), n);
+    let sel = select(&s, &n).unwrap();
+    assert_eq!(
+        sel.render(),
+        "members v1\nas_of 2026-10-02\nspec 83f54cafea378012\nsnapshot b699fb4aa458d822\nparam min_adv = 5000000\nparam min_price = 2.00\ncount 2\nAAA\nGGG\n"
+    );
+    assert_eq!(sel.symbols, ["AAA", "GGG"]);
+    // None of the new columns is present, so none of them is asked for or shown.
+    for f in HISTORY_FEATURES {
+        assert!(!n.columns.contains(&f), "{}", f.name());
+        assert!(!n.render().contains(f.name()));
+    }
+}
+
+const HIST: &str = "# as_of 2026-10-02
+symbol,price,prev_high,prev_low,prev_close,atr14,ema100h_state,ema100h_count,vol_first1,vol_first5,vol_pre,cumvol_0935,cumvol_1000,cumvol_1030,cumvol_1100,cumvol_1200,cumvol_1400,cumvol_1530
+AAA,10.00,10.50,9.25,10.10,0.35,655360000000,140,1200,5400,30000,9000,40000,60000,80000,100000,150000,190000
+BBB,5.00,,,,,,,,,,,,,,,,
+";
+
+#[test]
+fn the_history_columns_read_render_and_stay_unknown_where_the_cell_is_empty() {
+    let s = Snapshot::parse(HIST).unwrap();
+    for f in HISTORY_FEATURES {
+        assert!(s.columns.contains(&f), "{}", f.name());
+    }
+    let a = s.row("AAA").unwrap();
+    // Every column, by name, against the cell it came from.
+    let expected: [i64; 16] = [
+        10_500_000_000,
+        9_250_000_000,
+        10_100_000_000,
+        350_000_000,
+        655_360_000_000,
+        140,
+        1200,
+        5400,
+        30_000,
+        9_000,
+        40_000,
+        60_000,
+        80_000,
+        100_000,
+        150_000,
+        190_000,
+    ];
+    for (f, want) in HISTORY_FEATURES.iter().zip(expected) {
+        assert_eq!(a.num(*f), Some(want), "{}", f.name());
+    }
+    for (i, (f, _)) in CUMVOL_CHECKPOINTS.iter().enumerate() {
+        assert_eq!(a.cumvol[i], Some(expected[9 + i]), "{}", f.name());
+    }
+    let b = s.row("BBB").unwrap();
+    assert_eq!(
+        b.num(StaticFeature::PrevHigh),
+        None,
+        "an empty cell is unknown, not zero"
+    );
+    assert_eq!(b.num(StaticFeature::CumVol1400), None);
+    // Canonical: the same text comes back, and the fingerprint follows the content.
+    assert_eq!(s.render(), HIST);
+    assert_eq!(
+        Snapshot::parse(&s.render()).unwrap().fingerprint(),
+        s.fingerprint()
+    );
+    // The reference row a host holds carries them; the EMA state rounds to a price (655,360,000,000 / 2^16 = 10 million
+    // raw units, ten milliseconds).
+    let info = RefInfo::from_row(a);
+    assert_eq!(info.price, Some(10_000_000_000));
+    assert_eq!(
+        info.hist,
+        HistInfo {
+            prev_high: Some(10_500_000_000),
+            prev_low: Some(9_250_000_000),
+            prev_close: Some(10_100_000_000),
+            atr14: Some(350_000_000),
+            ema100h_state: Some(655_360_000_000),
+            ema100h_count: Some(140),
+            vol_first1: Some(1200),
+            vol_first5: Some(5400),
+            vol_pre: Some(30_000),
+            cumvol: [
+                Some(9_000),
+                Some(40_000),
+                Some(60_000),
+                Some(80_000),
+                Some(100_000),
+                Some(150_000),
+                Some(190_000)
+            ],
+        }
+    );
+    assert_eq!(info.hist.ema100h(), Some(10_000_000));
+    // The state is rounded to the nearest raw unit, half up: 10,000,000 and a half is 10,000,001.
+    let at = |state: i64| HistInfo {
+        ema100h_state: Some(state),
+        ..HistInfo::default()
+    };
+    assert_eq!(at((10_000_000 << 16) + 32_767).ema100h(), Some(10_000_000));
+    assert_eq!(at((10_000_000 << 16) + 32_768).ema100h(), Some(10_000_001));
+    assert_eq!(HistInfo::default().ema100h(), None);
+    assert_eq!(RefInfo::from_row(b).hist, HistInfo::default());
+    // A damaged cell is refused with its column named.
+    let bad = HIST.replacen(",140,", ",x,", 1);
+    assert!(
+        Snapshot::parse(&bad)
+            .unwrap_err()
+            .to_string()
+            .contains("ema100h_count")
+    );
+}
+
+#[test]
+fn a_spec_can_require_columns_it_does_not_filter_on_and_a_snapshot_without_them_is_refused() {
+    let with = spec("universe v1\nrequires prev_high atr14\nstatic price >= 1\n");
+    // Canonical: requires is named in a fixed order, and a repeat changes nothing.
+    assert_eq!(
+        with.render(),
+        "universe v1\nrequires prev_high atr14\nstatic price >= 1.00\n"
+    );
+    assert_eq!(
+        spec("universe v1\nrequires atr14 prev_high atr14\nstatic price >= 1\n").fingerprint(),
+        with.fingerprint()
+    );
+    assert_eq!(Spec::parse(&with.render()).unwrap(), with);
+    assert_ne!(
+        with.fingerprint(),
+        spec("universe v1\nstatic price >= 1\n").fingerprint()
+    );
+    assert!(with.needs().contains(&StaticFeature::Atr14));
+    assert!(with.needs().contains(&StaticFeature::PrevHigh));
+    // The snapshot of before the columns lacks them: it refuses, naming the first.
+    assert_eq!(
+        select(&with, &snap()).unwrap_err(),
+        SelectError::MissingColumn(StaticFeature::PrevHigh)
+    );
+    // One with them, or with only one of them, is judged accordingly.
+    let full = Snapshot::parse(HIST).unwrap();
+    assert_eq!(select(&with, &full).unwrap().symbols, ["AAA", "BBB"]);
+    let mut part = full.clone();
+    part.columns.remove(&StaticFeature::Atr14);
+    assert_eq!(
+        select(&with, &part).unwrap_err(),
+        SelectError::MissingColumn(StaticFeature::Atr14)
+    );
+    // Only requiring does not filter on an unknown value: a symbol with nothing in the column still passes.
+    assert!(
+        select(&with, &full)
+            .unwrap()
+            .symbols
+            .contains(&"BBB".to_owned())
+    );
+    // Bad lines say what is wrong.
+    for (text, want) in [
+        ("universe v1\nrequires nonsense\n", "not a column"),
+        (
+            "universe v1\nrequires atr14\nrequires prev_low\n",
+            "only one `requires`",
+        ),
+    ] {
+        let e = Spec::parse(text).unwrap_err().to_string();
+        assert!(e.contains(want), "{text}: {e}");
+    }
 }

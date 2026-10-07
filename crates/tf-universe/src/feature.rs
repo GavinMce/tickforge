@@ -36,9 +36,34 @@ pub enum StaticFeature {
     Float,
     /// Shares sold short. Same story as `Float`.
     ShortInterest,
+    // ---- from one-minute history (E19-S04), regular session 09:30 to 16:00 unless it says otherwise ----
+    /// The previous regular session's high, low and close.
+    PrevHigh,
+    PrevLow,
+    PrevClose,
+    /// Average true range over 14 sessions, in price units (the mean of 14 true ranges, each against the
+    /// session before it).
+    Atr14,
+    /// The state of an EMA(100) over regular-session hourly closes: the average in raw price units shifted left 16
+    /// bits (its exact state between samples), and how many closes it has seen.
+    Ema100hState,
+    Ema100hCount,
+    /// Average volume of the first minute and of the first five minutes of the regular session, and of the
+    /// premarket (04:00 to 09:30), over the last sessions.
+    VolFirst1,
+    VolFirst5,
+    VolPremarket,
+    /// Average cumulative regular-session volume up to 09:35, 10:00, 10:30, 11:00, 12:00, 14:00 and 15:30.
+    CumVol0935,
+    CumVol1000,
+    CumVol1030,
+    CumVol1100,
+    CumVol1200,
+    CumVol1400,
+    CumVol1530,
 }
 
-pub const STATIC_FEATURES: [(StaticFeature, &str, Kind); 11] = [
+pub const STATIC_FEATURES: [(StaticFeature, &str, Kind); 27] = [
     (StaticFeature::Price, "price", Kind::Price),
     (StaticFeature::AdvDollar, "adv_dollar", Kind::Int),
     (StaticFeature::AdvShares, "adv_shares", Kind::Int),
@@ -50,6 +75,54 @@ pub const STATIC_FEATURES: [(StaticFeature, &str, Kind); 11] = [
     (StaticFeature::Tradable, "tradable", Kind::Flag),
     (StaticFeature::Float, "float", Kind::Int),
     (StaticFeature::ShortInterest, "short_interest", Kind::Int),
+    (StaticFeature::PrevHigh, "prev_high", Kind::Price),
+    (StaticFeature::PrevLow, "prev_low", Kind::Price),
+    (StaticFeature::PrevClose, "prev_close", Kind::Price),
+    (StaticFeature::Atr14, "atr14", Kind::Price),
+    (StaticFeature::Ema100hState, "ema100h_state", Kind::Int),
+    (StaticFeature::Ema100hCount, "ema100h_count", Kind::Int),
+    (StaticFeature::VolFirst1, "vol_first1", Kind::Int),
+    (StaticFeature::VolFirst5, "vol_first5", Kind::Int),
+    (StaticFeature::VolPremarket, "vol_pre", Kind::Int),
+    (StaticFeature::CumVol0935, "cumvol_0935", Kind::Int),
+    (StaticFeature::CumVol1000, "cumvol_1000", Kind::Int),
+    (StaticFeature::CumVol1030, "cumvol_1030", Kind::Int),
+    (StaticFeature::CumVol1100, "cumvol_1100", Kind::Int),
+    (StaticFeature::CumVol1200, "cumvol_1200", Kind::Int),
+    (StaticFeature::CumVol1400, "cumvol_1400", Kind::Int),
+    (StaticFeature::CumVol1530, "cumvol_1530", Kind::Int),
+];
+
+/// The cumulative-volume columns and how many minutes after the 09:30 open each one counts to (a bar belongs to a
+/// checkpoint when it starts before it).
+pub const CUMVOL_CHECKPOINTS: [(StaticFeature, u32); 7] = [
+    (StaticFeature::CumVol0935, 5),
+    (StaticFeature::CumVol1000, 30),
+    (StaticFeature::CumVol1030, 60),
+    (StaticFeature::CumVol1100, 90),
+    (StaticFeature::CumVol1200, 150),
+    (StaticFeature::CumVol1400, 270),
+    (StaticFeature::CumVol1530, 360),
+];
+
+/// The columns that come from one-minute history (E19-S04), in table order.
+pub const HISTORY_FEATURES: [StaticFeature; 16] = [
+    StaticFeature::PrevHigh,
+    StaticFeature::PrevLow,
+    StaticFeature::PrevClose,
+    StaticFeature::Atr14,
+    StaticFeature::Ema100hState,
+    StaticFeature::Ema100hCount,
+    StaticFeature::VolFirst1,
+    StaticFeature::VolFirst5,
+    StaticFeature::VolPremarket,
+    StaticFeature::CumVol0935,
+    StaticFeature::CumVol1000,
+    StaticFeature::CumVol1030,
+    StaticFeature::CumVol1100,
+    StaticFeature::CumVol1200,
+    StaticFeature::CumVol1400,
+    StaticFeature::CumVol1530,
 ];
 
 impl StaticFeature {

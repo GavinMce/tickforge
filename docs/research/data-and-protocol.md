@@ -44,6 +44,16 @@ Options, for later (7): pay-as-you-go prices measured the same way for 1 October
 day: 124 M records, $81. A study over many names and months must use whatever history the OPRA subscription includes;
 that is not known yet.
 
+**The feed's highs and lows carry off-market prints (measured 7 October 2026, E19-S04, ADR 0055).** XNAS.BASIC's
+one-minute and daily bars take every trade it holds, whatever its sale condition. For AAPL, NVDA, TSLA, F and SPY over 66
+sessions (330 symbol-sessions), the regular-session high differs from the consolidated daily bar's (EQUS.SUMMARY) by more
+than 1% in 27% of them and the low in 46%, by up to 13.7% (AAPL, 1 October: 263.88 low in the feed, 325.81 consolidated).
+The minutes concerned have a normal open and close and large volume: one report far from the market. Any rule that reads a
+high, a low, a range or an ATR from this feed's bars (levels, sweeps, stop distances) is exposed; the snapshot's history
+columns cap each minute's wick at 0.5% of its body, which brings the error to a median of 0.00% and a 90th percentile of
+0.2%, and the raw numbers are kept apart. Prices of closes and volumes are not affected the same way. The real remedy is the
+trade flags of E19-S08; the live Tier 0 and session features (ADR 0053) carry these prints uncapped.
+
 ## 2. What one live month can tell us, and what it cannot
 
 A month holds about 21 trading days. For a strategy making one trade a day per name on a basket of 20 names, about 420

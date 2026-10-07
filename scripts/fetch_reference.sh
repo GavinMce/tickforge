@@ -3,6 +3,7 @@
 # Alpaca's asset list. The only place in the project that touches the network for reference data.
 #
 #   scripts/fetch_reference.sh OUTDIR START END      # END is exclusive, YYYY-MM-DD
+#   SYMBOLS=AAPL,NVDA scripts/fetch_reference.sh ... # a few symbols instead of the whole market
 #
 # Databento key: $DATABENTO_API_KEY or ~/.config/tickforge/databento.key.
 # Alpaca (optional): $APCA_API_KEY_ID and $APCA_API_SECRET_KEY, and $APCA_API_BASE_URL
@@ -15,16 +16,17 @@ start=${2:?start date}
 end=${3:?end date}
 key=${DATABENTO_API_KEY:-$(cat "$HOME/.config/tickforge/databento.key")}
 host=https://hist.databento.com/v0
+symbols=${SYMBOLS:-ALL_SYMBOLS}
 mkdir -p "$out"
 
 cost=$(curl -fsS -u "$key:" "$host/metadata.get_cost" -d dataset=EQUS.SUMMARY -d schema=ohlcv-1d \
-  -d symbols=ALL_SYMBOLS -d stype_in=raw_symbol -d start="$start" -d end="$end")
+  -d symbols="$symbols" -d stype_in=raw_symbol -d start="$start" -d end="$end")
 echo "Databento cost for the bars: \$$cost"
 
 curl -fsS -u "$key:" "$host/timeseries.get_range" -d dataset=EQUS.SUMMARY -d schema=ohlcv-1d \
-  -d symbols=ALL_SYMBOLS -d stype_in=raw_symbol -d start="$start" -d end="$end" -d encoding=csv \
+  -d symbols="$symbols" -d stype_in=raw_symbol -d start="$start" -d end="$end" -d encoding=csv \
   -o "$out/bars.csv"
-curl -fsS -u "$key:" "$host/symbology.resolve" -d dataset=EQUS.SUMMARY -d symbols=ALL_SYMBOLS \
+curl -fsS -u "$key:" "$host/symbology.resolve" -d dataset=EQUS.SUMMARY -d symbols="$symbols" \
   -d stype_in=raw_symbol -d stype_out=instrument_id -d start_date="$start" -d end_date="$end" \
   -o "$out/symbology.json"
 echo "bars: $(($(wc -l <"$out/bars.csv") - 1)) rows; symbology: $(wc -c <"$out/symbology.json") bytes"

@@ -18,6 +18,58 @@ pub struct RefInfo {
     /// Prior close, raw.
     pub price: Option<i64>,
     pub adv_shares: Option<i64>,
+    /// What one-minute history says (E19-S04); unknown where the snapshot has no value.
+    pub hist: HistInfo,
+}
+
+/// The history-derived columns of a snapshot row, for a strategy to read through its member view. Prices are raw
+/// (1e-9 dollars), volumes are shares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistInfo {
+    pub prev_high: Option<i64>,
+    pub prev_low: Option<i64>,
+    pub prev_close: Option<i64>,
+    /// Average true range over 14 sessions, in price units.
+    pub atr14: Option<i64>,
+    /// The state of the EMA(100) over regular-session hourly closes: shifted left 16 bits, and the closes seen.
+    pub ema100h_state: Option<i64>,
+    pub ema100h_count: Option<i64>,
+    pub vol_first1: Option<i64>,
+    pub vol_first5: Option<i64>,
+    pub vol_pre: Option<i64>,
+    /// Average cumulative volume at 09:35, 10:00, 10:30, 11:00, 12:00, 14:00 and 15:30
+    /// ([`crate::CUMVOL_CHECKPOINTS`] order).
+    pub cumvol: [Option<i64>; 7],
+}
+
+impl HistInfo {
+    /// The EMA(100) value the state gives, in raw price units.
+    pub fn ema100h(&self) -> Option<i64> {
+        let s = self.ema100h_state?;
+        Some((s + (1 << 15)).div_euclid(1 << 16))
+    }
+}
+
+impl RefInfo {
+    /// What a snapshot row says, for the host to hold by instrument id.
+    pub fn from_row(row: &crate::RefRow) -> RefInfo {
+        RefInfo {
+            price: row.price,
+            adv_shares: row.adv_shares,
+            hist: HistInfo {
+                prev_high: row.prev_high,
+                prev_low: row.prev_low,
+                prev_close: row.prev_close,
+                atr14: row.atr14,
+                ema100h_state: row.ema100h_state,
+                ema100h_count: row.ema100h_count,
+                vol_first1: row.vol_first1,
+                vol_first5: row.vol_first5,
+                vol_pre: row.vol_pre,
+                cumvol: row.cumvol,
+            },
+        }
+    }
 }
 
 /// Measurements read from the engine's Tier 0 state.

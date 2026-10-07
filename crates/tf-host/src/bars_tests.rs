@@ -293,3 +293,117 @@ fn a_strategy_stopped_by_its_soft_loss_limit_gives_up_its_bars() {
         "the step that stopped it for the soft limit also released them"
     );
 }
+
+// ---- history columns (E19-S04) ----
+
+/// What the reference snapshot said of each member: instrument, previous close, first-minute baseline, EMA value.
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(u32, Option<i64>, Option<i64>, Option<i64>)>>>;
+
+/// Remembers the previous close and the first-minute baseline the snapshot gave each of its members.
+struct Reader {
+    seen: Seen,
+}
+
+impl CrossStrategy for Reader {
+    fn id(&self) -> StrategyId {
+        StrategyId(1)
+    }
+    fn period(&self) -> Nanos {
+        SEC
+    }
+    fn on_review(&mut self, _: &mut Ctx<'_>, view: &MemberView<'_>) {
+        let mut seen = self.seen.lock().unwrap();
+        if seen.is_empty() {
+            for id in view.ids() {
+                let r = view.reference(id).expect("a member has a reference row");
+                seen.push((id, r.hist.prev_close, r.hist.vol_first1, r.hist.ema100h()));
+            }
+        }
+    }
+}
+
+fn reading(universe: &str) -> (StrategyDef, Seen) {
+    let seen: Seen = Seen::default();
+    let shared = seen.clone();
+    let def = StrategyDef {
+        id: 1,
+        name: "reader".into(),
+        params: String::new(),
+        universe: tf_universe::Spec::parse(universe).unwrap(),
+        priority: 1,
+        route: Route::Sim,
+        build: Box::new(move || {
+            runner(Reader {
+                seen: shared.clone(),
+            })
+        }),
+    };
+    (def, seen)
+}
+
+fn with_history() -> crate::Reference {
+    let mut text = String::from(
+        "# as_of 2026-10-02\nsymbol,price,adv_shares,prev_close,ema100h_state,vol_first1\n",
+    );
+    for i in 0..SYMBOLS {
+        // Every other symbol has history; the rest have an empty cell.
+        if i % 2 == 0 {
+            text.push_str(&format!(
+                "S{i:02},20.00,{},19.50,{},{}\n",
+                (i + 1) * 100,
+                21_000_000_000i64 << 16,
+                1000 + i
+            ));
+        } else {
+            text.push_str(&format!("S{i:02},20.00,{},,,\n", (i + 1) * 100));
+        }
+    }
+    crate::Reference {
+        symbols: names(),
+        snapshot: tf_universe::Snapshot::parse(&text).unwrap(),
+    }
+}
+
+#[test]
+fn a_strategy_that_requires_a_history_column_is_refused_without_it_and_reads_it_with_it() {
+    let cfg = config(1);
+    let tape = market(5, flat);
+    let uni = "universe v1\nrequires prev_close vol_first1 ema100h_state\n";
+    // The ordinary snapshot has no such columns: the strategy is refused, whoever certified it.
+    let (def, _) = reading(uni);
+    let e = certify(&def, &cfg, &reference(), &tape, 7).unwrap_err();
+    assert!(
+        matches!(&e, crate::CertifyError::Admit(crate::AdmitError::Universe(m)) if m.contains("prev_close")),
+        "{e:?}"
+    );
+    // With the columns it runs, and sees what the snapshot says about each member, unknown where it is empty.
+    let (def, seen) = reading(uni);
+    let mut h =
+        crate::Host::new(cfg.clone(), with_history(), MemStore::from_records(vec![])).unwrap();
+    let cert = certify(&def, &cfg, &with_history(), &tape, 7).unwrap();
+    h.add_strategy(&def, &cert).unwrap();
+    for e in &tape {
+        h.on_event(e).unwrap();
+    }
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), SYMBOLS as usize);
+    for (id, prev, first1, ema) in seen {
+        if id % 2 == 0 {
+            assert_eq!(
+                (prev, first1, ema),
+                (
+                    Some(19_500_000_000),
+                    Some(1000 + i64::from(id)),
+                    Some(21_000_000_000)
+                ),
+                "S{id:02}"
+            );
+        } else {
+            assert_eq!(
+                (prev, first1, ema),
+                (None, None, None),
+                "an empty cell is unknown"
+            );
+        }
+    }
+}

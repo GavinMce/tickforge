@@ -81,7 +81,8 @@ fn main() {
     let refs = vec![
         RefInfo {
             price: Some(50_000_000_000),
-            adv_shares: Some(1_000_000)
+            adv_shares: Some(1_000_000),
+            ..RefInfo::default()
         };
         n as usize
     ];

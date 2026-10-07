@@ -27,8 +27,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tf_core::{Event, InstrumentId, Nanos};
 use tf_engine::{
-    BarClose, MtfBars, Promoter, RollingBars, SymbolBars, SymbolState, TfBar, Tier0, Tier1Symbol,
-    Timeframe, TrackError,
+    BarClose, BarsGrant, BarsRefused, MtfBars, Promoter, RollingBars, SharedBars, SymbolBars,
+    SymbolState, TfBar, Tier0, Tier1Symbol, Timeframe, TrackError,
 };
 use tf_params::ParamStore;
 
@@ -106,10 +106,20 @@ pub struct Ctx<'a> {
     out: &'a mut Vec<Intent>,
     invalid: &'a mut u64,
     timers: &'a mut Timers,
-    bars: &'a mut Option<MtfBars>,
+    bars: BarsAccess<'a>,
     params: &'a Option<ParamStore>,
     promoter: Option<&'a mut Promoter>,
     tier_out: &'a mut Vec<tf_core::TierChange>,
+}
+
+/// Where a context gets its multi-timeframe bars: a host's own aggregator (one strategy, its own symbols), or
+/// the engine's shared one, in which the strategy's requests are claims counted against its number.
+enum BarsAccess<'a> {
+    Own(&'a mut Option<MtfBars>),
+    Shared {
+        owner: u16,
+        bars: Option<&'a mut SharedBars>,
+    },
 }
 
 /// Why a request about multi-timeframe bars failed.
@@ -121,14 +131,15 @@ pub enum BarsError {
 }
 
 impl<'a> Ctx<'a> {
-    /// A context for a strategy that has no bars, parameters or promoter of its own (the
-    /// cross-sectional runner, which shares the engine's Tier 0).
+    /// A context for a strategy that has no parameters, promoter or bars of its own (the
+    /// cross-sectional runner, which shares the engine's Tier 0, Tier 1 and bars).
     pub(crate) fn shared(
         now: Nanos,
         strategy: StrategyId,
         tier0: &'a Tier0,
         state: &'a mut CtxState,
         promoter: Option<&'a mut Promoter>,
+        bars: Option<&'a mut SharedBars>,
     ) -> Ctx<'a> {
         Ctx {
             now,
@@ -138,7 +149,10 @@ impl<'a> Ctx<'a> {
             out: &mut state.out,
             invalid: &mut state.invalid,
             timers: &mut state.timers,
-            bars: &mut state.bars,
+            bars: BarsAccess::Shared {
+                owner: strategy.0,
+                bars,
+            },
             params: &state.params,
             promoter,
             tier_out: &mut state.tier_out,
@@ -153,7 +167,6 @@ pub(crate) struct CtxState {
     pub(crate) out: Vec<Intent>,
     pub(crate) invalid: u64,
     pub(crate) timers: Timers,
-    bars: Option<MtfBars>,
     params: Option<ParamStore>,
     /// Tier changes the strategy's requests caused, for the host to put on the tape.
     pub(crate) tier_out: Vec<tf_core::TierChange>,
@@ -244,24 +257,48 @@ impl Ctx<'_> {
     }
 
     /// Bars on 1m, 5m, 15m, 1h and day timeframes for a tracked instrument. `None`
-    /// if the host has no aggregator or the instrument is not tracked.
+    /// if there is no aggregator or the instrument is not tracked (for a strategy on the engine's
+    /// shared bars: not tracked *for this strategy*, so what it sees does not depend on which others run).
     pub fn bars(&self, id: InstrumentId) -> Option<&SymbolBars> {
-        self.bars.as_ref()?.symbol(id)
+        match &self.bars {
+            BarsAccess::Own(b) => b.as_ref()?.symbol(id),
+            BarsAccess::Shared { owner, bars } => bars.as_deref()?.symbol(*owner, id),
+        }
     }
 
     /// Start building multi-timeframe bars for `id`. Bars begin with the next trade;
-    /// nothing is back-filled. The tracked set is bounded by the aggregator.
+    /// nothing is back-filled. The tracked set is bounded by the aggregator. On the engine's shared
+    /// bars this is a claim counted for this strategy: `AlreadyTracked` if it already had one, `Full`
+    /// when the bound is reached (also counted and exported), and a symbol another strategy already
+    /// tracks is always granted.
     pub fn track_bars(&mut self, id: InstrumentId) -> Result<(), BarsError> {
-        self.bars
-            .as_mut()
-            .ok_or(BarsError::NotConfigured)?
-            .track(id)
-            .map_err(BarsError::Track)
+        match &mut self.bars {
+            BarsAccess::Own(b) => b
+                .as_mut()
+                .ok_or(BarsError::NotConfigured)?
+                .track(id)
+                .map_err(BarsError::Track),
+            BarsAccess::Shared { owner, bars } => {
+                let bars = bars.as_deref_mut().ok_or(BarsError::NotConfigured)?;
+                match bars.claim(*owner, id) {
+                    Ok(BarsGrant::Started | BarsGrant::Joined) => Ok(()),
+                    Ok(BarsGrant::Already) => Err(BarsError::Track(TrackError::AlreadyTracked)),
+                    Err(BarsRefused::Full) => Err(BarsError::Track(TrackError::Full)),
+                    Err(BarsRefused::Unknown) => Err(BarsError::Track(TrackError::Unknown)),
+                }
+            }
+        }
     }
 
-    /// Stop building bars for `id` and drop them. True if it was tracked.
+    /// Stop building bars for `id` and drop them (on the shared bars: give up this strategy's claim; the
+    /// bars go with the last one). True if it was tracked.
     pub fn untrack_bars(&mut self, id: InstrumentId) -> bool {
-        self.bars.as_mut().is_some_and(|b| b.untrack(id))
+        match &mut self.bars {
+            BarsAccess::Own(b) => b.as_mut().is_some_and(|b| b.untrack(id)),
+            BarsAccess::Shared { owner, bars } => {
+                bars.as_deref_mut().is_some_and(|b| b.release(*owner, id))
+            }
+        }
     }
 
     /// Submit an intent. It is validated here: a malformed one is refused with
@@ -437,7 +474,7 @@ impl<S: Strategy> Host<S> {
             out: &mut self.out,
             invalid: &mut self.invalid,
             timers: &mut self.timers,
-            bars: &mut self.bars,
+            bars: BarsAccess::Own(&mut self.bars),
             params: &self.params,
             promoter: self.promoter.as_mut(),
             tier_out: &mut self.tier_events,

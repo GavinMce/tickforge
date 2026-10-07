@@ -1,18 +1,37 @@
 //! A strategy runner without its type, so a host can hold twenty different strategies in one list.
 
 use tf_core::{Event, InstrumentId, Nanos, TierChange};
-use tf_engine::{Promoter, Tier0};
+use tf_engine::{Promoter, SharedBars, Tier0};
 use tf_strategy::lifecycle::OrderUpdate;
 use tf_strategy::{CrossRunner, CrossStrategy, Intent, Market, Members};
 
 pub trait DynRunner: Send {
-    fn on_event(&mut self, market: Market<'_>, promoter: Option<&mut Promoter>, ev: &Event);
-    fn advance_to(&mut self, market: Market<'_>, promoter: Option<&mut Promoter>, ts: Nanos);
-    fn on_order_update(&mut self, tier0: &Tier0, promoter: Option<&mut Promoter>, u: &OrderUpdate);
+    fn on_event(
+        &mut self,
+        market: Market<'_>,
+        promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
+        ev: &Event,
+    );
+    fn advance_to(
+        &mut self,
+        market: Market<'_>,
+        promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
+        ts: Nanos,
+    );
+    fn on_order_update(
+        &mut self,
+        tier0: &Tier0,
+        promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
+        u: &OrderUpdate,
+    );
     fn on_tier1_revoked(
         &mut self,
         market: Market<'_>,
         promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
         id: InstrumentId,
     );
     fn drain_intents(&mut self) -> Vec<Intent>;
@@ -24,25 +43,44 @@ pub trait DynRunner: Send {
 }
 
 impl<S: CrossStrategy> DynRunner for CrossRunner<S> {
-    fn on_event(&mut self, market: Market<'_>, promoter: Option<&mut Promoter>, ev: &Event) {
-        CrossRunner::on_event(self, market, promoter, ev);
+    fn on_event(
+        &mut self,
+        market: Market<'_>,
+        promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
+        ev: &Event,
+    ) {
+        CrossRunner::on_event(self, market, promoter, bars, ev);
     }
 
-    fn advance_to(&mut self, market: Market<'_>, promoter: Option<&mut Promoter>, ts: Nanos) {
-        CrossRunner::advance_to(self, market, promoter, ts);
+    fn advance_to(
+        &mut self,
+        market: Market<'_>,
+        promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
+        ts: Nanos,
+    ) {
+        CrossRunner::advance_to(self, market, promoter, bars, ts);
     }
 
-    fn on_order_update(&mut self, tier0: &Tier0, promoter: Option<&mut Promoter>, u: &OrderUpdate) {
-        CrossRunner::on_order_update(self, tier0, promoter, u);
+    fn on_order_update(
+        &mut self,
+        tier0: &Tier0,
+        promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
+        u: &OrderUpdate,
+    ) {
+        CrossRunner::on_order_update(self, tier0, promoter, bars, u);
     }
 
     fn on_tier1_revoked(
         &mut self,
         market: Market<'_>,
         promoter: Option<&mut Promoter>,
+        bars: Option<&mut SharedBars>,
         id: InstrumentId,
     ) {
-        CrossRunner::on_tier1_revoked(self, market, promoter, id);
+        CrossRunner::on_tier1_revoked(self, market, promoter, bars, id);
     }
 
     fn drain_intents(&mut self) -> Vec<Intent> {

@@ -1586,7 +1586,31 @@ epics:
       - id: E19-S03
         jira: TIC-157
         title: Shared bars and indicator functions for cross-sectional strategies
-        status: todo
+        status: done
+        evidence: >
+          tf_engine::SharedBars (claims per strategy and symbol, bounded, refusals returned to the strategy and
+          counted per strategy, a stopped strategy's claims dropped by the host: panic, soft and hard loss limit,
+          kill), read through the strategy's own claim only; Ctx::bars / track_bars / untrack_bars work for cross
+          strategies (the host lends the shared bars to each runner), HostConfig::bars (part of a run: a
+          replay host without it decides differently, tested); MtfConfig::alignment, Session beside Clock: hourly bars
+          from the start of each session with a truncated last bar (09:30 ... 15:30 to 16:00; early close 12:30 to
+          13:00), the day bar the trading day 04:00 to 20:00 from the calendar, correct on both sides of each
+          daylight-saving change, trades outside every session counted not placed; MtfBars visits symbols only when
+          a bar is due (outputs unchanged: 80 random streams and the pinned digest); tf_engine::bar_fns (ema, rsi, atr,
+          vwap over closed bars, equal to the streaming indicators on 80 random series and on a real day). Real day
+          (examples/real_bars check, 2 October 2026, 25 symbols, 2.04 million trades): 12,715 one-minute bars equal
+          Databento's ohlcv-1m on all five fields, 300 hourly bars on their session grid, 850 indicator comparisons
+          agree. 2,000 busiest symbols over the real opening five minutes (examples/real_bars load, 2.43 million
+          trades): the bars add about 37 ns an event, worst single event 0.26 ms (the once-a-minute pass), busiest
+          second 18 ms, 48,576 bytes a symbol, 97 MB; no documented lag budget exists yet (E07-S07), compared in ADR
+          0054 with the design's 50 to 300 ms. Mutation run on the new code (mtf.rs 23, shared_bars.rs 12, bar_fns.rs 7, the host's wiring 5, Ctx 4: 51
+          mutants): 8 survived at first, six tests were added (the day cache's lower bound, an unplaced trade closing
+          what is due, the repeat count, owner order, the metric names, one-share VWAP) and all are killed except two
+          that cannot be observed (the earliest-due bookkeeping takes a minimum or an overwrite: with time not going
+          backwards every forming one-minute bar ends in the same second). Narrowed: closed bars are not delivered to cross strategies (they read them
+          at a review); a strategy joining a tracked symbol sees the earlier bars; pure functions see the last 120 bars
+          of a timeframe; gap filling is clock alignment only; Host::start_day and the host's advance_to still have
+          no caller (noted in ADR 0054 for E18-S09).
         deps: [E19-S01]
         ac:
           - The engine owns one MtfBars for the union of the symbols that strategies ask it to track; a request is counted per strategy, so one strategy letting go does not stop another's bars; the tracked set is bounded and a refusal is reported, not silent

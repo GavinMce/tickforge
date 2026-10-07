@@ -276,14 +276,7 @@ fn filler_bars_and_out_of_range_prices_never_reach_the_indicators() {
     .map(|&(sec, c)| crate::strategy_tests::trade_for_tests(0, t0 + sec * SEC, c, 100))
     .collect();
     let strat = TrendLong::new(StrategyId(2), TrendParams::default(), 1).unwrap();
-    let mut host = Host::new(strat, 1).with_bars(MtfBars::new(
-        MtfConfig {
-            day_open_offset_secs: 0,
-            fill_gaps: true,
-        },
-        1,
-        1,
-    ));
+    let mut host = Host::new(strat, 1).with_bars(MtfBars::new(MtfConfig::clock(0, true), 1, 1));
     for t in &trades {
         host.on_event(t);
     }

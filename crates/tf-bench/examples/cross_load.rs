@@ -115,7 +115,7 @@ fn main() {
             refs: &refs,
         };
         for r in &mut runners {
-            r.on_event(m, None, ev);
+            r.on_event(m, None, None, ev);
         }
     }
     let with = t.elapsed().as_secs_f64();

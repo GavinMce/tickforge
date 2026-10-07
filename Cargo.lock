@@ -467,6 +467,7 @@ dependencies = [
  "tf-ledger",
  "tf-provider",
  "tf-risk",
+ "tf-stats",
  "tf-strategy",
  "tf-synth",
  "tf-universe",
@@ -577,6 +578,10 @@ version = "0.1.0"
 dependencies = [
  "tf-core",
 ]
+
+[[package]]
+name = "tf-stats"
+version = "0.1.0"
 
 [[package]]
 name = "tf-strategy"

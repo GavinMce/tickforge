@@ -30,6 +30,7 @@ use tf_calendar::{Calendar, Date, SessionTimes};
 use tf_capture::CaptureReplay;
 use tf_core::{Event, Nanos};
 use tf_provider::{Poll, Provider};
+use tf_stats::StatsError;
 use tf_universe::Snapshot;
 
 use super::cost::{CostError, CostModel, is_date};
@@ -58,6 +59,8 @@ pub enum ResearchError {
         why: String,
     },
     Host(HostError),
+    /// Statistics were refused: a variant not in the trial registry, days that do not fit, a damaged registry.
+    Stats(StatsError),
 }
 
 impl std::fmt::Display for ResearchError {
@@ -69,11 +72,18 @@ impl std::fmt::Display for ResearchError {
             ResearchError::Cost(e) => write!(f, "{e}"),
             ResearchError::Day { date, why } => write!(f, "{date}: {why}"),
             ResearchError::Host(e) => write!(f, "{e}"),
+            ResearchError::Stats(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl std::error::Error for ResearchError {}
+
+impl From<StatsError> for ResearchError {
+    fn from(e: StatsError) -> Self {
+        ResearchError::Stats(e)
+    }
+}
 
 impl From<CostError> for ResearchError {
     fn from(e: CostError) -> Self {
@@ -283,6 +293,29 @@ impl Results {
     /// The cost model the results were made under.
     pub fn cost(&self) -> &CostModel {
         &self.cost
+    }
+
+    /// The strategies the run was made with, as the stored configuration lists them: the fingerprint and the name of each,
+    /// in the order given. A strategy that made no trade is here too.
+    pub fn definitions(&self) -> Result<Vec<(u64, String)>, ResearchError> {
+        let path = self.dir.join(CONFIG_FILE);
+        let text = fs::read_to_string(&path).map_err(|e| io(&path, e))?;
+        let bad = |l: &str| {
+            ResearchError::Config(format!(
+                "{CONFIG_FILE}: a strategy line that does not read: `{l}`"
+            ))
+        };
+        text.lines()
+            .filter(|l| l.starts_with("def\t"))
+            .map(|l| {
+                let w: Vec<&str> = l.split('\t').collect();
+                let (Some(fp), Some(name)) = (w.get(2), w.get(3)) else {
+                    return Err(bad(l));
+                };
+                let fp = u64::from_str_radix(fp, 16).map_err(|_| bad(l))?;
+                Ok((fp, (*name).to_owned()))
+            })
+            .collect()
     }
 
     pub fn fingerprint(&self) -> u64 {

@@ -1641,3 +1641,140 @@ fn every_execution_is_noted_with_the_intent_it_belongs_to() {
         assert!(n.qty == 100 && n.px > 0 && n.ts > 0 && n.reference > 0);
     }
 }
+
+// ---- statistics over a results directory (E19-S14) ----
+
+fn boot() -> tf_stats::Bootstrap {
+    tf_stats::Bootstrap {
+        replicates: 200,
+        block: Some(1),
+        seed: 9,
+    }
+}
+
+#[test]
+fn a_run_is_reported_variant_by_variant_once_its_strategies_are_in_the_registry() {
+    use super::stats::{register_defs, report_results};
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("st-days", 3);
+    let dir = out_dir("st-out");
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    let results = Results::open(&dir).unwrap();
+    // The stored configuration lists the strategies by fingerprint and name.
+    let listed: Vec<(u64, String)> = defs
+        .iter()
+        .map(|d| (d.fingerprint(), d.name.clone()))
+        .collect();
+    assert_eq!(results.definitions().unwrap(), listed);
+    // Not in the registry: no report, and the error says which.
+    let mut reg = tf_stats::Registry::new();
+    let e = report_results(&results, &reg, boot())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(e.contains("round1") && e.contains("trial registry"), "{e}");
+    // Entered before the run: both are new; entered again, none is, and the first date stays.
+    assert_eq!(register_defs(&mut reg, &defs, "2026-10-07").unwrap(), 2);
+    assert_eq!(register_defs(&mut reg, &defs, "2026-10-08").unwrap(), 0);
+    assert_eq!(reg.get(listed[0].0).unwrap().first_run, "2026-10-07");
+    assert!(register_defs(&mut reg, &defs, "yesterday").is_err());
+    let rep = report_results(&results, &reg, boot()).unwrap();
+    assert_eq!(rep.len(), 2);
+    for (s, (fp, name)) in rep.iter().zip(&listed) {
+        assert_eq!((s.fingerprint, &s.name), (*fp, name));
+        assert_eq!((s.trades, s.days, s.trials), (3, 3, 2));
+        // Each day's trade is the same: -2 dollars and fees on 2,001 a share, in hundredths of a basis point -1029.
+        assert!((s.bp.mean.unwrap() + 10.29).abs() < 1e-12);
+        assert!((s.r.mean.unwrap() + 0.002).abs() < 1e-12);
+        assert_eq!((s.hit_rate, s.payoff), (Some(0.0), None));
+        assert!((s.max_drawdown_bp - 30.87).abs() < 1e-9);
+        // A result that cannot vary from day to day has an error of nothing, and so no t-statistic.
+        let b = s.bp.boot.unwrap();
+        assert_eq!((b.se, b.t), (0.0, None));
+    }
+}
+
+#[test]
+fn a_strategy_that_made_no_trade_is_still_a_variant_of_the_run() {
+    use super::stats::{register_defs, report_results};
+    let (host, cost) = (config(3), CostModel::published());
+    let mut defs = defs();
+    defs.push(round_trip(3, LOW, 1_000, 1_001));
+    let mut days = Days::new("idle-days", 2);
+    let dir = out_dir("idle-out");
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    let results = Results::open(&dir).unwrap();
+    let mut reg = tf_stats::Registry::new();
+    register_defs(&mut reg, &defs, "2026-10-07").unwrap();
+    assert_eq!(reg.len(), 3);
+    let rep = report_results(&results, &reg, boot()).unwrap();
+    assert_eq!(rep.len(), 3);
+    assert_eq!((rep[2].trades, rep[2].bp.mean), (0, None));
+    assert_eq!((rep[0].trades, rep[1].trades), (2, 2));
+}
+
+#[test]
+fn a_refinement_of_a_run_is_compared_with_its_plain_version_by_fingerprint() {
+    use super::stats::{paired_results, register_defs};
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("pair-days", 3);
+    let dir = out_dir("pair-out");
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    let results = Results::open(&dir).unwrap();
+    let mut reg = tf_stats::Registry::new();
+    register_defs(&mut reg, &defs, "2026-10-07").unwrap();
+    let (a, b) = (defs[1].fingerprint(), defs[0].fingerprint());
+    let p = paired_results(&results, a, b, &reg, boot()).unwrap();
+    // Three days on which both traded, with the same result on each, in different symbols (S08 and S02).
+    assert_eq!(p.common_days, 3);
+    assert!(p.bp.unwrap().estimate.abs() < 1e-12);
+    assert_eq!((p.shared_signals, p.other_signals), (0, 3));
+    // A fingerprint the run does not have, and one the registry does not have.
+    assert!(paired_results(&results, 1, b, &reg, boot()).is_err());
+    let mut small = tf_stats::Registry::new();
+    register_defs(&mut small, &defs[..1], "2026-10-07").unwrap();
+    assert!(paired_results(&results, a, b, &small, boot()).is_err());
+}
+
+#[test]
+fn a_trip_is_an_outcome_with_the_same_day_time_and_result() {
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("out-days", 1);
+    let dir = out_dir("out-out");
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    let trips = Results::open(&dir).unwrap().trips().unwrap();
+    let (t, o) = (&trips[0], super::stats::outcome(&trips[0]));
+    assert_eq!(
+        (o.day.as_str(), o.symbol.as_str(), o.entry_ts, o.exit_ts),
+        (t.day.as_str(), t.symbol.as_str(), t.entry_ts, t.exit_ts)
+    );
+    assert_eq!((o.net_bps_x100, o.r_milli), (t.net_bps_x100, t.r_milli));
+    assert_eq!((o.net_bps_x100, o.r_milli), (-1029, Some(-2)));
+}
+
+#[test]
+fn a_trip_of_a_strategy_the_configuration_does_not_list_is_an_error_not_a_dropped_trade() {
+    use super::stats::group;
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("alien-days", 1);
+    let dir = out_dir("alien-out");
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    let results = Results::open(&dir).unwrap();
+    let trips = results.trips().unwrap();
+    let listed = results.definitions().unwrap();
+    // All listed: each variant has its own trade.
+    let all = group(listed.clone(), &trips).unwrap();
+    assert_eq!(
+        all.iter().map(|v| v.outcomes.len()).collect::<Vec<_>>(),
+        [1, 1]
+    );
+    assert_eq!(all[0].name, "round1");
+    // The second left out of the list: its trade is of a variant nobody listed, and it is said so, not left out.
+    let e = group(listed[..1].to_vec(), &trips).unwrap_err().to_string();
+    assert!(e.contains("round2") && e.contains("does not list"), "{e}");
+    // One listed that has no trade is still a variant.
+    let mut more = listed.clone();
+    more.push((7, "idle".into()));
+    let g = group(more, &trips).unwrap();
+    assert_eq!((g.len(), g[2].outcomes.len(), g[2].fingerprint), (3, 0, 7));
+}

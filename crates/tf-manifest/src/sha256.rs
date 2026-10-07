@@ -82,6 +82,72 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// SHA-256 over data that arrives in pieces, for files too large to hold in memory. Gives what [`sha256`] gives for the
+/// same bytes however they are cut.
+#[derive(Clone)]
+pub struct Sha256 {
+    h: [u32; 8],
+    buf: [u8; 64],
+    filled: usize,
+    total: u64,
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Sha256::new()
+    }
+}
+
+impl Sha256 {
+    pub fn new() -> Sha256 {
+        Sha256 {
+            h: H0,
+            buf: [0; 64],
+            filled: 0,
+            total: 0,
+        }
+    }
+
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.total += data.len() as u64;
+        if self.filled > 0 {
+            let take = (64 - self.filled).min(data.len());
+            self.buf[self.filled..self.filled + take].copy_from_slice(&data[..take]);
+            self.filled += take;
+            data = &data[take..];
+            if self.filled < 64 {
+                return;
+            }
+            let block = self.buf;
+            compress(&mut self.h, &block);
+            self.filled = 0;
+        }
+        let mut blocks = data.chunks_exact(64);
+        for block in &mut blocks {
+            compress(&mut self.h, block);
+        }
+        let rest = blocks.remainder();
+        self.buf[..rest.len()].copy_from_slice(rest);
+        self.filled = rest.len();
+    }
+
+    pub fn finish(mut self) -> [u8; 32] {
+        let mut tail = [0u8; 128];
+        tail[..self.filled].copy_from_slice(&self.buf[..self.filled]);
+        tail[self.filled] = 0x80;
+        let total = if self.filled < 56 { 64 } else { 128 };
+        tail[total - 8..total].copy_from_slice(&(self.total * 8).to_be_bytes());
+        for block in tail[..total].chunks_exact(64) {
+            compress(&mut self.h, block);
+        }
+        let mut out = [0u8; 32];
+        for (o, v) in out.chunks_exact_mut(4).zip(self.h) {
+            o.copy_from_slice(&v.to_be_bytes());
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +224,44 @@ mod tests {
         ] {
             assert_eq!(hex(&a(n)), want, "{n} bytes");
         }
+    }
+
+    #[test]
+    fn streaming_gives_what_one_shot_gives_however_the_bytes_are_cut() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for len in [
+            0usize, 1, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 129, 1000, 4097,
+        ] {
+            let data: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            let want = sha256(&data);
+            // Cut in pieces of random size, including empty ones.
+            for _ in 0..20 {
+                let mut h = Sha256::new();
+                let mut at = 0;
+                while at < len {
+                    let n = (next() % 130) as usize;
+                    let end = (at + n).min(len);
+                    h.update(&data[at..end]);
+                    at = end;
+                }
+                assert_eq!(h.finish(), want, "len {len}");
+            }
+            let mut h = Sha256::new();
+            h.update(&data);
+            assert_eq!(h.finish(), want);
+        }
+        // The empty input and the NIST "abc" vector, streamed a byte at a time.
+        assert_eq!(Digest(Sha256::new().finish()).hex(), hex(b""));
+        let mut h = Sha256::new();
+        for b in b"abc" {
+            h.update(&[*b]);
+        }
+        assert_eq!(Digest(h.finish()).hex(), hex(b"abc"));
     }
 }

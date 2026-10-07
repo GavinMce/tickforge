@@ -963,3 +963,90 @@ fn each_instrument_has_its_own_state_and_it_carries_across_decoders() {
         ]
     );
 }
+
+// ---- names from a file's metadata (E19-S07) ----
+
+/// A day file of trades whose symbols are in its metadata, as Databento's historical files have them (nothing in the
+/// stream names an instrument).
+fn day_with_metadata(names: &[(&str, u32)], trades_of: &[u32]) -> Vec<u8> {
+    let date = time::Date::from_calendar_date(2026, time::Month::October, 2).unwrap();
+    let md = MetadataBuilder::new()
+        .dataset("XNAS.BASIC".to_owned())
+        .schema(Some(Schema::Trades))
+        .start(0)
+        .stype_in(Some(SType::RawSymbol))
+        .stype_out(SType::InstrumentId)
+        .symbols(names.iter().map(|n| n.0.to_owned()).collect())
+        .mappings(
+            names
+                .iter()
+                .map(|(s, id)| dbn::SymbolMapping {
+                    raw_symbol: (*s).to_owned(),
+                    intervals: vec![dbn::MappingInterval {
+                        start_date: date,
+                        end_date: date.next_day().unwrap(),
+                        symbol: id.to_string(),
+                    }],
+                })
+                .collect(),
+        )
+        .build();
+    let mut bytes = Vec::new();
+    {
+        let mut enc = DbnEncoder::new(&mut bytes, &md).unwrap();
+        for (i, id) in trades_of.iter().enumerate() {
+            enc.encode_record(&trade(
+                81,
+                *id,
+                10 + i as u64,
+                10 + i as u64,
+                D,
+                5,
+                i as u32,
+            ))
+            .unwrap();
+        }
+    }
+    bytes
+}
+
+#[test]
+fn a_historical_files_own_metadata_names_its_instruments_and_never_numbers_them() {
+    // The metadata lists BBB (raw 7) before AAA (raw 3), and no stream record names either. The trades see raw 3
+    // first and raw 7 second, so AAA is instrument 0 and BBB instrument 1: the numbering is the order first seen.
+    let bytes = day_with_metadata(&[("BBB", 7), ("AAA", 3), ("CCC", 9)], &[3, 7, 3]);
+    let mut d = Decoder::new(&bytes[..]).unwrap();
+    assert_eq!(d.instruments().len(), 0, "a name makes no instrument");
+    while d.next_item().unwrap().is_some() {}
+    let ids = d.instruments();
+    assert_eq!(ids.len(), 2, "CCC never traded: it has no number");
+    assert_eq!((ids.raw_of(0), ids.symbol(0)), (Some(3), Some("AAA")));
+    assert_eq!((ids.raw_of(1), ids.symbol(1)), (Some(7), Some("BBB")));
+}
+
+#[test]
+fn names_carry_with_the_ids_from_file_to_file_and_a_ticker_change_takes_the_later_name() {
+    let day1 = day_with_metadata(&[("AAA", 3), ("BBB", 7)], &[3, 7]);
+    let mut d1 = Decoder::new(&day1[..]).unwrap();
+    while d1.next_item().unwrap().is_some() {}
+    let ids = d1.into_instruments();
+    // The next day: raw 7 has been renamed, raw 11 is new. Ids carry; raw 7 keeps its number and takes the new name.
+    let day2 = day_with_metadata(&[("BBX", 7), ("DDD", 11)], &[11, 7, 3]);
+    let mut d2 = Decoder::new(&day2[..]).unwrap().with_instruments(ids);
+    while d2.next_item().unwrap().is_some() {}
+    let ids = d2.instruments();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(
+        ids.symbol(0),
+        Some("AAA"),
+        "raw 3 is not named by day 2's file and keeps its name"
+    );
+    assert_eq!(ids.symbol(1), Some("BBX"), "renamed");
+    assert_eq!((ids.raw_of(2), ids.symbol(2)), (Some(11), Some("DDD")));
+    // A stream's own symbol mapping record still names an instrument, and wins over the metadata when it comes.
+    let mut ids2 = InstrumentMap::default();
+    ids2.add_names(&[(5, "FROM_METADATA".to_owned())]);
+    assert_eq!(ids2.len(), 0);
+    let id = ids2.intern(5);
+    assert_eq!(ids2.symbol(id), Some("FROM_METADATA"));
+}

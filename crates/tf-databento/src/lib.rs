@@ -31,7 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
 
-use dbn::decode::{DbnDecoder, DecodeRecordRef};
+use dbn::decode::{DbnDecoder, DbnMetadata, DecodeRecordRef};
 use dbn::{
     CbboMsg, Cmbp1Msg, ConsolidatedBidAskPair, ErrorMsg, Mbp1Msg, RecordRef, StatusAction,
     StatusMsg, SymbolMappingMsg, SystemMsg, TradeMsg, UNDEF_PRICE,
@@ -124,6 +124,13 @@ pub struct InstrumentMap {
     /// The short-sale restriction as the status records last said it, per instrument (`None`: never said). It carries
     /// across files and sessions with the ids, so a restriction that began the day before is still known.
     ssr: Vec<Option<bool>>,
+    /// Names from a file's metadata for raw ids not yet seen, applied when they are (the numbering stays the order
+    /// first seen: a name never makes an instrument).
+    hints: HashMap<u32, String>,
+}
+
+fn hints_symbol(hints: &HashMap<u32, String>, raw: u32) -> Option<String> {
+    hints.get(&raw).cloned()
 }
 
 impl InstrumentMap {
@@ -134,9 +141,20 @@ impl InstrumentMap {
         let d = InstrumentId::try_from(self.raw.len()).expect("more than u32::MAX instruments");
         self.dense.insert(raw, d);
         self.raw.push(raw);
-        self.symbols.push(None);
+        self.symbols.push(hints_symbol(&self.hints, raw));
         self.ssr.push(None);
         d
+    }
+
+    /// Learn names for raw ids from a file's metadata. An id already seen takes the name now (the latest day's, if a
+    /// ticker changed); one not yet seen takes it when it is.
+    pub fn add_names(&mut self, names: &[(u32, String)]) {
+        for (raw, name) in names {
+            self.hints.insert(*raw, name.clone());
+            if let Some(&d) = self.dense.get(raw) {
+                self.symbols[d as usize] = Some(name.clone());
+            }
+        }
     }
 
     /// Whether the status records last said `id` is under a short-sale restriction.
@@ -186,11 +204,27 @@ pub struct Stats {
 /// What a decoder needs from the `dbn` decoders, which are not usable as trait objects themselves.
 trait NextRecord {
     fn next_ref(&mut self) -> dbn::Result<Option<RecordRef<'_>>>;
+    /// The symbols the file's own metadata gives its instrument ids: `(raw id, symbol)`. A historical file carries its
+    /// symbology there and not as records in the stream.
+    fn names(&self) -> Vec<(u32, String)>;
 }
 
-impl<T: DecodeRecordRef> NextRecord for T {
+impl<T: DecodeRecordRef + DbnMetadata> NextRecord for T {
     fn next_ref(&mut self) -> dbn::Result<Option<RecordRef<'_>>> {
         self.decode_record_ref()
+    }
+
+    fn names(&self) -> Vec<(u32, String)> {
+        self.metadata()
+            .mappings
+            .iter()
+            .flat_map(|m| {
+                m.intervals
+                    .iter()
+                    .filter_map(|i| i.symbol.parse::<u32>().ok())
+                    .map(|id| (id, m.raw_symbol.clone()))
+            })
+            .collect()
     }
 }
 
@@ -254,6 +288,8 @@ pub type Tap = Box<dyn FnMut(&RecordRef<'_>) -> Result<(), String> + Send>;
 
 pub struct Decoder<'a> {
     inner: Box<dyn NextRecord + Send + 'a>,
+    /// What the file's metadata calls its instruments, applied as they are first seen (or now, if they have been).
+    names: Vec<(u32, String)>,
     mapper: Mapper,
     pending: VecDeque<Item>,
     tap: Option<Tap>,
@@ -278,9 +314,13 @@ fn seq_of(publisher: u16, sequence: u32) -> u64 {
 
 impl<'a> Decoder<'a> {
     fn from_inner(inner: Box<dyn NextRecord + Send + 'a>) -> Decoder<'a> {
+        let names = inner.names();
+        let mut mapper = Mapper::default();
+        mapper.ids.add_names(&names);
         Decoder {
             inner,
-            mapper: Mapper::default(),
+            names,
+            mapper,
             pending: VecDeque::new(),
             tap: None,
         }
@@ -320,6 +360,7 @@ impl<'a> Decoder<'a> {
     /// Start from instrument ids already assigned (the next file of one session).
     pub fn with_instruments(mut self, ids: InstrumentMap) -> Self {
         self.mapper = self.mapper.with_instruments(ids);
+        self.mapper.ids.add_names(&self.names);
         self
     }
 

@@ -1,6 +1,7 @@
 mod budgets_cmd;
 mod catalog_cmd;
 mod explore;
+mod history_cmd;
 mod ledger_cmd;
 mod reference_cmd;
 mod rules_cmd;
@@ -151,6 +152,16 @@ USAGE:
     A minute's high and low are capped at --wick-clip permille (default 5) beyond its open and close, because
     the feed's raw highs and lows carry off-market prints; the build says how many bars that changed.
     A column with no source is left out, so a universe or strategy that needs it refuses.
+
+    tf history index DIR --dataset NAME --schema NAME [--symbols LIST]
+    tf history verify DIR
+    tf history show DIR
+
+    The research history store: one zstd DBN file per day and schema under DIR/<dataset>/<schema>/<date>.dbn.zst,
+    pulled by scripts/pull_history.sh (which asks the cost first and refuses above a cap), and a manifest. `index`
+    builds the manifest from the files (size, SHA-256, records, symbols, cost) and records what the store is not
+    (borrow flags are not point in time; whether names that left are present). `verify` rereads every file and names
+    any that is missing, short, altered or not listed (and exits non-zero). `show` prints the symbols per day.
 
     tf universe show SPEC [--snapshot FILE]
     tf universe members SPEC --snapshot FILE [--out FILE]
@@ -1023,6 +1034,7 @@ fn main() -> ExitCode {
         Some("budgets") => budgets_cmd::budgets(&args[1..]),
         Some("universe") => universe_cmd::universe(&args[1..]),
         Some("reference") => reference_cmd::reference(&args[1..]),
+        Some("history") => history_cmd::history(&args[1..]),
         Some("serve") => serve_cmd::serve_cmd(&args[1..]),
         Some("catalog") => catalog_cmd::catalog(&args[1..]),
         Some("ledger") => ledger_cmd::ledger(&args[1..]),

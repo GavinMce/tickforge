@@ -32,3 +32,4 @@ tf-workspace.workspace = true
 tf-proposals.workspace = true
 tf-universe.workspace = true
 tf-reference.workspace = true
+tf-history.workspace = true

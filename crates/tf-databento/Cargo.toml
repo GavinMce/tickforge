@@ -16,4 +16,5 @@ dbn = { version = "0.71", default-features = true }
 
 [dev-dependencies]
 zstd = "0.13"
+time = "0.3"
 tf-alpaca.workspace = true

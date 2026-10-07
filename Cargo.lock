@@ -379,6 +379,7 @@ dependencies = [
  "tf-budget",
  "tf-catalog",
  "tf-core",
+ "tf-history",
  "tf-ledger",
  "tf-manifest",
  "tf-params",
@@ -404,6 +405,7 @@ dependencies = [
  "dbn",
  "tf-alpaca",
  "tf-core",
+ "time",
  "zstd 0.13.3",
 ]
 
@@ -437,6 +439,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tf-history"
+version = "0.1.0"
+dependencies = [
+ "dbn",
+ "tf-capture",
+ "tf-core",
+ "tf-manifest",
+ "tf-provider",
+ "time",
+ "zstd 0.13.3",
+]
+
+[[package]]
 name = "tf-host"
 version = "0.1.0"
 dependencies = [
@@ -447,6 +462,7 @@ dependencies = [
  "tf-core",
  "tf-databento",
  "tf-engine",
+ "tf-history",
  "tf-ingest",
  "tf-ledger",
  "tf-provider",

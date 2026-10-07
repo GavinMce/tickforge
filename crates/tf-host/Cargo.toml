@@ -25,5 +25,6 @@ tf-universe.workspace = true
 [dev-dependencies]
 dbn = { version = "0.71" }
 tf-databento.workspace = true
+tf-history.workspace = true
 tf-budget.workspace = true
 tf-synth.workspace = true

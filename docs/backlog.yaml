@@ -1725,7 +1725,36 @@ epics:
       - id: E19-S07
         jira: TIC-161
         title: "Research history store: cost-capped pull, manifest, verified days and a replay source"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0058. New crate tf-history; scripts/pull_history.sh (the cost of the whole range asked of the metadata service
+          first and the pull refused above $MAX_COST, default $5; a day at a time, weekends skipped, a stored day not pulled
+          again, the day's quoted cost written beside the file); one zstd DBN file per day and schema as Databento delivers
+          it, and a manifest store.tfhist with a line per day (dataset, schema, symbols, date, bytes, SHA-256, cost in
+          millionths of a dollar rounded up, records, symbols mapped). `tf history index` streams each file (new streaming
+          tf_manifest::Sha256, equal to the one-shot hash at every padding boundary and random cut), `verify` names every
+          file that is missing, short, longer, altered (checksum first, so damage inside the compression is "altered") or
+          not listed and exits non-zero, `show` prints the symbols per day, the cost and the notes. The store records what
+          it is not: the borrow flags are not point in time, and whether names that later left the market are present is
+          measured from the files' own symbol mappings (first-day symbols absent on the last day), "not shown" when none left
+          and "not known" for one day. Stored days replay through the Provider interface in date order as a CaptureReplay
+          (CaptureReplay::from_files: the capture's decoder, ids numbered first seen and carried), and the host's replay
+          path takes a list of files (tf_host::replay_files; replay_capture is that over a capture's manifest): a test stores
+          a live day's capture segments as days, verifies them and gets the same verdict and event count; a missing, short
+          or altered day is refused. Found and fixed: a historical DBN file names its instruments in its metadata, not in the
+          stream, so the decoder left them unnamed (a research run could not match the snapshot); the decoder now takes the
+          names from the metadata, numbering unchanged (a name never makes an instrument), following a ticker change.
+          Real data (7 October 2026): 12 months (2025-10-01 to 2026-10-02) of one-minute bars for AAPL, NVDA, TSLA, F and
+          SPY, 263 weekday files, 1,118,885 records, 27 MB, 42 minutes to pull, $0.70; one day (2 October 2026) of
+          trades-with-quote for F and AAPL, 607,775 records, 12.7 MB, $0.27; total $0.972 against $0.97 quoted; verify
+          reads all 264 files in 0.2 s and finds them clean; the 10 weekdays with no records are exactly the calendar crate's
+          10 holiday closures in that range (an independent check of that table); the tcbbo day replays as 1,039,287 events
+          (431,512 trades, 607,775 quotes) in 0.06 s with arrival times never going backwards, instruments named AAPL and F.
+          Mutation run on the new code (store 21, decoder names 6, streaming hash 6): the store's first run left 5, four
+          closed by tests (a duplicated day, cost rounding, a first-versus-last count that was symmetric, a longer file);
+          one is equivalent. Narrowed: the whole market is not pulled (see E19-S30): twelve months of its one-minute bars is
+          quoted at $415.63 and a whole-market tcbbo day at $36.07 at pay-as-you-go, which the paid plan includes; the
+          survivorship check is therefore not yet informative (five large caps).
         deps: [E06-S04, E06-S07]
         ac:
           - A script pulls Databento history for a date range, schemas and symbol set, asks the metadata service for the cost first and refuses above a stated cap, and writes one zstd DBN file per day and schema with a manifest line (dataset, schema, symbols, date, bytes, SHA-256, cost)
@@ -1929,8 +1958,17 @@ epics:
         jira: TIC-183
         title: History results for the library and the gate into the live month
         status: todo
-        deps: [E19-S14, E19-S15, E19-S16, E19-S17, E19-S18, E19-S19, E19-S20, E19-S21, E19-S22, E19-S23, E19-S24, E19-S28]
+        deps: [E19-S14, E19-S15, E19-S16, E19-S17, E19-S18, E19-S19, E19-S20, E19-S21, E19-S22, E19-S23, E19-S24, E19-S28, E19-S30]
         ac:
           - Every built variant is run over twelve months through the research runner and registered; the report lists, for each, trades, mean in R and basis points after costs, the day-level t-statistic, the paired difference from its plain version where it is a refinement, the deflated Sharpe ratio for the number of trials, and the null strategy's distribution beside it
           - The gate of docs/research/data-and-protocol.md (positive after costs, positive paired difference for a refinement, t above 2, at least 300 trades) is applied and the variants that pass are named, with the number tried
           - "The report states what it cannot show: survivorship, the easy-to-borrow flag, the cost model's assumptions, and the share of volume the feed holds"
+      - id: E19-S30
+        jira: TIC-184
+        title: "Pull and verify the whole-market history for the gate: twelve months of one-minute bars and sample full days"
+        status: todo
+        deps: [E19-S07]
+        ac:
+          - With the paid plan active and its entitlement to the history confirmed, scripts/pull_history.sh pulls twelve months of one-minute bars for the whole market (quoted at $415.63 pay-as-you-go on 7 October 2026, expected to be included in the plan) and a sample of whole-market trades-with-quote days (quoted at $36.07 a day), each under a stated cap, and tf history verify finds every file clean
+          - The volume (files, records, bytes) and the cost the metadata service quoted are stated, and the days Databento returned nothing for are named and match the calendar's closures
+          - The survivorship note is informative: the number of symbols on the first day that are not on the last is measured and the history is shown to contain names that later left the market, or the store says it does not

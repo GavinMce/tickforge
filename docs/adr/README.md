@@ -74,3 +74,4 @@ How:
 | [0055](0055-history-columns-come-from-minute-bars-with-capped-wicks-and-a-strategy-can-require-them.md) | History columns come from one-minute bars with capped wicks, and a strategy can require them | Accepted |
 | [0056](0056-protective-orders-in-the-simulator-extended-hours-rules-and-exits-the-strategy-holds.md) | Protective orders in the simulator, extended-hours rules, and exits the strategy holds | Accepted |
 | [0057](0057-the-short-sale-restriction-comes-from-every-status-record-and-the-simulator-follows-the-brokers-short-rules.md) | The short-sale restriction comes from every status record, and the simulator follows the broker's short-sale rules | Accepted |
+| [0058](0058-history-is-kept-as-the-providers-own-daily-files-with-a-manifest-and-replays-as-a-capture-does.md) | History is kept as the provider's own daily files with a manifest, and replays as a capture does | Accepted |

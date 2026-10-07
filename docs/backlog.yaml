@@ -1540,7 +1540,7 @@ epics:
         ac:
           - A pure crate (no clock, no I/O, no time-zone database) gives, for a UTC time, the New York date, whether it is a trading day and its session (closed, premarket 04:00 to 09:30, regular 09:30 to 16:00 or to 13:00 on an early close, after-hours to 20:00), and for a date the open and close as UTC nanoseconds
           - Daylight saving follows the US rule (second Sunday of March to first Sunday of November, 02:00 local) and agrees with an independent implementation for every day of 2024 to 2028 and at each transition instant
-          - Holidays and early closes for 2025 to 2028 are a table whose source is cited in its ADR; a date outside the table's years is an error, never a guess
+          - Holidays, early closes and unscheduled closures (for example 9 January 2025) for 2024 to 2028, from the start of the history the dataset holds to the end of the published calendars, are a table whose sources are cited in its ADR; a date outside the table's years is an error, never a guess
           - The 04:00 start, the open and close, and the last 25 minutes can be asked of it by any crate, so no fixed UTC offset is needed outside tests
       - id: E19-S02
         jira: TIC-156

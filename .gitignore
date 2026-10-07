@@ -3,3 +3,5 @@
 *.tape.zst
 /data
 .env
+__pycache__/
+*.pyc

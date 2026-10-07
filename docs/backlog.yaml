@@ -1877,7 +1877,38 @@ epics:
       - id: E19-S14
         jira: TIC-168
         title: "Statistics: day-level results, block bootstrap, trial registry and deflated Sharpe ratio"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0060. crates/tf-stats (pure, no dependencies, no clock): the standard normal distribution to double precision
+          (a series, a continued fraction in the tail, the inverse by bisection), a seeded SplitMix64, and, by day, a result
+          as a ratio of totals with its standard error from a circular block bootstrap of the days (default block the cube root
+          of the days rounded up, 2,000 resamples, the seed part of the configuration; the cluster-robust error beside it as
+          a cross-check; a spread below the arithmetic's rounding is no spread, found when three identical trades gave a
+          t-statistic of -4e14); per variant the mean in basis points and in R (only trades that state a stop), hit rate,
+          payoff and maximum drawdown in the order trades closed; the daily Sharpe ratio, its moments and the deflated Sharpe
+          ratio (Bailey and Lopez de Prado) with the number of trials the size of the registry; the trial registry (trials.reg,
+          text with a checksum, written whole; every fingerprint once with its first date and name; strategies entered before
+          they are run, so one that made no trade still counts, `register_defs`), and `report` and `paired` refuse a variant
+          that is not in it by name; a refinement as a paired difference from its plain version on the days both traded,
+          resampled together, with its own bootstrap error, and counts of the refinement's trades that are and are not signals
+          the plain version traded; a result against the null runs' distribution as (k + 1) / (runs + 1) with the median, 95th
+          and 99th percentiles. tf_host::research::stats reads a results directory (`Results::definitions`, `variants`,
+          `report_results`, `paired_results`, `register_defs`); a trade of a variant the configuration does not list is an
+          error. Checks: hand-worked cases (the mean 53/21, the cluster error 2 sqrt(3) of a three-day example, two days giving
+          an error of 1, a paired difference 95/9 - 67/17, the null example) and scripts/check_stats.py, a separate
+          implementation from the formulas with the standard library only (its own SplitMix64, resampling and quantile, the
+          C library's erfc), whose numbers the tests pin: distribution function and quantiles from 1e-10 to the tails, the
+          generator's sequence, the bootstrap of a 21-trade 10-day set (error 1.138, t 2.217, interval 0.218 to 4.720), the
+          paired bootstrap (6.614, error 1.580), moments, the expected best of 7 and of 100 trials and the deflated ratio
+          0.6057. Mutation run on 190 mutants of every operator in the crate and the glue: the first run left 17 survivors,
+          each given a test (two days as the least that has an error, only the days both traded, the scale of the rounding
+          threshold, the variance's divisor, a duplicated final day, only losers, a trailer cut off a name that says end);
+          5 remain, each equivalent: the series and the continued fraction agree at their seam (3.0), the series' stopping
+          test at equality, the quantile's side at exactly one half (a sign on 7e-17), the bisection's tie, and the rounding
+          threshold at equality with the error. 2 mutants hang and are killed by the timeout. Not here: the command that
+          registers, runs and reports (E19-S31), the null strategy that produces the distribution (E19-S28), applying the gate
+          (E19-S29). The spread of the trials' Sharpe ratios is estimated from the variants in one report (the registry keeps no
+          results), so the gate report has to report every registered variant together.
         deps: [E19-S13]
         ac:
           - "From per-trade records: per-variant mean in R and in basis points, hit rate, payoff and maximum drawdown, and results aggregated by day with a block bootstrap by day for the standard error and a t-statistic"

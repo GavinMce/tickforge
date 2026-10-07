@@ -3,6 +3,7 @@
 
 pub(crate) mod cost;
 mod run;
+pub mod stats;
 mod trips;
 
 pub use cost::{CostError, CostModel};

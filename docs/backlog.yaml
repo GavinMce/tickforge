@@ -461,10 +461,22 @@ epics:
       - id: E06-S06
         jira: TIC-54
         title: Halt, LULD and status handling
-        status: todo
+        status: done
+        evidence: >
+          Halts, pauses and short-sale-restriction changes surface as Status events: the DBN decoder of
+          E06-S07 maps a halt, pause or suspend to TradingHalt, a return to trading to TradingResume and an
+          SSR change to ShortSaleRestriction, keeping the feed's own event time (crates/tf-databento, tests
+          with synthetic DBN; a real day of status decodes with ts_recv never going backwards, 48 halts or
+          pauses, 13,337 trading and 308 SSR records). Checked again on 2026-10-02 for the whole market: 34
+          of the 48 are LULD pauses (reason 50), 25 of 5 minutes, 7 of about 10, one of 15 and one of 25.
+          Narrowed: the LULD bands are not in XNAS.BASIC (its statistics schema holds only the opening and
+          closing prices, seen for AAPL, TSLA and SPY on that day), so they cannot surface from the feed;
+          computing them from the Plan's rules, and carrying the halt reason (an LULD pause against a news
+          halt) in the Status event, are E19-S09 (TIC-163). The restricted flag on every status record is
+          not read either, so a restriction carried over from the previous day is missed: E19-S06.
         deps: [E06-S02]
         ac:
-          - Halts and LULD bands surface as Status events with correct timestamps
+          - Halts, pauses and short-sale-restriction changes surface as Status events with correct timestamps
       - id: E06-S07
         jira: TIC-149
         title: "DBN decoding (dbn crate) into canonical events: trades, tcbbo, cmbp-1, status"
@@ -1501,7 +1513,8 @@ epics:
         jira: TIC-147
         title: "The strategy set for the month: templates, variants, metrics fixed in advance, baseline"
         status: todo
-        deps: [E18-S05]
+        # The candidate rules are in docs/research (E19) and the choice is made from E19-S29's history gate.
+        deps: [E18-S05, E19-S29]
         ac:
           - 3 to 4 strategy templates give 10 to 20 variants, each with its universe spec and budget; the evaluation metrics, the baseline and the minimum number of trades to judge on are written down before the first live session
           - Nothing is promoted on one month: the report states the number of variants tried and does not rank on P&L alone
@@ -1513,3 +1526,282 @@ epics:
         ac:
           - A runbook covers start before 04:00 ET, the opening burst, end of day, capture rotation and what to do on a feed stall or reconnect
           - The machine's clock is disciplined and its offset logged; the run alerts a person when the feed is stalled, lag exceeds a bound or the disk for captures runs low
+  - id: E19
+    jira: TIC-154
+    title: "Strategy library from research: system additions, history harness and the first strategy set"
+    phase: 4
+    labels: [phase4, strategies, research]
+    goal: Turn the 24 researched trading ideas (docs/research) into the system additions they need, a history harness that can tell an edge from noise, and a first set of strategies and studies, each with its rule fixed before its results are seen.
+    stories:
+      - id: E19-S01
+        jira: TIC-155
+        title: "tf-calendar: US equity trading days, sessions and New York time"
+        status: todo
+        ac:
+          - A pure crate (no clock, no I/O, no time-zone database) gives, for a UTC time, the New York date, whether it is a trading day and its session (closed, premarket 04:00 to 09:30, regular 09:30 to 16:00 or to 13:00 on an early close, after-hours to 20:00), and for a date the open and close as UTC nanoseconds
+          - Daylight saving follows the US rule (second Sunday of March to first Sunday of November, 02:00 local) and agrees with an independent implementation for every day of 2024 to 2028 and at each transition instant
+          - Holidays, early closes and unscheduled closures (for example 9 January 2025) for 2024 to 2028, from the start of the history the dataset holds to the end of the published calendars, are a table whose sources are cited in its ADR; a date outside the table's years is an error, never a guess
+          - The 04:00 start, the open and close, and the last 25 minutes can be asked of it by any crate, so no fixed UTC offset is needed outside tests
+      - id: E19-S02
+        jira: TIC-156
+        title: "Session features in Tier 0: premarket, regular session and after-hours per symbol"
+        status: todo
+        deps: [E19-S01]
+        ac:
+          - "Per symbol, in a separate parallel array (Tier 0's existing fields and every golden hash unchanged): premarket high, low, volume and VWAP; the regular-session open, high, low, volume and VWAP anchored at the open; the volume of the first minute and of the first five minutes; the high and low of the first 5 and 15 minutes; after-hours high, low and volume"
+          - A trade is placed in a session by the calendar; tests cover an early close, both daylight-saving changes and trades exactly on a boundary
+          - Values agree with a brute-force recomputation over random streams and, on a real day kept locally, with the same quantities from Databento's one-minute bars for a sample of symbols
+          - Processing allocates nothing per event, the memory per symbol is stated, and the Tier 0 throughput benchmark shows the cost of the extra array
+      - id: E19-S03
+        jira: TIC-157
+        title: Shared bars and indicator functions for cross-sectional strategies
+        status: todo
+        deps: [E19-S01]
+        ac:
+          - The engine owns one MtfBars for the union of the symbols that strategies ask it to track; a request is counted per strategy, so one strategy letting go does not stop another's bars; the tracked set is bounded and a refusal is reported, not silent
+          - A cross strategy reads bars through its context, and for the same events they are exactly what a per-symbol strategy's host builds (test over a captured stretch)
+          - An hourly alignment to the session (bars at 09:30, 10:30 and so on to 15:30, then a 30-minute stub) exists beside the clock-hour one, correct across the daylight-saving changes; day bars take their offset from the calendar for each day
+          - EMA, RSI, ATR and VWAP are available as pure functions over closed bars and equal the streaming indicators on random series and on a real day
+          - Time and memory for 2,000 tracked symbols over the real opening five minutes are measured and stated against the engine's lag budget
+      - id: E19-S04
+        jira: TIC-158
+        title: History-derived reference columns for intraday strategies
+        status: todo
+        deps: [E18-S02, E19-S01]
+        ac:
+          - "From one-minute history the snapshot gains, per symbol: the previous regular session's high, low and close; ATR over 14 sessions in price units; the average volume of the first minute, the first five minutes and the premarket; the average cumulative volume at 09:35, 10:00, 10:30, 11:00, 12:00, 14:00 and 15:30 over 20 sessions; and the state of an EMA(100) over regular-session hourly closes"
+          - Only bars up to the as-of date are read; a column is unknown, not zero, when the history is short; a universe or strategy that needs a column the snapshot lacks refuses to run
+          - A snapshot built before this change still loads, and its fingerprint and every stored selection are unchanged
+          - The columns agree with an independent recomputation from the raw one-minute bars for AAPL, NVDA, TSLA, F and SPY on a real day, and the pull's cost and time are stated
+      - id: E19-S05
+        jira: TIC-159
+        title: "Exits: protective legs in the simulator, engine-held exits and extended-hours order rules"
+        status: todo
+        deps: [E19-S01, E18-S05]
+        ac:
+          - "The simulator honours the protective orders on an opening intent as Alpaca does: a stop (market, or limit if one is given) triggered by a trade at or through its price, a target, each cancelling the other; a gap through a stop fills at the gapped price; partial fills carry through; tests use scripted quotes shared with the Alpaca order mapping's fixtures"
+          - A strategy can hold its own stop, target and time exits and send closing intents, with a flat-by time taken from the calendar; the library strategies use this so that live and simulated behaviour match and extended hours need no resting stop
+          - Extended-hours orders are accepted only as limit orders with time in force day or good-til-cancelled; market, stop, bracket and one-cancels-other orders are rejected with the broker's reasons, in the simulator and in the Alpaca mapping
+          - Replay equivalence holds for a day with exits (decision logs compare equal) and a mutation run on the new code leaves no unexplained survivor
+      - id: E19-S06
+        jira: TIC-160
+        title: "Short sales in the simulator: the short-sale restriction and the easy-to-borrow rule"
+        status: todo
+        deps: [E09-S02]
+        ac:
+          - While a symbol's short-sale restriction is on, the simulator does not fill a short sale at or below the best bid; the restriction's start and its carry-over to the next day come from the feed, whose status records carry a restricted flag that the decoder does not read today (it maps only the change action, so a restriction carried over from the previous day is missed)
+          - A short sale of a name that is not easy to borrow is rejected as Alpaca's API does today (no locate model; hard-to-borrow locates are E14-S02)
+          - The borrow fee follows the broker (none for easy-to-borrow names at Alpaca) and the daily report lists refused shorts with the reason
+          - Results of shorts on history are labelled with the point-in-time limits stated in docs/research/data-and-protocol.md
+      - id: E19-S07
+        jira: TIC-161
+        title: "Research history store: cost-capped pull, manifest, verified days and a replay source"
+        status: todo
+        deps: [E06-S04, E06-S07]
+        ac:
+          - A script pulls Databento history for a date range, schemas and symbol set, asks the metadata service for the cost first and refuses above a stated cap, and writes one zstd DBN file per day and schema with a manifest line (dataset, schema, symbols, date, bytes, SHA-256, cost)
+          - A verify command re-reads the manifest and every file; a missing, short or altered file is named
+          - Stored days replay through the Provider interface in time order with the instrument numbering the capture format uses, so the host's replay path runs on them unchanged
+          - The store records what is not point-in-time (borrow flags) and whether names that were later delisted are present, and prints the symbol count per day
+          - Twelve months of one-minute bars for the whole market and a sample of full trades-with-quote days are pulled and verified, with the volume and cost stated
+      - id: E19-S08
+        jira: TIC-162
+        title: "Trade flags: off-exchange facility, sub-penny price and zero-share prints"
+        status: todo
+        deps: [E06-S07]
+        ac:
+          - A trade event carries named flags for 'reported by a trade reporting facility' (publishers 82 and 83) and 'price has a fraction of a cent', set where the trade is decoded and not parsed by strategies; the event stays Copy and at most 64 bytes, and the encoding schema changes only if the layout does
+          - Whether prints of zero whole shares are kept as flagged trades or counted apart is decided on a real day and written down (about 4% of midday trades in the 2 October sample)
+          - The retail classification of the end-of-day paper (a fraction of a cent from 0 to 0.4 is a sell, from 0.6 to 1 a buy; or the sign of the price against the quote midpoint) is a function over the flags and the consolidated quote, with tests, and its identification rate is measured on a real day
+          - Existing golden hashes and the capture format are unchanged, or moved with an explicit version
+      - id: E19-S09
+        jira: TIC-163
+        title: LULD bands, limit states and the reason for a halt (narrows E06-S06)
+        status: todo
+        deps: [E19-S01, E06-S07]
+        ac:
+          - A Status event says why trading stopped (LULD pause, news pending, regulatory, other) from the feed's reason code, carried through the decoder and the encoding
+          - LULD bands and limit states are computed from the Plan's rules (reference price as the five-minute mean of eligible trades, percentage by tier and price, doubling near the close) from our trades and the consolidated quote, with the tier lists loaded as data
+          - "On a real day the computed bands are compared with the pauses in the status feed (2 October 2026 had 34): the share of pauses preceded by a computed limit state and the number of computed limit states with no pause are stated, with the reason for any pause missed"
+          - "Nothing claims to match the SIP's bands: the reference price needs every trade and the feed holds about 65% of share volume"
+      - id: E19-S10
+        jira: TIC-164
+        title: "Event calendar: scheduled announcements, earnings filings and early closes"
+        status: todo
+        deps: [E19-S01]
+        ac:
+          - The FOMC calendar (decision day, 14:00 ET statement) is data with its source and answers whether a scheduled announcement falls within N minutes of a time
+          - A script fetches SEC EDGAR 8-K filings with Item 2.02 (results of operations) for a date range through the submissions API at no more than 10 requests a second with a declared user agent, and keeps symbol, form, acceptance time and whether it fell before the open, in market hours or after the close
+          - The acceptance times are compared with the first extended-hours volume spike for a sample of reporters on a real day, and the lag is stated
+          - Headline news stays with E10-S02; the two share one 'news since the prior close' flag per symbol, whose source is recorded
+      - id: E19-S11
+        jira: TIC-165
+        title: "Depth data: check the entitlement and build a book from XNAS.ITCH"
+        status: todo
+        deps: [E06-S07]
+        ac:
+          - The plan's entitlement to XNAS.ITCH, live and for the month of depth history, is confirmed with Databento in writing, or the story ends there with the answer recorded
+          - "If included: order-by-order messages build a price-level book for a symbol list, checked against the feed's own top of book and against mbp-10 on a real window, with executions of non-displayed orders counted"
+          - The cost and rate of carrying depth for 20 symbols through the live path are stated; it is not turned on for the paid month unless the numbers allow
+      - id: E19-S12
+        jira: TIC-166
+        title: "OPRA research track: decide whether one month of options data is worth buying"
+        status: todo
+        deps: [E19-S29]
+        ac:
+          - The price and licence terms of the OPRA subscription and the history it includes are confirmed with Databento
+          - A one-page decision says, from the equity results, whether the options studies (gamma squeeze ignition, max pain, strike fakeouts, option flow as a stock signal) are worth a month, with the cost
+          - If bought, the studies in docs/research/07-options.md run on the harness with their protocols unchanged
+      - id: E19-S13
+        jira: TIC-167
+        title: "Research runner: strategies over stored days with quote-level fills, costs and per-trade records"
+        status: todo
+        deps: [E19-S01, E19-S05, E19-S06, E19-S07]
+        ac:
+          - "A command runs a list of strategy definitions (the same definitions the live host runs) over a range of stored days through the host with the simulated broker, one pass for all of them, and writes one record per round trip: day, strategy and variant, symbol, entry and exit times and prices, side, size, fees, slippage against the reference price, result in R and in basis points, and the reason it exited"
+          - Fills come from the recorded quote after the latency; the cost model (latency, regulatory fees on sales at their published rates, borrow fee) is a configuration stored with the results, and a result without its configuration is refused
+          - Two runs of the same days and definitions give identical records, and a run resumes at a day boundary after a failure
+          - A day replayed here and the same day through the live driver's replay check give the same decisions
+          - Twelve months over a symbol subset run in a stated time on the development machine, and the bar-level screening pass (one-minute bars and one-minute spreads) is available as the first stage
+      - id: E19-S14
+        jira: TIC-168
+        title: "Statistics: day-level results, block bootstrap, trial registry and deflated Sharpe ratio"
+        status: todo
+        deps: [E19-S13]
+        ac:
+          - "From per-trade records: per-variant mean in R and in basis points, hit rate, payoff and maximum drawdown, and results aggregated by day with a block bootstrap by day for the standard error and a t-statistic"
+          - A trial registry lists every variant ever run with its rule fingerprint and the date first run; its size is an input to the deflated Sharpe ratio, and a variant that is not in it cannot be reported
+          - A refinement is reported as a paired difference from its plain version on the same signals, with its own standard error
+          - The null strategy (E19-S28) gives the distribution a result must beat
+          - Known inputs give known outputs (hand-computed examples and an independent Python check), and a mutation run leaves no unexplained survivor
+      - id: E19-S15
+        jira: TIC-169
+        title: T01 opening range breakout on stocks in play (docs/research 1c)
+        status: todo
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S16]
+        ac:
+          - The rule of docs/research/01-trend.md (5- or 15-minute opening range, opening relative volume at least 100% of its 14-day average and the top 20 by it, price above $5, average volume above a million shares, ATR above $0.50; stop order at the range, stop loss at 10% or 20% of ATR, exit at 15:58, 1% risk of the strategy's budget) is a cross strategy whose eight variants are parameters
+          - Tests cover no trade on a doji, entry on the break, the stop, the time exit, each filter excluding a name in turn, the sizing, and no second entry
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S16
+        jira: TIC-170
+        title: T02 hourly EMA(100) bias and the pullback entry (docs/research 1a)
+        status: todo
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05]
+        ac:
+          - The bias (last completed regular-session hourly close above or below EMA(100), none before 10:30) is available to other strategies as a filter, and the standalone pullback entry of docs/research/01-trend.md has its four variants as parameters
+          - "The live bias equals the offline one: the EMA state from the snapshot carried forward through a day equals the EMA computed over the same closes in one pass"
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S17
+        jira: TIC-171
+        title: "T03 VWAP reclaim: wick on volume against first touch, and the premarket variant (docs/research 1b, 8a)"
+        status: todo
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05]
+        ac:
+          - Both variants of 1b (first touch; long wick on volume then confirmation) and the premarket reclaim of 8a (limit orders only, engine-held exit, spread filter) are one strategy with the variants as parameters
+          - The anchored VWAP used is the session one from E19-S02, and a test shows the difference from the all-day Tier 0 VWAP
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S18
+        jira: TIC-172
+        title: "T04 closing reversal: the day's biggest losers into the last half hour (docs/research 8c)"
+        status: todo
+        deps: [E19-S01, E19-S05]
+        ac:
+          - At 15:30 the strategy ranks its universe by the return from the prior close to the last trade at or before 15:00, buys the most negative N (10, 20 or 40), skips names under a halt, pause or restriction, and sells at 15:59:30; extreme-only and spread-cap variants as parameters
+          - The 15:00 price and the 15:30 decision come from timers set from the calendar, including an early-close day
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S19
+        jira: TIC-173
+        title: T05 open-attention gap fade (docs/research 6c)
+        status: todo
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S06]
+        ac:
+          - The rule of docs/research/06-psychology.md (gap of at least 2% or 5%, in play by opening relative volume, entry at 09:45 or 10:30 while the gap is still more than half open, stop at the day's extreme, target the prior close) is a strategy with eight variants as parameters; shorts only in easy-to-borrow names
+          - T05, T01 and T09 can be run on the same stock-days and their trades compared side by side
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S20
+        jira: TIC-174
+        title: "T06 intraday overreaction short: a run of green candles then an engulfing red one (docs/research 2a)"
+        status: todo
+        deps: [E19-S03, E19-S04, E19-S05, E19-S06]
+        ac:
+          - The rule of docs/research/02-mean-reversion.md (run of 5 or 8 green one-minute candles, 3% gain, volume against the time-of-day baseline, trigger by engulfing or by a lower low, stop at the run's high, 0.25% risk, 30-minute time stop) is a strategy with four variants as parameters
+          - A short is skipped while the restriction applies, for a name that is not easy to borrow, and when the stop is more than 2% away
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S21
+        jira: TIC-175
+        title: T07 RSI exhaustion with the plain intraday-reversal baseline (docs/research 2c)
+        status: todo
+        deps: [E19-S03, E19-S04, E19-S05, E19-S06]
+        ac:
+          - RSI(14) on one-minute closes with the thresholds, the two-minute reversal-candle entry and the exits of docs/research/02-mean-reversion.md, four variants, plus the plain event of at least 4% in 60 minutes and 8 times normal volatility (price at least $10) as the baseline variant
+          - The RSI uses Wilder smoothing from the first bar of the session and equals the engine's streaming RSI on a real day
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S22
+        jira: TIC-176
+        title: T08 prior-day high and low sweep reversal with control levels (docs/research 3a)
+        status: todo
+        deps: [E19-S03, E19-S04, E19-S05, E19-S06]
+        ac:
+          - The sweep rule of docs/research/03-liquidity.md at the prior regular-session high and low, and the same detector at the shifted control levels (25% and 50% of the prior range, both sides), run in one pass and reported separately
+          - Short sweeps skip names that are not easy to borrow; long sweeps need no borrow
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S23
+        jira: TIC-177
+        title: T09 premarket-high rip and dip (docs/research 4a)
+        status: todo
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05]
+        ac:
+          - The rule of docs/research/04-scalping.md (first regular minute breaks and closes above the premarket high, dip of at least 40% of that bar's range holding above the premarket high, then a break of the first bar's high; four variants) is a strategy
+          - The premarket high is taken from extended-hours trades and a test shows it ignores regular-session trades
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S24
+        jira: TIC-178
+        title: "T10 absorption: heavy volume with no movement, bar and refill variants (docs/research 3b)"
+        status: todo
+        deps: [E19-S03, E19-S05]
+        ac:
+          - The bar variant (volume at least 4 times the 30-minute average, range at most half the average true range, at a 30-minute extreme) and the refill variant (trades at the same best bid or offer exceeding five times the displayed size, bid price unchanged) of docs/research/03-liquidity.md are one strategy with a parameter for each
+          - The first report of this strategy is the drift after a signal against unconditional drift, before any cost
+          - "Meets the strategy bar for this epic: every decision in the rule has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a real captured stretch with a decision log that replays equal"
+      - id: E19-S25
+        jira: TIC-179
+        title: "T11 retail order flow: study and feature (docs/research 3c)"
+        status: todo
+        deps: [E19-S08, E19-S13, E19-S14]
+        ac:
+          - The midpoint-signed retail order imbalance per stock and half-hour is a feature computed from the trade flags and the consolidated quote, with its identification rate per symbol reported
+          - The study of docs/research/03-liquidity.md relates it, across stocks, to the return over the next 30 minutes, to the close and to the next day, with costs from our quotes, and says in plain words whether any trading rule follows
+      - id: E19-S26
+        jira: TIC-180
+        title: "T12 event studies: earnings reaction, FOMC reaction and gap-down flush bounce (docs/research 5a, 5b, 6a)"
+        status: todo
+        deps: [E19-S10, E19-S13, E19-S14, E19-S15, E19-S19]
+        ac:
+          - The earnings protocol of docs/research/05-news-reaction.md (gap, first-five-minute volume, return to the close and to the next day by gap size, with the follow rule and the fade rule on the same events), the FOMC study on SPY, and the flush-bounce rule of 06-psychology.md with and without the news flag are run on twelve months
+          - Each study ends in a written result that includes the number of events, the standard error, and whether any rule follows; a result with too few events says so and stops
+      - id: E19-S27
+        jira: TIC-181
+        title: T13 bull-flag fakeout measurement (docs/research 6b)
+        status: todo
+        deps: [E19-S13, E19-S14]
+        ac:
+          - The pole and flag are defined so that a machine finds them (docs/research/06-psychology.md), and over twelve months the counts of clean breakout, failed breakout and shakeout within 15 minutes are reported, with the same counts for other consolidations of the same height as the control
+          - The result says whether a shakeout is more frequent than the control and whether it is followed by gains; no strategy is written unless it is
+      - id: E19-S28
+        jira: TIC-182
+        title: "T14 null strategy: random entries with the same exits and costs"
+        status: todo
+        deps: [E19-S13]
+        ac:
+          - A strategy that enters at random times on random names of the same universe, with the same exits, sizing and costs as a reference strategy, repeated with different seeds, gives the distribution of results that doing nothing clever produces
+          - Two runs with the same seed are identical, and the distribution's mean after costs is reported as the cost of the exits and the spread alone
+      - id: E19-S29
+        jira: TIC-183
+        title: History results for the library and the gate into the live month
+        status: todo
+        deps: [E19-S14, E19-S15, E19-S16, E19-S17, E19-S18, E19-S19, E19-S20, E19-S21, E19-S22, E19-S23, E19-S24, E19-S28]
+        ac:
+          - Every built variant is run over twelve months through the research runner and registered; the report lists, for each, trades, mean in R and basis points after costs, the day-level t-statistic, the paired difference from its plain version where it is a refinement, the deflated Sharpe ratio for the number of trials, and the null strategy's distribution beside it
+          - The gate of docs/research/data-and-protocol.md (positive after costs, positive paired difference for a refinement, t above 2, at least 300 trades) is applied and the variants that pass are named, with the number tried
+          - "The report states what it cannot show: survivorship, the easy-to-borrow flag, the cost model's assumptions, and the share of volume the feed holds"

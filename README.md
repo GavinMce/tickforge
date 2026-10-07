@@ -3,7 +3,7 @@
 Stock market data ingestion and an agent-assisted trading framework.
 Rust hot path, Kubernetes deployment, paper trading first. Design:
 [`docs/DESIGN.md`](docs/DESIGN.md). Backlog: [`docs/backlog.yaml`](docs/backlog.yaml)
-(mirrored in Jira).
+(mirrored in Jira). Strategy research: [`docs/research/`](docs/research/README.md).
 
 ## Quick start
 

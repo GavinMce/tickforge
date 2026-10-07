@@ -1258,3 +1258,31 @@ fn twenty_strategies_run_in_one_engine_each_in_its_own_account() {
 pub(crate) fn wants(id: u16) -> impl CrossStrategy + 'static {
     Wants(id, false)
 }
+
+#[test]
+fn start_day_switches_on_the_session_state_the_strategies_read() {
+    let cfg = config(2);
+    let tape = market(5, flat);
+    let first = tape
+        .iter()
+        .find_map(|e| match e {
+            Event::Trade(t) => Some(t.hdr.instrument),
+            _ => None,
+        })
+        .expect("a trade");
+    // Without a day nothing is kept by session; with one, the whole tape is "regular session".
+    let mut h = host(&cfg);
+    run(&mut h, &tape);
+    assert_eq!(h.tier0().session(first).unwrap().regular.volume, 0);
+    let mut h = host(&cfg);
+    h.start_day(tf_calendar::SessionTimes {
+        premarket: 0,
+        open: 1,
+        close: u64::MAX - 1,
+        after_hours_end: u64::MAX,
+    });
+    run(&mut h, &tape);
+    let s = h.tier0().session(first).unwrap();
+    assert!(s.regular.volume > 0 && s.open.is_some());
+    assert_eq!(s.regular.volume, h.tier0().symbol(first).unwrap().volume);
+}

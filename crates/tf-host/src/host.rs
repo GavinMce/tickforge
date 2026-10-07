@@ -952,6 +952,13 @@ impl<S: LedgerStore> Host<S> {
         &self.tier0
     }
 
+    /// Start the session-by-session state for a day (premarket, regular session, after-hours) with the
+    /// boundaries `tf_calendar::Calendar::times` gives for its date. Until it is called, Tier 0 keeps only its
+    /// day-wide figures. The driver calls it before the first event of a day.
+    pub fn start_day(&mut self, times: tf_calendar::SessionTimes) {
+        self.tier0.set_day(times);
+    }
+
     pub fn sim(&self) -> &SimBroker {
         &self.sim
     }

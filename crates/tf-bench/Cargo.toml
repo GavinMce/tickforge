@@ -21,5 +21,6 @@ tf-tape.workspace = true
 [dev-dependencies]
 zstd = "0.13"
 tf-alpaca.workspace = true
+tf-calendar.workspace = true
 tf-strategy.workspace = true
 tf-universe.workspace = true

@@ -1560,7 +1560,23 @@ epics:
       - id: E19-S02
         jira: TIC-156
         title: "Session features in Tier 0: premarket, regular session and after-hours per symbol"
-        status: todo
+        status: done
+        evidence: >
+          tf_engine::Sessions / SessionState (ADR 0053), owned by Tier0 as a parallel array (Tier 0's own fields
+          and all golden hashes unchanged): per symbol the premarket, regular-session (VWAP anchored at the open)
+          and after-hours high, low, volume and notional, the open (first regular trade to arrive), the first
+          minute's and first five minutes' volume and the high and low of the first 5 and 15 minutes; Tier0::set_day
+          / session / day, Host::start_day. Placed by arrival time. 12 tests in tests/session.rs: edges to the
+          nanosecond, early close and winter days, windows ending exactly at 1, 5 and 15 minutes, Tier 0's day-wide
+          fields still counting everything, random streams on four days against a plain recomputation, no
+          reallocation; 23 mutants of the code and 5 of the wiring all killed after two tests were added. Real day
+          (examples/real_sessions, 2 October 2026, 25 symbols, 2.0 million trades from the premarket to after-hours
+          against Databento's one-minute bars): 275 of 275 comparisons agree with arrival-time placement and
+          zero-share prints kept; placed by event time 20 differ. 272 bytes and about 17 ns a symbol and event
+          (Tier 0 on the real opening five minutes: 23 million events a second with a day set, 37 without).
+          Narrowed: the open is not the official opening cross price (a statistics record); the decoder still
+          drops zero-share prints, which the bars count in highs, lows and the open (41% of the trades in the
+          premarket and after-hours windows of the sample): E19-S08 decides.
         deps: [E19-S01]
         ac:
           - "Per symbol, in a separate parallel array (Tier 0's existing fields and every golden hash unchanged): premarket high, low, volume and VWAP; the regular-session open, high, low, volume and VWAP anchored at the open; the volume of the first minute and of the first five minutes; the high and low of the first 5 and 15 minutes; after-hours high, low and volume"
@@ -1626,7 +1642,7 @@ epics:
         deps: [E06-S07]
         ac:
           - A trade event carries named flags for 'reported by a trade reporting facility' (publishers 82 and 83) and 'price has a fraction of a cent', set where the trade is decoded and not parsed by strategies; the event stays Copy and at most 64 bytes, and the encoding schema changes only if the layout does
-          - Whether prints of zero whole shares are kept as flagged trades or counted apart is decided on a real day and written down (about 4% of midday trades in the 2 October sample)
+          - Whether prints of zero whole shares are kept as flagged trades or counted apart is decided on a real day and written down (about 4% of midday trades and 41% of the premarket and after-hours trades of 25 symbols in the 2 October sample; Databento's bars count them in highs, lows and the open, so history and live highs differ while they are dropped)
           - The retail classification of the end-of-day paper (a fraction of a cent from 0 to 0.4 is a sell, from 0.6 to 1 a buy; or the sign of the price against the quote midpoint) is a function over the flags and the consolidated quote, with tests, and its identification rate is measured on a real day
           - Existing golden hashes and the capture format are unchanged, or moved with an explicit version
       - id: E19-S09

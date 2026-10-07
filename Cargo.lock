@@ -592,6 +592,7 @@ dependencies = [
  "tf-engine",
  "tf-manifest",
  "tf-params",
+ "tf-stats",
  "tf-synth",
  "tf-universe",
 ]

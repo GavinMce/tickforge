@@ -2061,7 +2061,35 @@ epics:
       - id: E19-S28
         jira: TIC-182
         title: "T14 null strategy: random entries with the same exits and costs"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0062. tf_strategy::random_entries::RandomEntries (a CrossStrategy on the ExitBook) with RandomEntriesParams (seed,
+          names, dollars, collar_permille, stop_permille, window_start_minutes, window_end_minutes, hold_seconds,
+          exit_stop_permille, target_permille: parsed and rendered as text, the seed included, so each seed is its own variant), and
+          From<&ClosingReversalParams> for the null of a closing reversal (its names, dollars, collar, stop, entry and exit). At its
+          first review of a day it draws `names` distinct members (the first k of a shuffle, SplitMix64 from the seed plus the
+          close times the golden constant) and a second in the window before the close for each, one timer each; a window of one
+          instant is a null of random names at one time (the default: twenty names at 15:30 held to 15:59:30). A name is bought only if it
+          could be (not halted, restricted, a two-sided quote, a share, a stop above nothing: skipped draws are counted, and no
+          skipped name sends an intent the framework refuses), with T04's order and disaster stop; exits are the ExitBook's:
+          a time exit hold_seconds after the fill but never later than 30 seconds before the close, and an optional stop and target
+          as permille from the average fill price. tf_host::library::random_entries builds the definition;
+          tf_host::research::null::null_defs makes one definition per seed (one pass over each day for all of them, a seed twice
+          refused) and null_distribution reads a results directory: the per-seed means in basis points, their mean, the trade-
+          weighted mean, the spread, and `against(observed)` by tf_stats::against_null. The seeds are controls, not trials: they are
+          not entered in the trial registry (a hundred would deflate every real strategy's Sharpe ratio) and are reported through
+          a registry made for the call. Checks: the draw is pinned to an independent Python implementation (seed 7 on 1 May
+          2026: names 2, 1, 4, 20, 14, 11, 13, 22 at 3337, 3249, 3240, 3236, 2834, 2581, 1997 and 1843 seconds before the close); the
+          same seed repeats a day and another seed or day does not, distinct members only, each as likely as any, the window used
+          to both ends (61 seconds, all met by 2,000 draws); and through the host over three days of DBN: in a market with nothing
+          in it every null trade is 99 shares bought at the ask 20.01 and sold at the bid 19.99, gross -1.98, fees 0.060072606,
+          net -2.040072606, -10.29 basis points exactly, for every seed (the cost of the exits and the spread alone); in a market
+          that moves the seeds' means differ with the names drawn, a rerun with the same seeds is identical and other seeds are
+          not; replay equal. Mutation run, 73 mutants of the strategy and the distribution: 12 survivors on the first run, each given
+          a test (a pinned draw, a locked quote, a bid of nothing, a size too big for a count, the spread's value, one seed); 2
+          remain, unreachable: a drawn name the view does not know and an order the framework refuses, which cannot happen for
+          members and parameters that pass validate. Not here: nulls for strategies whose exits depend on a signal or a trailing
+          level, and the use of the distribution in the gate (E19-S29).
         deps: [E19-S13]
         ac:
           - A strategy that enters at random times on random names of the same universe, with the same exits, sizing and costs as a reference strategy, repeated with different seeds, gives the distribution of results that doing nothing clever produces

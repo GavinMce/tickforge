@@ -15,6 +15,7 @@ tf-calendar.workspace = true
 tf-core.workspace = true
 tf-engine.workspace = true
 tf-params.workspace = true
+tf-stats.workspace = true
 tf-universe.workspace = true
 
 [dev-dependencies]

@@ -431,3 +431,344 @@ fn the_day_run_for_research_replays_to_the_same_decisions_through_the_live_check
     assert!(rep.verdict.is_equal(), "{}", rep.text());
     assert_eq!(rep.events, out.events);
 }
+
+// ---- the null strategy (T14) ----
+
+use std::path::PathBuf;
+
+use crate::research::null::{null_defs, null_distribution};
+use crate::research::{CostModel, DayInput, DaySource, Results, Setup, run, run_day};
+use tf_strategy::RandomEntriesParams;
+
+/// A dense afternoon: from 61 minutes before the close to five seconds before it, every ten seconds each member S00 to S05
+/// quotes a cent either side of its mid and trades at it. `mid(sym, secs_before_close)` is in cents.
+fn steady(close: Nanos, mid: impl Fn(u32, u64) -> i64) -> Vec<Ev> {
+    let mut v = Vec::new();
+    let mut s = 3660u64;
+    loop {
+        for sym in 0..6u32 {
+            let ts = close - s * SEC + u64::from(sym);
+            let m = mid(sym, s);
+            v.push(Ev {
+                ts,
+                sym,
+                k: K::Quote(m - 1, m + 1),
+            });
+            v.push(Ev {
+                ts: ts + 1_000,
+                sym,
+                k: K::Trade(m),
+            });
+        }
+        if s <= 5 {
+            break;
+        }
+        s = if s > 10 { s - 10 } else { 5 };
+    }
+    v.sort_by_key(|e| e.ts);
+    v
+}
+
+/// Three trading days of the same afternoon, as DBN files.
+struct Afternoons {
+    days: Vec<(String, Vec<PathBuf>)>,
+}
+
+fn afternoons(name: &str, mid: impl Fn(u32, u64) -> i64 + Copy) -> Afternoons {
+    use crate::replay_tests::scratch;
+    let root = scratch(name);
+    let mut days = Vec::new();
+    for (y, m, d) in [(2026, 5, 1), (2026, 5, 4), (2026, 5, 5)] {
+        let close = times(y, m, d).close;
+        let dir = root.join(format!("{y}-{m:02}-{d:02}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        // One file a day: the capture writer's segments of three seconds would be a thousand files for an hour.
+        let bytes = dbn_afternoon(&steady(close, mid));
+        let file = dir.join("day.dbn.zst");
+        std::fs::write(&file, zstd::encode_all(&bytes[..], 0).unwrap()).unwrap();
+        days.push((format!("{y}-{m:02}-{d:02}"), vec![file]));
+    }
+    Afternoons { days }
+}
+
+impl DaySource for Afternoons {
+    fn dates(&self) -> Vec<String> {
+        self.days.iter().map(|d| d.0.clone()).collect()
+    }
+
+    fn data_id(&self, date: &str) -> Result<String, String> {
+        let files = &self
+            .days
+            .iter()
+            .find(|d| d.0 == date)
+            .ok_or("no such day")?
+            .1;
+        let bytes: u64 = files
+            .iter()
+            .map(|f| std::fs::metadata(f).map_or(0, |m| m.len()))
+            .sum();
+        Ok(format!("{}-{bytes}", files.len()))
+    }
+
+    fn load(&mut self, date: &str) -> Result<DayInput, String> {
+        let files = self
+            .days
+            .iter()
+            .find(|d| d.0 == date)
+            .ok_or("no such day")?
+            .1
+            .clone();
+        Ok(DayInput {
+            files,
+            snapshot: crate::tests::snapshot(),
+        })
+    }
+}
+
+fn null_base() -> RandomEntriesParams {
+    RandomEntriesParams {
+        names: 3,
+        ..RandomEntriesParams::default()
+    }
+}
+
+/// Run the null strategy with these seeds over three days of `src`: the results and the definitions' fingerprints.
+fn run_nulls(
+    out: &str,
+    src: &mut Afternoons,
+    seeds: &[u64],
+    base: RandomEntriesParams,
+) -> (Results, Vec<u64>) {
+    use crate::replay_tests::scratch;
+    let defs = null_defs(1, "null", &Spec::parse(LOW).unwrap(), base, seeds).unwrap();
+    let fps: Vec<u64> = defs.iter().map(StrategyDef::fingerprint).collect();
+    let (host_cfg, cost) = (config(seeds.len() as u32), CostModel::published());
+    let dir = scratch(out);
+    run(
+        &Setup {
+            host: &host_cfg,
+            cost: &cost,
+            defs: &defs,
+        },
+        src,
+        &dir,
+    )
+    .unwrap();
+    (Results::open(&dir).unwrap(), fps)
+}
+
+const SEEDS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+#[test]
+fn in_a_market_with_nothing_in_it_the_null_pays_the_spread_and_the_fees_and_nothing_else() {
+    let mut src = afternoons("null-flat", |_, _| 2000);
+    let (results, fps) = run_nulls("null-flat-out", &mut src, &SEEDS, null_base());
+    let dist = null_distribution(&results, &fps).unwrap().unwrap();
+    // Eight seeds, each three names a day for three days.
+    assert_eq!((dist.seeds, dist.traded, dist.trades), (8, 8, 72));
+    // Every trade buys at the ask 20.01 and sells at the bid 19.99, 99 shares: -1.98 gross, and Section 31 at $20.60 a
+    // million on $1,979.01 and 99 shares at $0.000195 in fees, -2.040072606 net, over $1,980.99 put in: -10.29 basis points
+    // (the figure by hand: -1,029 hundredths).
+    for t in results.trips().unwrap() {
+        assert_eq!(
+            (t.qty, t.entry_px, t.exit_px),
+            (99, 20_010_000_000, 19_990_000_000)
+        );
+        assert_eq!(
+            (t.gross, t.fees, t.net, t.net_bps_x100),
+            (-1_980_000_000, 60_072_606, -2_040_072_606, -1029)
+        );
+    }
+    assert!(dist.means_bp.iter().all(|&m| m == -10.29));
+    assert_eq!(
+        (dist.mean_of_means_bp, dist.pooled_mean_bp),
+        (-10.29, -10.29)
+    );
+    assert_eq!(dist.sd_of_means_bp, Some(0.0));
+    // A result is held against it: better than every seed has the least p-value eight seeds allow; worse than all, one.
+    let better = dist.against(-5.0).unwrap();
+    assert_eq!((better.runs, better.at_or_above), (8, 0));
+    assert!((better.p_value - 1.0 / 9.0).abs() < 1e-15);
+    assert_eq!(dist.against(-20.0).unwrap().p_value, 1.0);
+}
+
+/// A market with a drift after 15:30: S00 falls and S05 rises, by 29.5 cents for each step of the name's number from S02.
+fn drifting(sym: u32, secs: u64) -> i64 {
+    2000 + (i64::from(sym) - 2) * (1800 - secs.min(1800)) as i64 / 60
+}
+
+#[test]
+fn the_null_in_a_market_that_moves_varies_with_the_seed_and_the_days_it_drew_and_repeats_with_the_same_seed()
+ {
+    let mut src = afternoons("null-drift", drifting);
+    let (a, fps) = run_nulls("null-drift-a", &mut src, &SEEDS, null_base());
+    let dist = null_distribution(&a, &fps).unwrap().unwrap();
+    assert_eq!((dist.seeds, dist.traded, dist.trades), (8, 8, 72));
+    // The seeds drew different names, so their means differ.
+    assert!(dist.sd_of_means_bp.unwrap() > 1.0, "{dist:?}");
+    let mut distinct = dist.means_bp.clone();
+    distinct.sort_by(f64::total_cmp);
+    distinct.dedup();
+    assert!(distinct.len() >= 4, "{:?}", dist.means_bp);
+    // Every null trade is at 15:30 and 15:59:30 (each after the cost model's 50 ms), on three distinct names a day.
+    let trips = a.trips().unwrap();
+    for t in &trips {
+        let close = times(
+            2026,
+            t.day[5..7].parse().unwrap(),
+            t.day[8..10].parse().unwrap(),
+        )
+        .close;
+        assert_eq!(t.entry_ts, close - 1800 * SEC + 50_000_000);
+        assert_eq!(t.exit_ts, close - 30 * SEC + 50_000_000);
+    }
+    for (fp, name) in fps.iter().zip(SEEDS.iter()) {
+        for day in a.dates().unwrap() {
+            let mut syms: Vec<&str> = trips
+                .iter()
+                .filter(|t| t.variant == *fp && t.day == day)
+                .map(|t| t.symbol.as_str())
+                .collect();
+            assert_eq!(syms.len(), 3, "seed {name} on {day}");
+            syms.sort();
+            syms.dedup();
+            assert_eq!(syms.len(), 3, "seed {name} on {day}: a name twice");
+        }
+    }
+    // The pooled mean is every null trade counted once, found here from the trips themselves.
+    let all: f64 = trips
+        .iter()
+        .map(|t| t.net_bps_x100 as f64 / 100.0)
+        .sum::<f64>()
+        / trips.len() as f64;
+    assert!((dist.pooled_mean_bp - all).abs() < 1e-9);
+    // Run again with the same seeds: the same trips, the same distribution. Other seeds: another.
+    let (b, fps_b) = run_nulls("null-drift-b", &mut src, &SEEDS, null_base());
+    assert_eq!(fps, fps_b);
+    assert_eq!(a.trips().unwrap(), b.trips().unwrap());
+    assert_eq!(null_distribution(&b, &fps_b).unwrap().unwrap(), dist);
+    let other = [101u64, 102, 103, 104, 105, 106, 107, 108];
+    let (c, fps_c) = run_nulls("null-drift-c", &mut src, &other, null_base());
+    assert_ne!(
+        null_distribution(&c, &fps_c).unwrap().unwrap().means_bp,
+        dist.means_bp
+    );
+}
+
+#[test]
+fn the_null_of_a_run_reads_the_seeds_it_is_asked_for_and_nothing_else() {
+    let mut src = afternoons("null-ask", |_, _| 2000);
+    let (results, fps) = run_nulls("null-ask-out", &mut src, &[1, 2, 3], null_base());
+    // Two of the three: their distribution only.
+    let two = null_distribution(&results, &fps[..2]).unwrap().unwrap();
+    assert_eq!((two.seeds, two.trades), (2, 18));
+    // A fingerprint the run does not have is refused, not skipped.
+    assert!(null_distribution(&results, &[fps[0], 12345]).is_err());
+    // The seeds are not in the trial registry, and asking for the distribution did not put them there.
+    let reg = tf_stats::Registry::new();
+    assert!(
+        crate::research::stats::report_results(&results, &reg, tf_stats::Bootstrap::default())
+            .is_err()
+    );
+    // Nobody traded (a dollar buys no share): no distribution, not a distribution of nothing.
+    let none = RandomEntriesParams {
+        dollars: 1,
+        ..null_base()
+    };
+    let (results, fps) = run_nulls("null-none-out", &mut src, &[1, 2], none);
+    assert_eq!(null_distribution(&results, &fps).unwrap(), None);
+}
+
+#[test]
+fn a_definition_for_each_seed_with_its_own_number_name_and_fingerprint() {
+    let u = Spec::parse(LOW).unwrap();
+    let defs = null_defs(10, "n", &u, null_base(), &[5, 9, 700]).unwrap();
+    assert_eq!(defs.iter().map(|d| d.id).collect::<Vec<_>>(), [10, 11, 12]);
+    assert_eq!(
+        defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        ["n5", "n9", "n700"]
+    );
+    assert!(defs[1].params.starts_with("seed=9 names=3 "));
+    let mut fps: Vec<u64> = defs.iter().map(StrategyDef::fingerprint).collect();
+    fps.sort();
+    fps.dedup();
+    assert_eq!(fps.len(), 3);
+    // Only the seed (and the number and name) differ.
+    assert_eq!(
+        defs[0].params.split_once(' ').unwrap().1,
+        defs[1].params.split_once(' ').unwrap().1
+    );
+    assert!(null_defs(10, "n", &u, null_base(), &[5, 9, 5]).is_err());
+    assert!(null_defs(65_535, "n", &u, null_base(), &[1, 2]).is_err());
+    assert!(
+        null_defs(
+            1,
+            "n",
+            &u,
+            RandomEntriesParams {
+                names: 0,
+                ..null_base()
+            },
+            &[1]
+        )
+        .is_err()
+    );
+    assert!(null_defs(1, "n", &u, null_base(), &[]).unwrap().is_empty());
+}
+
+#[test]
+fn the_null_replays_to_the_same_decisions_through_the_live_check() {
+    let mut src = afternoons("null-replay", drifting);
+    let defs = null_defs(1, "null", &Spec::parse(LOW).unwrap(), null_base(), &[3]).unwrap();
+    let (host_cfg, cost) = (config(1), CostModel::published());
+    let input = src.load("2026-05-01").unwrap();
+    let out = run_day(
+        "2026-05-01",
+        &input,
+        &Setup {
+            host: &host_cfg,
+            cost: &cost,
+            defs: &defs,
+        },
+    )
+    .unwrap();
+    assert_eq!(out.trips.len(), 3);
+    let cfg = HostConfig {
+        day: Some(times(2026, 5, 1)),
+        sim: cost.sim(),
+        ..host_cfg
+    };
+    let rep = crate::replay_files(
+        &input.files,
+        &out.log,
+        &cfg,
+        crate::tests::snapshot(),
+        &defs,
+        0,
+    )
+    .unwrap();
+    assert!(rep.verdict.is_equal(), "{}", rep.text());
+}
+
+#[test]
+fn the_spread_of_the_seeds_is_the_sample_standard_deviation_and_one_seed_has_none() {
+    let mut src = afternoons("null-sd", drifting);
+    let (results, fps) = run_nulls("null-sd-out", &mut src, &SEEDS, null_base());
+    let dist = null_distribution(&results, &fps).unwrap().unwrap();
+    // Found here from the seeds' own means: the square root of the sum of squared deviations over n - 1.
+    let n = dist.means_bp.len() as f64;
+    let mean = dist.means_bp.iter().sum::<f64>() / n;
+    let sd = (dist
+        .means_bp
+        .iter()
+        .map(|m| (m - mean).powi(2))
+        .sum::<f64>()
+        / (n - 1.0))
+        .sqrt();
+    assert!((dist.sd_of_means_bp.unwrap() - sd).abs() < 1e-12);
+    assert!((dist.mean_of_means_bp - mean).abs() < 1e-12);
+    // One seed has a mean and no spread.
+    let one = null_distribution(&results, &fps[..1]).unwrap().unwrap();
+    assert_eq!((one.seeds, one.traded, one.sd_of_means_bp), (1, 1, None));
+    assert_eq!(one.mean_of_means_bp, one.means_bp[0]);
+}

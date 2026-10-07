@@ -312,3 +312,33 @@ fn unknown_instruments_are_counted_and_a_new_day_clears_state() {
     assert_eq!(t.windows(2).unwrap().volume(60), 0);
     assert_eq!(t.len(), 3, "the table keeps its size");
 }
+
+#[test]
+fn the_short_sale_restriction_is_set_by_the_feed_and_cleared_by_it() {
+    use tf_core::{Header, ProviderId, Status, StatusKind};
+    let status = |ts: u64, instrument: u32, kind: StatusKind| {
+        Event::Status(Status {
+            hdr: Header {
+                ts_event: ts,
+                ts_recv: ts,
+                seq: ts,
+                instrument,
+                provider: ProviderId::Synthetic,
+            },
+            kind,
+            lo: tf_core::Px::ZERO,
+            hi: tf_core::Px::ZERO,
+        })
+    };
+    let mut t = tf_engine::Tier0::new(2);
+    assert!(!t.symbol(0).unwrap().ssr);
+    t.on_event(&status(1, 0, StatusKind::ShortSaleRestriction));
+    assert!(t.symbol(0).unwrap().ssr);
+    assert!(!t.symbol(1).unwrap().ssr, "per instrument");
+    t.on_event(&status(2, 0, StatusKind::TradingHalt));
+    assert!(t.symbol(0).unwrap().ssr, "a halt does not lift it");
+    t.on_event(&status(3, 0, StatusKind::ShortSaleRestrictionLifted));
+    assert!(!t.symbol(0).unwrap().ssr);
+    t.on_event(&status(4, 0, StatusKind::ShortSaleRestriction));
+    assert!(t.symbol(0).unwrap().ssr);
+}

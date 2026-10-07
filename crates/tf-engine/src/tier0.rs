@@ -165,6 +165,7 @@ impl Tier0 {
                 StatusKind::TradingResume => s.halted = false,
                 StatusKind::LuldBand => s.luld = Some((st.lo, st.hi)),
                 StatusKind::ShortSaleRestriction => s.ssr = true,
+                StatusKind::ShortSaleRestrictionLifted => s.ssr = false,
             },
             Event::Correction(c) => {
                 s.volume = s.volume.saturating_sub(u64::from(c.orig_size)) + u64::from(c.size);

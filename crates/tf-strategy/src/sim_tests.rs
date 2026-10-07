@@ -1025,3 +1025,232 @@ mod legs {
         assert_eq!(b.position(0), 20);
     }
 }
+
+// ---- short sales (E19-S06) ----
+
+mod shorts {
+    use super::*;
+    use crate::OrderId;
+    use crate::broker::{Broker, Submission};
+    use crate::sim::{Borrow, SHORT_REFUSED_CODE};
+    use crate::testing::{T0, bracket_scenarios};
+    use tf_core::{Status, StatusKind};
+
+    const S: u64 = 1_000_000_000;
+
+    /// A short sale of 100 at 10.00 with the stop and target of the scenarios.
+    fn short() -> crate::Intent {
+        bracket_scenarios()[4].intent
+    }
+
+    fn q(sec: u64, bid: i64, ask: i64) -> Event {
+        Event::Quote(tf_core::Quote {
+            hdr: Header {
+                ts_event: T0 + sec * S,
+                ts_recv: T0 + sec * S,
+                seq: sec,
+                instrument: 0,
+                provider: ProviderId::Synthetic,
+            },
+            bid_px: Px::from_cents(bid),
+            ask_px: Px::from_cents(ask),
+            bid_sz: 500,
+            ask_sz: 500,
+        })
+    }
+
+    fn status(sec: u64, kind: StatusKind) -> Event {
+        Event::Status(Status {
+            hdr: Header {
+                ts_event: T0 + sec * S,
+                ts_recv: T0 + sec * S,
+                seq: sec,
+                instrument: 0,
+                provider: ProviderId::Synthetic,
+            },
+            kind,
+            lo: Px::ZERO,
+            hi: Px::ZERO,
+        })
+    }
+
+    fn broker(bps: u32) -> SimBroker {
+        SimBroker::new(
+            SimConfig {
+                latency_ns: 0,
+                borrow_bps_per_year: bps,
+            },
+            1,
+        )
+    }
+
+    fn long_sell() -> crate::Intent {
+        let mut i = short();
+        i.side = Side::Sell;
+        i.purpose = Purpose::Close;
+        i.protect = None;
+        i
+    }
+
+    #[test]
+    fn while_the_restriction_lasts_a_short_sale_does_not_fill_and_it_fills_when_it_is_lifted() {
+        let mut b = broker(0);
+        b.observe(&q(0, 999, 1000));
+        b.observe(&status(1, StatusKind::ShortSaleRestriction));
+        let mut i = short();
+        i.ts = T0 + 2 * S;
+        assert_eq!(b.place(&i, OrderId(7)), Submission::Accepted);
+        // The bid is at the limit the sale asks for: with no restriction it would fill at the bid. It does not.
+        b.observe(&q(3, 1000, 1001));
+        b.observe(&q(4, 1010, 1011));
+        assert_eq!(b.position(0), 0);
+        assert_eq!(b.open_orders(), 1, "the order rests");
+        // The restriction ends: the order is tried against the market as it stands, and fills at the bid.
+        b.observe(&status(5, StatusKind::ShortSaleRestrictionLifted));
+        assert_eq!(b.position(0), -100);
+        assert_eq!(b.fills()[0].px, Px::from_cents(1010));
+        // And it can start again: a second short is held back.
+        b.observe(&status(6, StatusKind::ShortSaleRestriction));
+        let mut j = short();
+        j.id.seq = 2;
+        j.ts = T0 + 7 * S;
+        b.place(&j, OrderId(8));
+        b.observe(&q(8, 1010, 1011));
+        assert_eq!(b.position(0), -100);
+        // An immediate-or-cancel short sale under the restriction expires unfilled.
+        let mut k = short();
+        k.id.seq = 3;
+        k.tif = crate::Tif::Ioc;
+        k.ts = T0 + 9 * S;
+        b.place(&k, OrderId(9));
+        b.observe(&q(10, 1010, 1011));
+        assert!(b.take_events().iter().any(|e| e.order == OrderId(9)
+            && matches!(e.kind, crate::broker::Kind::Close(OrderState::Expired))));
+    }
+
+    #[test]
+    fn the_restriction_is_per_instrument_and_does_not_hold_back_a_sale_of_shares_held() {
+        let mut b = SimBroker::new(
+            SimConfig {
+                latency_ns: 0,
+                borrow_bps_per_year: 0,
+            },
+            2,
+        );
+        // Long 100 in instrument 0 first, then the restriction starts on instrument 0 only.
+        let mut buy = short();
+        buy.side = Side::Buy;
+        buy.pricing = Pricing::Limit(Px::from_cents(1002));
+        b.place(&buy, OrderId(1));
+        b.observe(&q(1, 999, 1000));
+        assert_eq!(b.position(0), 100);
+        b.observe(&status(2, StatusKind::ShortSaleRestriction));
+        // Selling what is held is not a short sale: it fills.
+        let mut sell = long_sell();
+        sell.id.seq = 5;
+        sell.ts = T0 + 3 * S;
+        sell.pricing = Pricing::Limit(Px::from_cents(990));
+        b.place(&sell, OrderId(2));
+        b.observe(&q(4, 999, 1000));
+        assert_eq!(b.position(0), 0);
+        // A short sale in instrument 1, which has no restriction, fills.
+        let mut other = short();
+        other.id.seq = 6;
+        other.instrument = 1;
+        other.ts = T0 + 5 * S;
+        b.place(&other, OrderId(3));
+        let mut q1 = q(6, 1000, 1001);
+        if let Event::Quote(x) = &mut q1 {
+            x.hdr.instrument = 1;
+        }
+        b.observe(&q1);
+        assert_eq!(b.position(1), -100);
+    }
+
+    #[test]
+    fn a_short_sale_of_a_name_that_is_not_easy_to_borrow_is_refused_as_the_broker_refuses_it() {
+        let table = vec![Borrow::Hard];
+        for (kind, why) in [
+            (Borrow::Hard, "hard to borrow"),
+            (Borrow::NotShortable, "cannot be sold short"),
+            (Borrow::Unknown, "is not known"),
+        ] {
+            let mut b = broker(0).with_borrow_table(vec![kind]);
+            match b.place(&short(), OrderId(7)) {
+                Submission::Refused { code, message } => {
+                    assert_eq!(code, SHORT_REFUSED_CODE);
+                    assert_eq!(code, 403, "the status the broker answers with");
+                    assert!(message.contains(why), "{message}");
+                }
+                o => panic!("{kind:?}: {o:?}"),
+            }
+            assert_eq!(b.open_orders(), 0);
+            // The old path refuses it too, as a rejection.
+            let mut b = broker(0).with_borrow_table(vec![kind]);
+            b.submit(&short());
+            assert_eq!(b.drain_updates()[0].state, OrderState::Rejected);
+        }
+        let _ = table;
+        // An easy-to-borrow name is taken; a sale of shares held and a purchase are never asked about borrowing.
+        let mut b = broker(0).with_borrow_table(vec![Borrow::Easy]);
+        assert_eq!(b.place(&short(), OrderId(7)), Submission::Accepted);
+        let mut b = broker(0).with_borrow_table(vec![Borrow::Hard]);
+        let mut buy = short();
+        buy.side = Side::Buy;
+        assert_eq!(b.place(&buy, OrderId(7)), Submission::Accepted);
+        assert_eq!(b.place(&long_sell(), OrderId(8)), Submission::Accepted);
+        // An instrument the table does not reach is not known.
+        let mut b = SimBroker::new(
+            SimConfig {
+                latency_ns: 0,
+                borrow_bps_per_year: 0,
+            },
+            3,
+        )
+        .with_borrow_table(vec![Borrow::Easy]);
+        let mut i = short();
+        i.instrument = 2;
+        assert!(matches!(
+            b.place(&i, OrderId(1)),
+            Submission::Refused { .. }
+        ));
+        // Without the rules, nothing about borrowing is asked: the short is accepted, as before.
+        let mut b = broker(0);
+        assert_eq!(b.place(&short(), OrderId(7)), Submission::Accepted);
+    }
+
+    #[test]
+    fn the_borrow_fee_follows_the_broker_none_on_easy_to_borrow_names() {
+        // Short 100 at 10.00 for a day, at 500 bps a year (5%): about $0.137 without the broker's rules; nothing with
+        // them on an easy-to-borrow name.
+        let fee = |table: Option<Vec<Borrow>>| {
+            let mut b = broker(500);
+            if let Some(t) = table {
+                b = b.with_borrow_table(t);
+            }
+            b.place(&short(), OrderId(7));
+            b.observe(&q(1, 1000, 1001));
+            assert_eq!(b.position(0), -100);
+            b.observe(&Event::Trade(tf_core::Trade {
+                hdr: Header {
+                    ts_event: T0 + 2 * S,
+                    ts_recv: T0 + 2 * S,
+                    seq: 2,
+                    instrument: 0,
+                    provider: ProviderId::Synthetic,
+                },
+                px: Px::from_cents(1000),
+                size: 10,
+                flags: tf_core::TradeFlags::NONE,
+            }));
+            b.observe(&q(2 + 86_400, 1000, 1001));
+            b.borrow_fee(0)
+        };
+        let charged = fee(None);
+        // Worked independently: the mark is the quote midpoint (10.005) for the first second, then the last trade
+        // (10.00) for 86,400 s: (100 x 10.005 x 1 + 100 x 10.00 x 86,400) x 5% / (365 x 86,400) = 0.13698788765...,
+        // in raw units (1e-9 dollars) rounded up.
+        assert_eq!(charged, 136_987_888);
+        assert_eq!(fee(Some(vec![Borrow::Easy])), 0);
+    }
+}

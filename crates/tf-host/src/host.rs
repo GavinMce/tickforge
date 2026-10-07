@@ -8,9 +8,9 @@ use tf_risk::{Budgets, Limits, LossTier};
 use tf_strategy::broker::{Broker, BrokerEvent, CancelOutcome, Kind, Submission};
 use tf_strategy::intent::{Intent, IntentId, Pricing, Purpose, Side, StrategyId, Tif};
 use tf_strategy::lifecycle::{Decision, OrderId, OrderState, OrderUpdate};
-use tf_strategy::sim::{SimBroker, SimConfig};
+use tf_strategy::sim::{Borrow, SimBroker, SimConfig};
 use tf_strategy::{Market, Members};
-use tf_universe::{RefInfo, Selection, Selector, Snapshot, Tier0View, select};
+use tf_universe::{RefInfo, Selection, Selector, Snapshot, StaticFeature, Tier0View, select};
 
 use crate::def::{Certificate, Route, StrategyDef};
 use crate::equiv::{Answer, Log, Rec};
@@ -218,6 +218,8 @@ pub struct Host<S: LedgerStore> {
     log: Option<Log>,
     // What the daily report reads (E18-S07).
     reasons: BTreeMap<u16, BTreeMap<&'static str, u64>>,
+    /// What the brokers refused, by strategy: whether it was a short sale, the reason, how many.
+    broker_refusals: BTreeMap<u16, BTreeMap<(bool, String), u64>>,
     fills_by: BTreeMap<(u16, InstrumentId), (u64, u128)>,
     fill_counts: BTreeMap<u16, u64>,
     per_second: BTreeMap<u64, u32>,
@@ -244,12 +246,35 @@ impl<S: LedgerStore> Host<S> {
             journal.set_budgets(Some(b.clone()), cfg.start_ts)?;
         }
         let mut refs = vec![RefInfo::default(); cfg.id_space];
+        // What the snapshot says about borrowing, by instrument: the simulated broker applies the broker's rules for
+        // short sales when the snapshot has the flags (from the broker's asset list), and otherwise asks nothing.
+        let borrow_known = reference
+            .snapshot
+            .columns
+            .contains(&StaticFeature::EasyToBorrow)
+            || reference
+                .snapshot
+                .columns
+                .contains(&StaticFeature::Shortable);
+        let mut borrow = vec![Borrow::Unknown; cfg.id_space];
         for row in &reference.snapshot.rows {
             if let Some(id) = reference.symbols.get(&row.symbol) {
                 if let Some(r) = refs.get_mut(id as usize) {
                     *r = RefInfo::from_row(row);
                 }
+                if let Some(b) = borrow.get_mut(id as usize) {
+                    *b = match (row.shortable, row.easy_to_borrow) {
+                        (Some(false), _) => Borrow::NotShortable,
+                        (_, Some(true)) => Borrow::Easy,
+                        (_, Some(false)) => Borrow::Hard,
+                        _ => Borrow::Unknown,
+                    };
+                }
             }
+        }
+        let mut sim = SimBroker::new(cfg.sim, cfg.id_space);
+        if borrow_known {
+            sim = sim.with_borrow_table(borrow);
         }
         let promoter = Promoter::new(cfg.promoter, cfg.scanner, cfg.id_space)
             .map_err(|e| HostError::Ledger(JournalError::Structure(e.0.to_owned())))?;
@@ -259,7 +284,7 @@ impl<S: LedgerStore> Host<S> {
                 .bars
                 .map(|b| SharedBars::new(b.mtf, cfg.id_space, b.max_tracked)),
             bar_closes: Vec::new(),
-            sim: SimBroker::new(cfg.sim, cfg.id_space),
+            sim,
             refs,
             promoter,
             journal,
@@ -284,6 +309,7 @@ impl<S: LedgerStore> Host<S> {
             failed: false,
             log: None,
             reasons: BTreeMap::new(),
+            broker_refusals: BTreeMap::new(),
             fills_by: BTreeMap::new(),
             fill_counts: BTreeMap::new(),
             per_second: BTreeMap::new(),
@@ -667,8 +693,14 @@ impl<S: LedgerStore> Host<S> {
                 self.touched.insert((s, intent.instrument));
                 match self.broker(route).place(&intent, order) {
                     Submission::Accepted => {}
-                    Submission::Refused { .. } => {
+                    Submission::Refused { message, .. } => {
                         self.slots[k].stats.refused_by_broker += 1;
+                        *self
+                            .broker_refusals
+                            .entry(s)
+                            .or_default()
+                            .entry((intent.side == Side::SellShort, message))
+                            .or_insert(0) += 1;
                         self.close(order, OrderState::Rejected, ts)?;
                     }
                     Submission::RateLimited { .. } => {
@@ -1045,6 +1077,18 @@ impl<S: LedgerStore> Host<S> {
         self.reasons
             .get(&id)
             .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
+            .unwrap_or_default()
+    }
+
+    /// What the brokers refused a strategy, with the reason they gave: `(was_a_short_sale, reason, count)`.
+    pub fn broker_refusals_of(&self, id: u16) -> Vec<(bool, String, u64)> {
+        self.broker_refusals
+            .get(&id)
+            .map(|m| {
+                m.iter()
+                    .map(|((short, why), n)| (*short, why.clone(), *n))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

@@ -813,3 +813,153 @@ fn a_tap_sees_every_record_before_it_is_mapped_and_can_stop_the_stream() {
     );
     assert_eq!(err.to_string(), "tap: the disk is full");
 }
+
+// ---- the short-sale restriction flag (E19-S06) ----
+
+fn flagged(action: StatusAction, flag: u8, instrument: u32, ts: u64) -> StatusMsg {
+    let mut s = status(action);
+    s.hd = RecordHeader::new::<StatusMsg>(rtype::STATUS, 81, instrument, ts);
+    s.ts_recv = ts + 1;
+    s.is_short_sell_restricted = flag as std::ffi::c_char;
+    s
+}
+
+/// What a stream of status records becomes: the status kinds with their times, and the records ignored.
+fn run(recs: &[StatusMsg]) -> (Vec<(StatusKind, u64)>, u64) {
+    let bytes = dbn(Schema::Status, |e| {
+        for r in recs {
+            e.encode_record(r).unwrap();
+        }
+    });
+    let mut d = Decoder::new(&bytes[..]).unwrap();
+    let mut kinds = vec![];
+    let mut ignored = 0;
+    while let Some(i) = d.next_item().unwrap() {
+        match i {
+            Item::Event(Event::Status(s)) => kinds.push((s.kind, s.hdr.ts_event)),
+            Item::Ignored { .. } => ignored += 1,
+            other => panic!("{other:?}"),
+        }
+    }
+    (kinds, ignored)
+}
+
+#[test]
+fn a_restriction_carried_over_from_the_day_before_shows_on_the_first_record_and_is_said_once() {
+    use StatusAction::*;
+    use StatusKind::*;
+    // The day opens with a trading record that says the instrument is restricted: no change action anywhere, but the
+    // restriction is in force. It is said once, then not again while the flag stays Y.
+    let (k, ignored) = run(&[
+        flagged(Trading, b'Y', 9, 10),
+        flagged(Trading, b'Y', 9, 20),
+        flagged(Halt, b'Y', 9, 30),
+        flagged(Trading, b'Y', 9, 40),
+    ]);
+    assert_eq!(
+        k,
+        [
+            (TradingResume, 10),
+            (ShortSaleRestriction, 10),
+            (TradingResume, 20),
+            (TradingHalt, 30),
+            (TradingResume, 40),
+        ]
+    );
+    assert_eq!(ignored, 0);
+}
+
+#[test]
+fn the_end_of_a_restriction_is_said_and_a_first_not_restricted_is_not() {
+    use StatusAction::*;
+    use StatusKind::*;
+    // A first N says nothing: not restricted is how an instrument starts. Y starts the restriction, N ends it, and a
+    // second N says nothing again.
+    let (k, _) = run(&[
+        flagged(Trading, b'N', 9, 10),
+        flagged(Trading, b'Y', 9, 20),
+        flagged(SsrChange, b'N', 9, 30),
+        flagged(Trading, b'N', 9, 40),
+    ]);
+    assert_eq!(
+        k,
+        [
+            (TradingResume, 10),
+            (TradingResume, 20),
+            (ShortSaleRestriction, 20),
+            (ShortSaleRestrictionLifted, 30),
+            (TradingResume, 40),
+        ]
+    );
+    // Not known says nothing either way, and a record about something else that carries a Y is not ignored.
+    let (k, ignored) = run(&[
+        flagged(Trading, b'~', 9, 10),
+        flagged(PreOpen, b'N', 9, 20),
+        flagged(PreOpen, b'Y', 9, 30),
+        flagged(PreOpen, b'~', 9, 40),
+    ]);
+    assert_eq!(k, [(TradingResume, 10), (ShortSaleRestriction, 30)]);
+    assert_eq!(ignored, 2);
+    // A restriction change that does not say which way is the start of one, as it was always read.
+    let (k, _) = run(&[
+        flagged(SsrChange, b'~', 9, 10),
+        flagged(SsrChange, 0, 9, 20),
+    ]);
+    assert_eq!(k, [(ShortSaleRestriction, 10)]);
+}
+
+#[test]
+fn each_instrument_has_its_own_state_and_it_carries_across_decoders() {
+    use StatusAction::*;
+    use StatusKind::*;
+    let day = |recs: &[StatusMsg]| {
+        dbn(Schema::Status, |e| {
+            for r in recs {
+                e.encode_record(r).unwrap();
+            }
+        })
+    };
+    let first = day(&[
+        flagged(Trading, b'Y', 9, 10),
+        flagged(Trading, b'N', 10, 11),
+    ]);
+    let mut d1 = Decoder::new(&first[..]).unwrap();
+    let mut seen = vec![];
+    while let Some(i) = d1.next_item().unwrap() {
+        if let Item::Event(Event::Status(s)) = i {
+            seen.push((s.kind, s.hdr.instrument));
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            (TradingResume, 0),
+            (ShortSaleRestriction, 0),
+            (TradingResume, 1)
+        ]
+    );
+    let ids = d1.into_instruments();
+    assert_eq!(ids.short_sale_restricted(0), Some(true));
+    assert_eq!(ids.short_sale_restricted(1), Some(false));
+    // The next day, with the ids carried over: the restriction is still known, so a Y on the first record is no
+    // change, and the end of it (N) is said.
+    let second = day(&[
+        flagged(Trading, b'Y', 9, 100),
+        flagged(Trading, b'N', 9, 110),
+    ]);
+    let mut d2 = Decoder::new(&second[..]).unwrap().with_instruments(ids);
+    let mut seen = vec![];
+    while let Some(i) = d2.next_item().unwrap() {
+        if let Item::Event(Event::Status(s)) = i {
+            seen.push((s.kind, s.hdr.ts_event));
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            (TradingResume, 100),
+            (TradingResume, 110),
+            (ShortSaleRestrictionLifted, 110)
+        ]
+    );
+}

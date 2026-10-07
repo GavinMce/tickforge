@@ -31,12 +31,15 @@ use std::collections::BTreeMap;
 
 use tf_core::{Event, Nanos};
 
+use crate::intent::Side;
 use crate::sim::Fill;
 
 /// Figures for one group of instruments (or all of them).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     pub fills: u64,
+    /// Fills that were short sales (the opening side of a short).
+    pub short_fills: u64,
     pub shares: u64,
     pub trades: u64,
     pub wins: u64,
@@ -155,6 +158,7 @@ impl ReportBuilder {
         let Some(p) = self.pos.get_mut(i) else { return };
         let st = &mut self.per_inst[i];
         st.fills += 1;
+        st.short_fills += u64::from(f.side == Side::SellShort);
         st.shares += u64::from(f.qty);
         st.slippage_cost += i128::from(f.slippage) * i128::from(f.qty);
         st.worst_slippage = st.worst_slippage.max(f.slippage);
@@ -240,6 +244,7 @@ impl ReportBuilder {
 
 fn merge(into: &mut Stats, s: &Stats) {
     into.fills += s.fills;
+    into.short_fills += s.short_fills;
     into.shares += s.shares;
     into.trades += s.trades;
     into.wins += s.wins;
@@ -289,6 +294,11 @@ fn dollars(raw: i128) -> String {
 fn clamp(v: i128) -> i64 {
     v.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
+
+/// The point-in-time limits of a run that sold short (`docs/research/data-and-protocol.md`, "Point in time").
+pub const SHORTS_LABEL: &str = "Short sales: the easy-to-borrow flag is today's list applied to the past, so historical shorts look easier \
+     than they were, and the history may lack names that were later delisted (survivorship); neither is point in time. \
+     No locate or hard-to-borrow cost is modelled; the live month is the check.\n";
 
 impl Report {
     /// Named integers, for storing as run-result metrics: totals as
@@ -358,8 +368,11 @@ impl Report {
         ));
         out.push_str(
             "Not modelled: queue position, depth beyond the best quote, market impact, commissions, \
-             protective stops. Results are optimistic for strategies that depend on those.\n",
+             protective stops (unless the simulator was asked for them). Results are optimistic for strategies that depend on those.\n",
         );
+        if self.total.short_fills > 0 {
+            out.push_str(SHORTS_LABEL);
+        }
         out
     }
 }

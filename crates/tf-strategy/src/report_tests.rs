@@ -502,3 +502,22 @@ fn a_break_even_trade_is_not_a_win() {
     );
     assert_eq!((r.total.gross_profit, r.total.gross_loss), (0, 0));
 }
+
+#[test]
+fn a_report_of_a_run_that_sold_short_says_what_is_not_point_in_time() {
+    use crate::report::SHORTS_LABEL;
+    // Sell short at 10.00 and cover at 9.00; and a run that only bought.
+    let short_run = |first: Side, second: Side| {
+        let mut b = ReportBuilder::new(labels(&["x"])).unwrap();
+        b.on_fill(&fill(0, first, 100, 1000, 0));
+        b.on_fill(&fill(0, second, 100, 900, 0));
+        b.finish(&[0]).render()
+    };
+    let with = short_run(Side::SellShort, Side::Buy);
+    assert!(with.contains(SHORTS_LABEL), "{with}");
+    assert!(with.contains("easy-to-borrow flag is today's list applied to the past"));
+    assert!(with.contains("survivorship"));
+    let without = short_run(Side::Buy, Side::Sell);
+    assert!(!without.contains("Short sales:"), "{without}");
+    assert!(without.contains("Not modelled"));
+}

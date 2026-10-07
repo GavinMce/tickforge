@@ -44,7 +44,7 @@ const TAG_PARAM_CHANGE: u8 = 7;
 const TAG_TIER_CHANGE: u8 = 8;
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u16 = 4;
+pub const SCHEMA_VERSION: u16 = 5;
 /// The first four bytes of a stream that has a header.
 pub const STREAM_MAGIC: [u8; 4] = *b"TFEV";
 pub const STREAM_HEADER_LEN: usize = 8;
@@ -235,7 +235,14 @@ impl Event {
                 let k = r.u8()?;
                 Event::Status(Status {
                     hdr,
-                    kind: StatusKind::from_u8(k).ok_or(DecodeError::BadStatusKind(k))?,
+                    kind: {
+                        let kind = StatusKind::from_u8(k).ok_or(DecodeError::BadStatusKind(k))?;
+                        // Schema v5 added the end of a short-sale restriction: an older stream cannot say it.
+                        if version < 5 && kind == StatusKind::ShortSaleRestrictionLifted {
+                            return Err(DecodeError::BadStatusKind(k));
+                        }
+                        kind
+                    },
                     lo: Px::from_raw(r.i64()?),
                     hi: Px::from_raw(r.i64()?),
                 })
@@ -587,10 +594,49 @@ mod tests {
     }
 
     #[test]
+    fn the_end_of_a_short_sale_restriction_is_a_v5_status_kind() {
+        let lifted = Event::Status(Status {
+            hdr: Header {
+                ts_event: 5,
+                ts_recv: 6,
+                seq: 7,
+                instrument: 3,
+                provider: ProviderId::Databento,
+            },
+            kind: StatusKind::ShortSaleRestrictionLifted,
+            lo: Px::ZERO,
+            hi: Px::ZERO,
+        });
+        let mut buf = Vec::new();
+        lifted.encode(&mut buf);
+        // The kind is the byte after the tag and the 29-byte header.
+        assert_eq!(buf[1 + 29], 4);
+        assert_eq!(Event::decode(&buf), Ok((lifted, buf.len())));
+        // A v4 stream cannot say it; the kinds it could say are unchanged.
+        assert_eq!(
+            Event::decode_versioned(4, &buf),
+            Err(DecodeError::BadStatusKind(4))
+        );
+        buf[1 + 29] = 3;
+        assert!(Event::decode_versioned(4, &buf).is_ok());
+        buf[1 + 29] = 5;
+        assert_eq!(Event::decode(&buf), Err(DecodeError::BadStatusKind(5)));
+        let mut stream = vec![b'T', b'F', b'E', b'V', 5, 0, 0, 0];
+        lifted.encode(&mut stream);
+        assert_eq!(Decoder::new(&stream).unwrap().next(), Some(Ok(lifted)));
+        // The same bytes under a v4 header are corrupt.
+        stream[4] = 4;
+        assert_eq!(
+            Decoder::new(&stream).unwrap().next(),
+            Some(Err(DecodeError::BadStatusKind(4)))
+        );
+    }
+
+    #[test]
     fn a_stream_with_a_header_carries_its_version() {
         let mut buf = Vec::new();
         write_stream_header(&mut buf);
-        assert_eq!(buf, [b'T', b'F', b'E', b'V', 4, 0, 0, 0]);
+        assert_eq!(buf, [b'T', b'F', b'E', b'V', 5, 0, 0, 0]);
         assert_eq!(buf.len(), STREAM_HEADER_LEN);
         buf.extend(encode_all(&samples()));
 
@@ -609,8 +655,8 @@ mod tests {
             b
         };
         assert_eq!(
-            Decoder::new(&header(5)).unwrap_err(),
-            DecodeError::UnsupportedVersion(5)
+            Decoder::new(&header(6)).unwrap_err(),
+            DecodeError::UnsupportedVersion(6)
         );
         assert_eq!(
             Decoder::new(&header(0)).unwrap_err(),
@@ -626,8 +672,8 @@ mod tests {
             DecodeError::BadMagic
         );
         assert_eq!(
-            Event::decode_versioned(5, &[]).unwrap_err(),
-            DecodeError::UnsupportedVersion(5)
+            Event::decode_versioned(6, &[]).unwrap_err(),
+            DecodeError::UnsupportedVersion(6)
         );
     }
 

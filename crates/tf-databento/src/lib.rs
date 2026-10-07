@@ -121,6 +121,9 @@ pub struct InstrumentMap {
     dense: HashMap<u32, InstrumentId>,
     raw: Vec<u32>,
     symbols: Vec<Option<String>>,
+    /// The short-sale restriction as the status records last said it, per instrument (`None`: never said). It carries
+    /// across files and sessions with the ids, so a restriction that began the day before is still known.
+    ssr: Vec<Option<bool>>,
 }
 
 impl InstrumentMap {
@@ -132,7 +135,13 @@ impl InstrumentMap {
         self.dense.insert(raw, d);
         self.raw.push(raw);
         self.symbols.push(None);
+        self.ssr.push(None);
         d
+    }
+
+    /// Whether the status records last said `id` is under a short-sale restriction.
+    pub fn short_sale_restricted(&self, id: InstrumentId) -> Option<bool> {
+        self.ssr.get(id as usize).copied().flatten()
     }
 
     pub fn dense(&self, raw: u32) -> Option<InstrumentId> {
@@ -479,24 +488,53 @@ fn map_record(
                 Some(StatusKind::TradingHalt)
             }
             StatusAction::Trading => Some(StatusKind::TradingResume),
-            StatusAction::SsrChange => Some(StatusKind::ShortSaleRestriction),
             _ => None,
         };
-        match kind {
-            Some(kind) => {
-                let h = header(ids, s.hd.instrument_id, s.hd.ts_event, s.ts_recv, s.ts_recv);
-                stats.statuses += 1;
-                out.push(Item::Event(Event::Status(Status {
-                    hdr: h,
-                    kind,
-                    lo: Px::ZERO,
-                    hi: Px::ZERO,
-                })));
+        let h = header(ids, s.hd.instrument_id, s.hd.ts_event, s.ts_recv, s.ts_recv);
+        let status = |kind| {
+            Item::Event(Event::Status(Status {
+                hdr: h,
+                kind,
+                lo: Px::ZERO,
+                hi: Px::ZERO,
+            }))
+        };
+        let mut produced = false;
+        if let Some(kind) = kind {
+            stats.statuses += 1;
+            out.push(status(kind));
+            produced = true;
+        }
+        // The short-sale restriction. Every status record says whether the instrument is restricted (`Y`, `N`, or
+        // `~` for not known), so a restriction carried over from the day before shows on the day's first records
+        // although no record changes it. An event is made when the state differs from the last one said; a first
+        // `N` changes nothing (not restricted is how an instrument starts), and `~` says nothing. A record whose
+        // action is a restriction change but whose flag does not say which way is the start of one, as it was
+        // always read.
+        let flag = match s.is_short_sell_restricted as u8 {
+            b'Y' => Some(true),
+            b'N' => Some(false),
+            _ if action == StatusAction::SsrChange => Some(true),
+            _ => None,
+        };
+        if let Some(on) = flag {
+            let before = ids.ssr[h.instrument as usize];
+            if before != Some(on) {
+                ids.ssr[h.instrument as usize] = Some(on);
+                if on || before.is_some() {
+                    stats.statuses += 1;
+                    out.push(status(if on {
+                        StatusKind::ShortSaleRestriction
+                    } else {
+                        StatusKind::ShortSaleRestrictionLifted
+                    }));
+                    produced = true;
+                }
             }
-            None => {
-                stats.ignored += 1;
-                out.push(Item::Ignored { rtype: s.hd.rtype });
-            }
+        }
+        if !produced {
+            stats.ignored += 1;
+            out.push(Item::Ignored { rtype: s.hd.rtype });
         }
     } else if let Some(m) = rec.get::<SymbolMappingMsg>() {
         let symbol = m

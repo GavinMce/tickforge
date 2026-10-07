@@ -54,7 +54,10 @@ pub enum StatusKind {
     TradingResume = 1,
     /// LULD band update; `lo`/`hi` carry the band.
     LuldBand = 2,
+    /// The short-sale restriction (Rule 201) is in force for the instrument.
     ShortSaleRestriction = 3,
+    /// The restriction is no longer in force (schema v5; earlier streams only ever said when it began).
+    ShortSaleRestrictionLifted = 4,
 }
 
 impl StatusKind {
@@ -64,6 +67,7 @@ impl StatusKind {
             1 => Some(StatusKind::TradingResume),
             2 => Some(StatusKind::LuldBand),
             3 => Some(StatusKind::ShortSaleRestriction),
+            4 => Some(StatusKind::ShortSaleRestrictionLifted),
             _ => None,
         }
     }

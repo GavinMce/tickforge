@@ -1695,7 +1695,27 @@ epics:
       - id: E19-S06
         jira: TIC-160
         title: "Short sales in the simulator: the short-sale restriction and the easy-to-borrow rule"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0057. The decoder reads the restricted flag (Y, N, ~) on every status record and keeps the last state per
+          instrument with the dense ids (carried across files and sessions), making an event when it differs: a
+          restriction carried over from the day before shows on the first record of the day, a first N says nothing, ~
+          says nothing, a change action with no clear flag is a start as before, and a record can make two events. New
+          StatusKind::ShortSaleRestrictionLifted (schema v5, a v4 stream cannot say it, pinned by a test; Tier 0 sets
+          and clears its flag). Simulator: a short sale is not filled while the restriction lasts (every sell here fills
+          at the bid, which a restricted short may not be made at or below); it rests, or an IOC expires, and fills when
+          the restriction is lifted; a sale of shares held is not held back; per instrument. SimBroker::with_borrow_table
+          (off by default): a short of a name that is not easy to borrow is refused as Alpaca's API does today (hard to
+          borrow, not shortable, not known, each with its reason, status 403; no locate), through place and the old
+          submit path; the borrow fee follows the broker (none on easy-to-borrow names, worked independently to the raw
+          unit). The multi-strategy host builds the table from the snapshot's shortable and easy_to_borrow columns when
+          present and asks nothing otherwise; the daily report lists what the brokers refused with the reason, naming
+          short sales; a premarket-style day replays equal. A backtest report of a run that sold short states the
+          point-in-time limits (easy-to-borrow flag is today's list applied to the past, survivorship, no locate cost).
+          Mutation run on the new code (decoder 9, simulator 14, host 5, report 3, event schema 2, Tier 0 2: 35 mutants): one survived, the refusal status, because its test compared the constant with itself; the literal is pinned and all are killed. Narrowed: E09-S02 (the gateway's own short checks) is
+          still open and this story is the simulator side; a short priced above the bid that a buyer could lift is not
+          modelled (pessimistic); refusal texts and the 403 are Alpaca's rule and understood status, not checked wire text
+          (E18-S11); no locate (E14-S02).
         deps: [E09-S02]
         ac:
           - While a symbol's short-sale restriction is on, the simulator does not fill a short sale at or below the best bid; the restriction's start and its carry-over to the next day come from the feed, whose status records carry a restricted flag that the decoder does not read today (it maps only the change action, so a restriction carried over from the previous day is missed)

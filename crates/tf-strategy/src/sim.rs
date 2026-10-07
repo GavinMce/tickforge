@@ -13,6 +13,13 @@
 //! - The unfilled rest of an IOC order expires on arrival. A day order rests and
 //!   tries again on every later quote for its instrument.
 //! - Nothing fills while the instrument is halted.
+//! - **Short sales.** While an instrument's short-sale restriction is in force (a status event from the feed says when
+//!   it began and ended, and the decoder carries a restriction over from the day before), a short sale is not filled
+//!   at or below the best bid, which is where every fill of a sell is made here: it rests (or, immediate-or-cancel,
+//!   expires) and never fills while the restriction lasts. A short sale priced above the bid that a buyer could lift is
+//!   not modelled, so this is pessimistic. With a borrow table ([`SimBroker::with_borrow_table`]; off by default) a
+//!   short sale of a name that is not easy to borrow is refused as the broker does: no locate is modelled (a
+//!   hard-to-borrow locate is E14-S02). The borrow fee follows the broker: none on easy-to-borrow names (Alpaca).
 //! - **Slippage** is recorded on every [`Fill`]: the price paid against the
 //!   intent's reference price, per share, positive when worse.
 //! - **Borrow cost** accrues on short positions for the time they are held, at
@@ -86,7 +93,40 @@ struct Book {
     ask_rem: u32,
     last_px: i64,
     halted: bool,
+    /// The short-sale restriction is in force.
+    ssr: bool,
 }
+
+/// What the broker says about borrowing a name, for short sales.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Borrow {
+    /// Easy to borrow: a short sale is taken, and no fee is charged.
+    Easy,
+    /// Shortable but hard to borrow: refused today (a locate is not modelled).
+    Hard,
+    /// Cannot be sold short.
+    NotShortable,
+    /// Not known: refused, never guessed.
+    #[default]
+    Unknown,
+}
+
+impl Borrow {
+    /// Why a short sale of this name is refused; `None` if it is taken.
+    pub const fn refusal(self) -> Option<&'static str> {
+        match self {
+            Borrow::Easy => None,
+            Borrow::Hard => Some(
+                "the asset is hard to borrow: short sales are taken for easy-to-borrow assets only",
+            ),
+            Borrow::NotShortable => Some("the asset cannot be sold short"),
+            Borrow::Unknown => Some("whether the asset can be sold short is not known"),
+        }
+    }
+}
+
+/// The status the broker answers with for a short sale it will not take.
+pub const SHORT_REFUSED_CODE: u16 = 403;
 
 impl Book {
     /// What a share is worth now, for the borrow fee.
@@ -172,6 +212,8 @@ pub struct SimBroker {
     unknowns: u64,
     protective: bool,
     legs: Vec<Legs>,
+    /// Per instrument, when the broker's borrow rules are in force.
+    borrow: Option<Vec<Borrow>>,
 }
 
 impl SimBroker {
@@ -193,7 +235,30 @@ impl SimBroker {
             unknowns: 0,
             protective: false,
             legs: Vec::new(),
+            borrow: None,
         }
+    }
+
+    /// Apply the broker's rules for short sales: `table[i]` says what is known of instrument `i` (missing entries are
+    /// [`Borrow::Unknown`]). A short sale of anything but an easy-to-borrow name is refused, and an easy-to-borrow short
+    /// is charged no borrow fee. Off by default.
+    pub fn with_borrow_table(mut self, table: Vec<Borrow>) -> SimBroker {
+        let mut t = table;
+        t.resize(self.books.len(), Borrow::Unknown);
+        self.borrow = Some(t);
+        self
+    }
+
+    /// Why a short sale of `intent`'s instrument would be refused at the broker, if it would.
+    fn short_refusal(&self, intent: &Intent) -> Option<&'static str> {
+        if intent.side != Side::SellShort {
+            return None;
+        }
+        let t = self.borrow.as_ref()?;
+        t.get(intent.instrument as usize)
+            .copied()
+            .unwrap_or_default()
+            .refusal()
     }
 
     /// Run the stops and targets of opening intents (see the module docs). Off by default.
@@ -218,6 +283,7 @@ impl SimBroker {
     pub fn submit(&mut self, intent: &Intent) {
         if intent.instrument as usize >= self.books.len()
             || extended_hours_refusal(intent).is_some()
+            || self.short_refusal(intent).is_some()
         {
             let u = OrderUpdate::rejected(intent.id, RejectReason::Broker, intent.ts);
             self.updates.push(u);
@@ -289,7 +355,12 @@ impl SimBroker {
                     self.match_resting(ev.instrument(), ts);
                     self.match_legs(ev.instrument(), ts);
                 }
-                StatusKind::LuldBand | StatusKind::ShortSaleRestriction => {}
+                StatusKind::ShortSaleRestriction => book.ssr = true,
+                StatusKind::ShortSaleRestrictionLifted => {
+                    book.ssr = false;
+                    self.match_resting(ev.instrument(), ts);
+                }
+                StatusKind::LuldBand => {}
             },
             _ => {}
         }
@@ -421,6 +492,10 @@ impl SimBroker {
         let intent = o.intent;
         let book = &mut self.books[intent.instrument as usize];
         if book.halted {
+            return;
+        }
+        // A short sale may not be made at or below the best bid while the restriction lasts; a sell here fills at it.
+        if book.ssr && intent.side == Side::SellShort {
             return;
         }
         let worst = intent.limit_price().raw();
@@ -618,7 +693,12 @@ impl SimBroker {
         let dt = u128::from(ts - last);
         let bps = u128::from(self.cfg.borrow_bps_per_year);
         for (i, &p) in self.pos.iter().enumerate() {
-            if p < 0 {
+            // The broker charges nothing on an easy-to-borrow name (when its rules are in force).
+            let free = self
+                .borrow
+                .as_ref()
+                .is_some_and(|t| t.get(i) == Some(&Borrow::Easy));
+            if p < 0 && !free {
                 let mark = u128::try_from(self.books[i].mark()).unwrap_or(0);
                 self.borrow_num[i] += u128::from(p.unsigned_abs()) * mark * bps * dt;
             }
@@ -650,6 +730,12 @@ impl Broker for SimBroker {
             return Submission::Refused {
                 code: ExtendedHoursRefusal::CODE,
                 message: r.message().to_owned(),
+            };
+        }
+        if let Some(why) = self.short_refusal(intent) {
+            return Submission::Refused {
+                code: SHORT_REFUSED_CODE,
+                message: why.to_owned(),
             };
         }
         if f.refuse_instruments.contains(&intent.instrument) || FaultPlan::hits(f.refuse_every, n) {

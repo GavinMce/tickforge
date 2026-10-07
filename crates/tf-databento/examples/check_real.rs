@@ -130,6 +130,7 @@ fn summary(dbn: &str) {
                         tf_core::StatusKind::TradingHalt => "status:halt",
                         tf_core::StatusKind::TradingResume => "status:resume",
                         tf_core::StatusKind::ShortSaleRestriction => "status:ssr",
+                        tf_core::StatusKind::ShortSaleRestrictionLifted => "status:ssr_lifted",
                         tf_core::StatusKind::LuldBand => "status:luld",
                     },
                     _ => "other",

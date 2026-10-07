@@ -46,7 +46,10 @@ pub use momentum::{
 };
 pub use report::{Report, ReportBuilder, Stats};
 pub use rules::{Evaluation, RuleError, RuleSet};
-pub use sim::{FaultPlan, Fill, SimBroker, SimConfig, run_backtest, run_backtest_observed};
+pub use sim::{
+    Borrow, FaultPlan, Fill, SHORT_REFUSED_CODE, SimBroker, SimConfig, run_backtest,
+    run_backtest_observed,
+};
 pub use strategy::{BarsError, Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};
 pub use tf_engine::{MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe};
 pub use tf_params::{ParamStore, Proposal, Target};

@@ -51,6 +51,8 @@ pub struct StrategySection {
     pub accepted: u64,
     pub rejections: Vec<(String, u64)>,
     pub refused_by_broker: u64,
+    /// What the brokers refused and why: `(was_a_short_sale, reason, count)`.
+    pub broker_refusals: Vec<(bool, String, u64)>,
     pub rate_limited: u64,
     pub unanswered: u64,
     pub fills: u64,
@@ -175,6 +177,7 @@ impl DailyReport {
                         .map(|(r, n)| (r.to_owned(), n))
                         .collect(),
                     refused_by_broker: st.refused_by_broker,
+                    broker_refusals: host.broker_refusals_of(id),
                     rate_limited: st.rate_limited,
                     unanswered: st.unanswered,
                     fills,
@@ -275,6 +278,14 @@ impl DailyReport {
                     s,
                     "    broker:   {} refused, {} rate limited, {} with no answer",
                     t.refused_by_broker, t.rate_limited, t.unanswered
+                );
+            }
+            // Short sales the broker would not take, with its reason, and the other refusals.
+            for (short, why, n) in &t.broker_refusals {
+                let _ = writeln!(
+                    s,
+                    "      {} refused {n}x: {why}",
+                    if *short { "short sale" } else { "order" }
                 );
             }
             let _ = writeln!(

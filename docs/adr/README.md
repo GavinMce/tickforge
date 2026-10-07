@@ -73,3 +73,4 @@ How:
 | [0054](0054-bars-are-shared-by-claims-aligned-to-the-session-by-the-calendar-and-read-through-the-strategys-own-claim.md) | Bars are shared by claims, aligned to the session by the calendar, and read through the strategy's own claim | Accepted |
 | [0055](0055-history-columns-come-from-minute-bars-with-capped-wicks-and-a-strategy-can-require-them.md) | History columns come from one-minute bars with capped wicks, and a strategy can require them | Accepted |
 | [0056](0056-protective-orders-in-the-simulator-extended-hours-rules-and-exits-the-strategy-holds.md) | Protective orders in the simulator, extended-hours rules, and exits the strategy holds | Accepted |
+| [0057](0057-the-short-sale-restriction-comes-from-every-status-record-and-the-simulator-follows-the-brokers-short-rules.md) | The short-sale restriction comes from every status record, and the simulator follows the broker's short-sale rules | Accepted |

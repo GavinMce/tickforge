@@ -41,6 +41,8 @@ mod exit_tests;
 #[cfg(test)]
 mod replay_tests;
 #[cfg(test)]
+mod short_tests;
+#[cfg(test)]
 mod tests;
 
 pub use certify::{CertifyError, certify};

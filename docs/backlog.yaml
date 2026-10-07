@@ -1656,7 +1656,36 @@ epics:
       - id: E19-S05
         jira: TIC-159
         title: "Exits: protective legs in the simulator, engine-held exits and extended-hours order rules"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0056. Simulator: protective orders when asked for (SimBroker::with_protective_orders, off by default so
+          every earlier backtest is unchanged): for the shares the opening order has filled so far, one pool of shares
+          so the legs cancel each other and partial fills carry through; the target a resting limit filled at the bid
+          (ask for a short), the stop armed by a trade at or through its trigger (for good), then a market order filled
+          at the gapped price or a stop-limit that waits for its price; a leg fill is a Fill with its leg, moves the
+          position, never past flat, is a Kind::LegFill on the parent, and legs end with the day; a halt blocks them.
+          One oracle for the simulator and the Alpaca mapping (tf_strategy::testing): six scripted markets (a stop
+          gapped through, target cancels stop, partial entry fills into the legs, a stop-limit gapped through, a short,
+          a stop not reached) and the events each must give; the simulator produces exactly them and the Alpaca
+          mapping, given the trade_updates frames of the same story, translates to exactly them. check_events no longer
+          calls a leg fill after the parent's last fill an event after the order ended. Extended hours (one function,
+          session_rules::extended_hours_refusal, used by the simulator's place and submit and by the Alpaca order
+          mapping): a premarket or after-hours order that carries protective orders or is immediate-or-cancel is
+          refused with status 422 and the reason, also through AlpacaBroker with nothing sent; a plain limit order
+          day or good-til-cancelled (new Tif::Gtc, in the ledger codec, not expired at the end of the day) is sent with
+          extended_hours true; boundaries tested to the second; an instant the calendar cannot place is regular hours.
+          An open may carry no protective orders in the extended hours (elsewhere it must; the gateway never read
+          them). Engine-held exits: tf_strategy::ExitBook (stop, target, time exit by instrument; flat_by from the
+          calendar, 13:00 close on an early close; collar limit order, day by default; one exit out at a time, retry
+          after a wait, partial fills carried): run end to end against the simulator in the premarket, and through the
+          multi-strategy host on a premarket day (two strategies enter with no protective orders, one leaves by its stop,
+          one by the clock stamped at exactly the calendar's 08:01:00, both flat in the ledger, decision logs equal over
+          a replay, a changed stop refused). Mutation run on the new code (simulator legs 32, extended-hours rules 6, exits 20, Alpaca wire 4, validation 1, event checker 2: 65 mutants): 11 survived at first, six tests were added (another instrument's trade, a position larger or smaller than what the legs protect, liquidity shared by two orders, cumulative fills, arming zero or twice, a foreign timer) and all are killed except two that cannot be observed (an empty bid already means no size to fill; a timer id below the book's base cannot match an instrument). Narrowed: the library
+          strategies that use ExitBook are the strategies of E19-S15 onward (MomentumLong and TrendLong keep their
+          regular-session brackets); the host's simulated broker keeps protective legs off because the ledger cannot
+          record a leg fill yet (E09-S11); refusal messages state Alpaca's rule, not its wire text (needs paper
+          credentials, E18-S11); a stop triggered by a quote, and another order closing a position whose legs stand,
+          are not modelled.
         deps: [E19-S01, E18-S05]
         ac:
           - "The simulator honours the protective orders on an opening intent as Alpaca does: a stop (market, or limit if one is given) triggered by a trade at or through its price, a target, each cancelling the other; a gap through a stop fills at the gapped price; partial fills carry through; tests use scripted quotes shared with the Alpaca order mapping's fixtures"

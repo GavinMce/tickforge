@@ -344,7 +344,7 @@ fn records_that_make_no_sense_are_refused_both_ways() {
             &good.replace("stop:4500000000:-:-", "stop:1"),
             "unknown protection",
         ),
-        (&good.replace(" day ", " gtc "), "unknown time in force"),
+        (&good.replace(" day ", " fok "), "unknown time in force"),
         (&good.replace("ok:0", "ok:x"), "not a number"),
         (
             &good.replace("ok:0", "rej:whatever"),

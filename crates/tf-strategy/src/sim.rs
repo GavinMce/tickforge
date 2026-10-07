@@ -20,18 +20,33 @@
 //!   quote midpoint), in integers, rounded up so it is never understated. Time
 //!   is counted as elapsed event time, including overnight.
 //!
+//! - **Protective orders** are modelled when asked for ([`SimBroker::with_protective_orders`]; off by default, so
+//!   every earlier result is unchanged), as Alpaca runs a bracket or an OTO order. They exist for the shares the
+//!   opening order has filled so far (a partial fill carries through) and share one pool of shares, so a fill of one
+//!   leg shrinks the other and the legs end together: one cancels the other. The *target* is a resting limit: a long's
+//!   sells when the bid is at or above it, at the bid. The *stop* is triggered by a trade at or through its trigger
+//!   (and stays triggered), then becomes a market order, which fills at the bid (the ask, for a short) whatever it is,
+//!   so a gap through the stop fills at the gapped price; or a limit order at `stop_limit`, which fills only at that
+//!   price or better and so can be gapped through. A leg fill is a [`Fill`] with its `leg` set, moves the position,
+//!   and is a [`Kind::LegFill`] event on the parent order. Legs are for the day: they end with it. A leg never takes
+//!   the position past flat.
+//! - **Extended hours.** Through the [`Broker`] interface (and `submit`), an order decided in the premarket or
+//!   after-hours that carries protective orders or is immediate-or-cancel is refused with the broker's reason
+//!   ([`crate::session_rules`]).
+//!
 //! Not modelled: queue position, hidden liquidity or depth beyond the best quote,
-//! market impact of our own orders, commissions, and the broker-side protective
-//! orders on an opening intent (stops and targets). A backtest that depends on
-//! those is optimistic; the report should say so.
+//! market impact of our own orders, commissions, a stop triggered by a quote (the broker triggers on trades), and
+//! another order closing a position whose legs still stand (Alpaca refuses it for want of available shares). A backtest
+//! that depends on those is optimistic; the report should say so.
 //!
 //! Everything is integer arithmetic on event time, so a run is reproducible.
 
 use tf_core::{Event, InstrumentId, Nanos, Px, StatusKind};
 
-use crate::broker::{Broker, BrokerEvent, CancelOutcome, Kind, Submission};
-use crate::intent::{Intent, IntentId, Side, Tif};
+use crate::broker::{Broker, BrokerEvent, CancelOutcome, Kind, Leg, Submission};
+use crate::intent::{Intent, IntentId, Purpose, Side, Tif};
 use crate::lifecycle::{Order, OrderId, OrderState, OrderUpdate, RejectReason};
+use crate::session_rules::{ExtendedHoursRefusal, extended_hours_refusal};
 use crate::strategy::{Host, Strategy};
 
 /// 365 days, in nanoseconds.
@@ -55,9 +70,11 @@ pub struct Fill {
     pub qty: u32,
     pub px: Px,
     pub ts: Nanos,
-    /// Per share, in raw price units, against the intent's reference price:
-    /// positive when we did worse than that, negative when we improved on it.
+    /// Per share, in raw price units, against the intent's reference price (for a protective leg: its trigger or
+    /// target): positive when we did worse than that, negative when we improved on it.
     pub slippage: i64,
+    /// `Some` for the fill of a protective leg of `order`, `None` for the order itself.
+    pub leg: Option<Leg>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -82,6 +99,18 @@ impl Book {
             0
         }
     }
+}
+
+/// The protective orders of one opening order that has filled, and what they have used.
+#[derive(Clone, Copy)]
+struct Legs {
+    order: OrderId,
+    intent: Intent,
+    /// Shares the opening order has filled so far, which the legs protect, and shares the legs have since filled.
+    entered: u32,
+    exited: u32,
+    /// A trade has reached the stop's trigger (it stays so).
+    triggered: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -141,6 +170,8 @@ pub struct SimBroker {
     faults: FaultPlan,
     placements: u64,
     unknowns: u64,
+    protective: bool,
+    legs: Vec<Legs>,
 }
 
 impl SimBroker {
@@ -160,7 +191,15 @@ impl SimBroker {
             faults: FaultPlan::default(),
             placements: 0,
             unknowns: 0,
+            protective: false,
+            legs: Vec::new(),
         }
+    }
+
+    /// Run the stops and targets of opening intents (see the module docs). Off by default.
+    pub fn with_protective_orders(mut self) -> SimBroker {
+        self.protective = true;
+        self
     }
 
     fn note(&mut self, e: BrokerEvent) {
@@ -177,7 +216,9 @@ impl SimBroker {
 
     /// Send an intent. It reaches the venue `latency_ns` after `intent.ts`.
     pub fn submit(&mut self, intent: &Intent) {
-        if intent.instrument as usize >= self.books.len() {
+        if intent.instrument as usize >= self.books.len()
+            || extended_hours_refusal(intent).is_some()
+        {
             let u = OrderUpdate::rejected(intent.id, RejectReason::Broker, intent.ts);
             self.updates.push(u);
             return;
@@ -234,13 +275,19 @@ impl SimBroker {
                 book.bid_rem = if book.bid > 0 { q.bid_sz } else { 0 };
                 book.ask_rem = if book.ask > 0 { q.ask_sz } else { 0 };
                 self.match_resting(ev.instrument(), ts);
+                self.match_legs(ev.instrument(), ts);
             }
-            Event::Trade(t) => book.last_px = t.px.raw(),
+            Event::Trade(t) => {
+                book.last_px = t.px.raw();
+                self.trigger_stops(ev.instrument(), t.px.raw());
+                self.match_legs(ev.instrument(), ts);
+            }
             Event::Status(s) => match s.kind {
                 StatusKind::TradingHalt => book.halted = true,
                 StatusKind::TradingResume => {
                     book.halted = false;
                     self.match_resting(ev.instrument(), ts);
+                    self.match_legs(ev.instrument(), ts);
                 }
                 StatusKind::LuldBand | StatusKind::ShortSaleRestriction => {}
             },
@@ -249,13 +296,15 @@ impl SimBroker {
     }
 
     /// The end of the session: orders that reached the venue and are still working
-    /// expire, and borrow accrues to `ts`.
+    /// expire (good-til-cancelled ones do not), the protective orders end, and borrow accrues to `ts`.
     pub fn end_of_day(&mut self, ts: Nanos) {
         self.release(ts);
         self.accrue(ts);
         let mut expired = Vec::new();
+        self.legs.clear();
         for l in &mut self.live {
             if l.order.state() != OrderState::Pending
+                && l.order.intent.tif != Tif::Gtc
                 && l.order.transition(OrderState::Expired).is_ok()
             {
                 self.updates.push(l.order.update(ts));
@@ -415,12 +464,145 @@ impl SimBroker {
             px,
             ts,
             slippage,
+            leg: None,
         });
         self.updates.push(o.update(ts));
         self.note(BrokerEvent {
             order: o.id,
             ts,
             kind: Kind::Fill { qty, px },
+        });
+        if self.protective && intent.protect.is_some() && intent.purpose == Purpose::Open {
+            match self.legs.iter_mut().find(|l| l.order == o.id) {
+                Some(l) => l.entered += qty,
+                None => self.legs.push(Legs {
+                    order: o.id,
+                    intent,
+                    entered: qty,
+                    exited: 0,
+                    triggered: false,
+                }),
+            }
+        }
+    }
+
+    /// A trade at or through a stop's trigger arms it, for good.
+    fn trigger_stops(&mut self, instrument: InstrumentId, px: i64) {
+        for l in &mut self.legs {
+            if l.intent.instrument != instrument || l.triggered {
+                continue;
+            }
+            let Some(p) = l.intent.protect else { continue };
+            let long = l.intent.side.is_buy();
+            if (long && px <= p.stop_trigger.raw()) || (!long && px >= p.stop_trigger.raw()) {
+                l.triggered = true;
+            }
+        }
+    }
+
+    /// The protective orders of `instrument` try the current quote: the target first (a resting limit), then a
+    /// triggered stop. Each fill uses the shares both share.
+    fn match_legs(&mut self, instrument: InstrumentId, ts: Nanos) {
+        for i in 0..self.legs.len() {
+            if self.legs[i].intent.instrument != instrument {
+                continue;
+            }
+            for leg in [Leg::Target, Leg::Stop] {
+                self.try_leg(i, leg, ts);
+            }
+        }
+        // Done: nothing left to protect and the opening order is no longer filling.
+        let live = &self.live;
+        let pos = &self.pos;
+        self.legs.retain(|l| {
+            let left = l.entered - l.exited > 0 && leg_cap(l, pos) > 0;
+            left || live.iter().any(|x| x.order.id == l.order)
+        });
+    }
+
+    fn try_leg(&mut self, i: usize, leg: Leg, ts: Nanos) {
+        let l = self.legs[i];
+        let Some(p) = l.intent.protect else { return };
+        let long = l.intent.side.is_buy();
+        let book = &mut self.books[l.intent.instrument as usize];
+        if book.halted {
+            return;
+        }
+        let left = (l.entered - l.exited).min(leg_cap(&l, &self.pos));
+        if left == 0 {
+            return;
+        }
+        // A long's legs sell at the bid, a short's buy at the ask.
+        let (best, avail) = if long {
+            (book.bid, &mut book.bid_rem)
+        } else {
+            (book.ask, &mut book.ask_rem)
+        };
+        if best <= 0 {
+            return;
+        }
+        let (reference, ok) = match leg {
+            Leg::Target => {
+                let Some(t) = p.take_profit else { return };
+                (
+                    t.raw(),
+                    if long {
+                        best >= t.raw()
+                    } else {
+                        best <= t.raw()
+                    },
+                )
+            }
+            Leg::Stop => {
+                if !l.triggered {
+                    return;
+                }
+                match p.stop_limit {
+                    None => (p.stop_trigger.raw(), true),
+                    Some(lim) => (
+                        p.stop_trigger.raw(),
+                        if long {
+                            best >= lim.raw()
+                        } else {
+                            best <= lim.raw()
+                        },
+                    ),
+                }
+            }
+        };
+        let qty = left.min(*avail);
+        if !ok || qty == 0 {
+            return;
+        }
+        *avail -= qty;
+        let px = Px::from_raw(best);
+        self.accrue(ts);
+        let side = if long { Side::Sell } else { Side::Buy };
+        self.pos[l.intent.instrument as usize] += if long {
+            -i64::from(qty)
+        } else {
+            i64::from(qty)
+        };
+        self.legs[i].exited += qty;
+        self.fills.push(Fill {
+            order: l.order,
+            intent: l.intent.id,
+            instrument: l.intent.instrument,
+            side,
+            qty,
+            px,
+            ts,
+            slippage: if long {
+                reference - best
+            } else {
+                best - reference
+            },
+            leg: Some(leg),
+        });
+        self.note(BrokerEvent {
+            order: l.order,
+            ts,
+            kind: Kind::LegFill { leg, qty, px },
         });
     }
 
@@ -445,6 +627,13 @@ impl SimBroker {
     }
 }
 
+/// The most the legs may still take: the position in the direction they protect.
+fn leg_cap(l: &Legs, pos: &[i64]) -> u32 {
+    let p = pos[l.intent.instrument as usize];
+    let held = if l.intent.side.is_buy() { p } else { -p };
+    u32::try_from(held.max(0)).unwrap_or(u32::MAX)
+}
+
 impl Broker for SimBroker {
     fn place(&mut self, intent: &Intent, order: OrderId) -> Submission {
         self.events_on = true;
@@ -455,6 +644,12 @@ impl Broker for SimBroker {
             return Submission::Refused {
                 code: 400,
                 message: "unknown instrument".to_owned(),
+            };
+        }
+        if let Some(r) = extended_hours_refusal(intent) {
+            return Submission::Refused {
+                code: ExtendedHoursRefusal::CODE,
+                message: r.message().to_owned(),
             };
         }
         if f.refuse_instruments.contains(&intent.instrument) || FaultPlan::hits(f.refuse_every, n) {

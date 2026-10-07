@@ -9,6 +9,7 @@
 use tf_core::Px;
 use tf_strategy::intent::{Intent, Purpose, Side, Tif};
 use tf_strategy::lifecycle::OrderId;
+use tf_strategy::session_rules::{ExtendedHoursRefusal, extended_hours_refusal, is_extended_hours};
 
 use crate::json::quote;
 
@@ -73,6 +74,9 @@ pub enum RequestError {
     ProtectOnClose,
     /// Alpaca takes bracket and one-triggers-other orders only as `day` or `gtc`.
     ProtectNeedsDay,
+    /// Not accepted in the extended hours (04:00 to 09:30 and 16:00 to 20:00 New York time): protective orders and
+    /// immediate-or-cancel (see [`tf_strategy::session_rules`]).
+    ExtendedHours(ExtendedHoursRefusal),
 }
 
 impl std::fmt::Display for RequestError {
@@ -84,6 +88,7 @@ impl std::fmt::Display for RequestError {
             RequestError::ProtectNeedsDay => {
                 "protective orders need a day order; Alpaca refuses them on an IOC"
             }
+            RequestError::ExtendedHours(r) => r.message(),
         })
     }
 }
@@ -114,6 +119,9 @@ pub fn order_request(
     if intent.qty == 0 {
         return Err(RequestError::ZeroQty);
     }
+    if let Some(r) = extended_hours_refusal(intent) {
+        return Err(RequestError::ExtendedHours(r));
+    }
     let long = intent.side == Side::Buy;
     let entry_round = if intent.side.is_buy() {
         Round::Down
@@ -126,6 +134,7 @@ pub fn order_request(
     let tif = match intent.tif {
         Tif::Day => "day",
         Tif::Ioc => "ioc",
+        Tif::Gtc => "gtc",
     };
     let id = client_order_id(prefix, order);
     let mut body = format!(
@@ -134,11 +143,15 @@ pub fn order_request(
         intent.qty,
         quote(&id)
     );
+    // Without this flag the broker holds an order placed in the extended hours until the regular session.
+    if is_extended_hours(intent.ts) == Some(true) {
+        body.push_str(",\"extended_hours\":true");
+    }
     if let Some(p) = &intent.protect {
         if intent.purpose != Purpose::Open {
             return Err(RequestError::ProtectOnClose);
         }
-        if intent.tif != Tif::Day {
+        if intent.tif == Tif::Ioc {
             return Err(RequestError::ProtectNeedsDay);
         }
         // A long's exits are sells and round up; a short's are buys and round down.

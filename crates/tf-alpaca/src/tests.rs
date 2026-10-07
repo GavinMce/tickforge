@@ -1687,3 +1687,212 @@ fn the_simulated_broker_drives_the_ledger_through_every_outcome() {
             > closed_by_us as u32
     );
 }
+
+// ---- E19-S05: protective legs against the shared scenarios, and the extended hours ----
+
+mod s05 {
+    use super::*;
+    use tf_strategy::broker::{Kind, Leg};
+    use tf_strategy::session_rules::ExtendedHoursRefusal as R;
+    use tf_strategy::testing::{BracketScenario, T0, bracket_scenarios};
+
+    // The parent and legs of the documented bracket response (its legs are named leg-target-0001 and leg-stop-0002).
+    const PARENT: &str = "904837e3-3b76-47ec-b432-046db621571b";
+
+    fn time(n: usize) -> String {
+        // T0 is 15:00:00 UTC on 2 October 2026.
+        format!("2026-10-02T15:00:{:02}.000000000Z", n)
+    }
+
+    /// The `trade_updates` frames of a scenario's story, in the shape of the documented fixtures, built from what
+    /// the broker must report.
+    fn frames(s: &BracketScenario) -> Vec<String> {
+        let side = if s.intent.side.is_buy() {
+            "buy"
+        } else {
+            "sell"
+        };
+        let exit = if s.intent.side.is_buy() {
+            "sell"
+        } else {
+            "buy"
+        };
+        let stop_kind = if s.intent.protect.is_some_and(|p| p.stop_limit.is_some()) {
+            "stop_limit"
+        } else {
+            "stop"
+        };
+        let (mut filled, mut stop_done, mut target_done) = (0u32, 0u32, 0u32);
+        let mut out = Vec::new();
+        for (n, k) in s.expected.iter().enumerate() {
+            let exec = format!("00000000-0000-4000-8000-{:012}", n + 1);
+            let frame = match *k {
+                Kind::Ack => format!(
+                    "{{\"stream\":\"trade_updates\",\"data\":{{\"event\":\"new\",\"execution_id\":\"{exec}\",\"timestamp\":\"{}\",\"order\":{{\"id\":\"{PARENT}\",\"client_order_id\":\"tf1-7\",\"symbol\":\"AAPL\",\"qty\":\"{}\",\"side\":\"{side}\",\"status\":\"new\",\"filled_qty\":\"0\",\"filled_avg_price\":null,\"order_type\":\"limit\",\"time_in_force\":\"day\",\"order_class\":\"bracket\"}}}}}}",
+                    time(n),
+                    s.intent.qty
+                ),
+                Kind::Fill { qty, px } => {
+                    filled += qty;
+                    let (event, status) = if filled == s.intent.qty {
+                        ("fill", "filled")
+                    } else {
+                        ("partial_fill", "partially_filled")
+                    };
+                    format!(
+                        "{{\"stream\":\"trade_updates\",\"data\":{{\"event\":\"{event}\",\"execution_id\":\"{exec}\",\"timestamp\":\"{}\",\"price\":\"{}\",\"qty\":\"{qty}\",\"position_qty\":\"{filled}\",\"order\":{{\"id\":\"{PARENT}\",\"client_order_id\":\"tf1-7\",\"symbol\":\"AAPL\",\"qty\":\"{}\",\"side\":\"{side}\",\"status\":\"{status}\",\"filled_qty\":\"{filled}\",\"filled_avg_price\":\"{}\",\"order_type\":\"limit\",\"time_in_force\":\"day\"}}}}}}",
+                        time(n),
+                        px.to_decimal(),
+                        s.intent.qty,
+                        px.to_decimal()
+                    )
+                }
+                Kind::LegFill { leg, qty, px } => {
+                    let (done, id, kind) = match leg {
+                        Leg::Stop => (&mut stop_done, "leg-stop-0002", stop_kind),
+                        Leg::Target => (&mut target_done, "leg-target-0001", "limit"),
+                    };
+                    *done += qty;
+                    let status = if *done == s.intent.qty {
+                        "filled"
+                    } else {
+                        "partially_filled"
+                    };
+                    let event = if status == "filled" {
+                        "fill"
+                    } else {
+                        "partial_fill"
+                    };
+                    format!(
+                        "{{\"stream\":\"trade_updates\",\"data\":{{\"event\":\"{event}\",\"execution_id\":\"{exec}\",\"timestamp\":\"{}\",\"price\":\"{}\",\"qty\":\"{qty}\",\"position_qty\":\"0\",\"order\":{{\"id\":\"{id}\",\"client_order_id\":\"b2c1a9d0-0000-4000-8000-{:012}\",\"symbol\":\"AAPL\",\"qty\":\"{}\",\"side\":\"{exit}\",\"status\":\"{status}\",\"filled_qty\":\"{}\",\"filled_avg_price\":\"{}\",\"order_type\":\"{kind}\",\"time_in_force\":\"day\",\"parent_order_id\":\"{PARENT}\"}}}}}}",
+                        time(n),
+                        px.to_decimal(),
+                        n,
+                        s.intent.qty,
+                        *done,
+                        px.to_decimal()
+                    )
+                }
+                Kind::Close(_) => unreachable!("no scenario ends an order short"),
+            };
+            out.push(frame);
+        }
+        out
+    }
+
+    #[test]
+    fn the_shared_scenarios_translate_to_exactly_the_events_the_simulator_gives() {
+        for s in bracket_scenarios() {
+            let mut t = tracker();
+            // What the submission's response taught the tracker: the parent, and which leg is which.
+            let submitted = parse_order(&Json::parse(BRACKET).unwrap()).unwrap();
+            t.register(OrderId(7), &submitted);
+            let mut got = Vec::new();
+            for f in frames(&s) {
+                got.extend(events(&t.translate(&update(&f))));
+            }
+            let kinds: Vec<Kind> = got.iter().map(|(_, k)| *k).collect();
+            assert_eq!(kinds, s.expected, "{}", s.name);
+            assert!(
+                got.iter().all(|(o, _)| *o == 7),
+                "{}: every event is the parent's",
+                s.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_request_for_an_order_in_the_extended_hours_is_flagged_and_the_ones_not_taken_are_refused()
+     {
+        let base = bracket_scenarios()[0].intent;
+        let at = |hours: i64, mut i: Intent| {
+            i.ts = (T0 as i64 + hours * 3_600 * 1_000_000_000) as u64;
+            i
+        };
+        let mut plain = base;
+        plain.protect = None;
+        let mut ioc = plain;
+        ioc.tif = Tif::Ioc;
+        let mut gtc = plain;
+        gtc.tif = Tif::Gtc;
+        let req = |i: Intent| order_request(&i, OrderId(7), "AAPL", "tf1-");
+        // Regular session: no flag, and a bracket is a bracket.
+        assert!(!req(at(0, plain)).unwrap().body.contains("extended_hours"));
+        assert!(
+            req(at(0, base))
+                .unwrap()
+                .body
+                .contains("\"order_class\":\"bracket\"")
+        );
+        assert!(
+            req(at(0, ioc))
+                .unwrap()
+                .body
+                .contains("\"time_in_force\":\"ioc\"")
+        );
+        // Premarket (08:00) and after-hours (17:00): a plain limit order carries the flag, day or good-til-cancelled.
+        for h in [-3, 6] {
+            let body = req(at(h, plain)).unwrap().body;
+            assert!(
+                body.contains("\"extended_hours\":true")
+                    && body.contains("\"time_in_force\":\"day\""),
+                "{body}"
+            );
+            let body = req(at(h, gtc)).unwrap().body;
+            assert!(
+                body.contains("\"extended_hours\":true")
+                    && body.contains("\"time_in_force\":\"gtc\""),
+                "{body}"
+            );
+            assert_eq!(
+                req(at(h, base)),
+                Err(RequestError::ExtendedHours(R::ProtectiveOrders))
+            );
+            assert_eq!(
+                req(at(h, ioc)),
+                Err(RequestError::ExtendedHours(R::TimeInForce))
+            );
+        }
+        assert_eq!(
+            RequestError::ExtendedHours(R::ProtectiveOrders).to_string(),
+            R::ProtectiveOrders.message()
+        );
+        // A good-til-cancelled order with protection is allowed in the regular session (day or gtc, not IOC).
+        let mut protected_gtc = base;
+        protected_gtc.tif = Tif::Gtc;
+        assert!(
+            req(at(0, protected_gtc))
+                .unwrap()
+                .body
+                .contains("\"time_in_force\":\"gtc\"")
+        );
+        let mut protected_ioc = base;
+        protected_ioc.tif = Tif::Ioc;
+        assert_eq!(
+            req(at(0, protected_ioc)),
+            Err(RequestError::ProtectNeedsDay)
+        );
+    }
+
+    #[test]
+    fn the_broker_adapter_refuses_an_extended_hours_bracket_with_the_status_the_broker_gives_and_sends_nothing()
+     {
+        use tf_strategy::broker::{Broker, Submission};
+        let mut b = AlpacaBroker::new(alpaca(vec![]), vec!["AAPL".to_owned()]);
+        let mut i = bracket_scenarios()[0].intent;
+        i.ts = T0 - 3 * 3_600 * 1_000_000_000; // 08:00 New York
+        match b.place(&i, OrderId(7)) {
+            Submission::Refused { code, message } => {
+                assert_eq!(
+                    (code, message.as_str()),
+                    (422, R::ProtectiveOrders.message())
+                );
+            }
+            o => panic!("{o:?}"),
+        }
+        assert!(
+            b.alpaca().transport_sent().is_empty(),
+            "nothing reached the transport"
+        );
+    }
+}

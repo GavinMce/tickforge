@@ -132,6 +132,17 @@ pub fn check_events(
         }
         last_ts = e.ts;
         let s = by.entry(e.order).or_default();
+        // A protective leg is an order of its own that fills after its parent has: it needs the parent to have been
+        // acknowledged and nothing else.
+        if let Kind::LegFill { qty, .. } = e.kind {
+            if !s.acked {
+                return Err(fault("a leg fill before the parent was acknowledged"));
+            }
+            if qty == 0 {
+                return Err(fault("a leg fill of no shares"));
+            }
+            continue;
+        }
         if s.ended {
             return Err(fault("an event after the order ended"));
         }
@@ -177,11 +188,7 @@ pub fn check_events(
                     ));
                 }
             },
-            Kind::LegFill { qty, .. } => {
-                if qty == 0 {
-                    return Err(fault("a leg fill of no shares"));
-                }
-            }
+            Kind::LegFill { .. } => {}
         }
     }
     Ok(())

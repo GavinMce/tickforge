@@ -156,12 +156,16 @@ USAGE:
     tf history index DIR --dataset NAME --schema NAME [--symbols LIST]
     tf history verify DIR
     tf history show DIR
+    tf history screen DIR [--dataset NAME] [--from DATE] [--to DATE] [--quotes SCHEMA] [--min-price P]
+                          [--max-price P] [--min-dollars N] [--min-bars N] [--max-spread-bp BP]
 
     The research history store: one zstd DBN file per day and schema under DIR/<dataset>/<schema>/<date>.dbn.zst,
     pulled by scripts/pull_history.sh (which asks the cost first and refuses above a cap), and a manifest. `index`
     builds the manifest from the files (size, SHA-256, records, symbols, cost) and records what the store is not
     (borrow flags are not point in time; whether names that left are present). `verify` rereads every file and names
     any that is missing, short, altered or not listed (and exits non-zero). `show` prints the symbols per day.
+    `screen` is the first stage of a research run (E19-S13): from the one-minute bars (and, with --quotes, the quoted
+    spread of a stored quote schema such as tcbbo) it lists the symbols that meet every limit given, without the engine.
 
     tf universe show SPEC [--snapshot FILE]
     tf universe members SPEC --snapshot FILE [--out FILE]

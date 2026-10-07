@@ -13,10 +13,10 @@ workspace = true
 [dependencies]
 tf-capture.workspace = true
 tf-manifest.workspace = true
+tf-core.workspace = true
+tf-provider.workspace = true
 dbn = { version = "0.71" }
 
 [dev-dependencies]
-tf-core.workspace = true
-tf-provider.workspace = true
 zstd = "0.13"
 time = "0.3"

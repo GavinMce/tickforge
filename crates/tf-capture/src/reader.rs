@@ -147,6 +147,7 @@ pub struct CaptureReplay {
     keep_zero_size: bool,
     pub notices: u64,
     pub skipped: u64,
+    failure: Option<String>,
 }
 
 impl CaptureReplay {
@@ -188,7 +189,14 @@ impl CaptureReplay {
             keep_zero_size: false,
             notices: 0,
             skipped: 0,
+            failure: None,
         }
+    }
+
+    /// Why the replay ended early, if it did: a file that could not be opened or a record that could not be decoded.
+    /// Without it the stream just ends, as it does at the end of the last file.
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
     }
 
     pub fn keep_zero_size(mut self, keep: bool) -> Self {
@@ -250,7 +258,10 @@ impl Provider for CaptureReplay {
                 match self.advance() {
                     Ok(true) => {}
                     Ok(false) => break,
-                    Err(_) => return Poll::End,
+                    Err(e) => {
+                        self.failure = Some(e.to_string());
+                        return Poll::End;
+                    }
                 }
             }
             let Some(d) = self.current.as_mut() else {
@@ -266,12 +277,18 @@ impl Provider for CaptureReplay {
                 }
                 Ok(Some(Item::Notice(_))) => self.notices += 1,
                 Ok(Some(_)) => {}
-                Ok(None) => {
-                    if !matches!(self.advance(), Ok(true)) {
+                Ok(None) => match self.advance() {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => {
+                        self.failure = Some(e.to_string());
                         break;
                     }
+                },
+                Err(e) => {
+                    self.failure = Some(e.to_string());
+                    return Poll::End;
                 }
-                Err(_) => return Poll::End,
             }
         }
         match out.len() - before {

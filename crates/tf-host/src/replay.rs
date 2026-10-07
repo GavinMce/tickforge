@@ -127,13 +127,17 @@ pub fn replay(
     defs: &[StrategyDef],
     mut source: impl FnMut(&mut Vec<Event>) -> bool,
 ) -> Result<Replayed, ReplayError> {
-    let mut host = Host::new(
-        cfg.clone(),
-        reference.clone(),
-        MemStore::from_records(vec![]),
-    )?
-    .with_paper(Box::new(SimBroker::new(cfg.sim, cfg.id_space)))
-    .record();
+    let host = replay_host(cfg, reference)?;
+    drive(live, defs, host, &mut source)
+}
+
+/// What [`replay`] does with a host it has been given.
+pub(crate) fn drive(
+    live: &Log,
+    defs: &[StrategyDef],
+    mut host: Host<MemStore>,
+    source: &mut dyn FnMut(&mut Vec<Event>) -> bool,
+) -> Result<Replayed, ReplayError> {
     let acts = actions(live);
     let mut next = 0;
     let mut batch = Vec::new();
@@ -298,16 +302,9 @@ pub fn replay_capture(
     replay_files(&files, live, cfg, snapshot, defs, live_drops)
 }
 
-/// [`replay_capture`] over zstd-compressed DBN files in the order given: the segments of a capture, or the days of a
-/// history store (E19-S07). The same two passes, so the same instrument numbering.
-pub fn replay_files(
-    files: &[std::path::PathBuf],
-    live: &Log,
-    cfg: &HostConfig,
-    snapshot: Snapshot,
-    defs: &[StrategyDef],
-    live_drops: u64,
-) -> Result<Report, ReplayError> {
+/// The names of the instrument ids a day's files carry, read in a first pass: the ids are numbered in the order first
+/// seen, as the live run numbered them.
+pub(crate) fn learn_symbols(files: &[std::path::PathBuf]) -> SymbolTable {
     let mut first = CaptureReplay::from_files(files.to_vec());
     let mut sink = Vec::new();
     loop {
@@ -326,7 +323,34 @@ pub fn replay_files(
             ))
         })
         .collect();
-    let symbols = symbol_table(&names);
+    symbol_table(&names)
+}
+
+/// A host built as a replay builds it: a fresh ledger, recording, the paper route simulated too.
+pub(crate) fn replay_host(
+    cfg: &HostConfig,
+    reference: &Reference,
+) -> Result<Host<MemStore>, HostError> {
+    Ok(Host::new(
+        cfg.clone(),
+        reference.clone(),
+        MemStore::from_records(vec![]),
+    )?
+    .with_paper(Box::new(SimBroker::new(cfg.sim, cfg.id_space)))
+    .record())
+}
+
+/// [`replay_capture`] over zstd-compressed DBN files in the order given: the segments of a capture, or the days of a
+/// history store (E19-S07). The same two passes, so the same instrument numbering.
+pub fn replay_files(
+    files: &[std::path::PathBuf],
+    live: &Log,
+    cfg: &HostConfig,
+    snapshot: Snapshot,
+    defs: &[StrategyDef],
+    live_drops: u64,
+) -> Result<Report, ReplayError> {
+    let symbols = learn_symbols(files);
     let reference = Reference { symbols, snapshot };
     let mut cfg = cfg.clone();
     cfg.id_space = live.id_space;
@@ -343,6 +367,10 @@ pub fn replay_files(
         out.extend(raw.iter().filter(|e| dedupe.admit(e)));
         true
     })?;
+    // A file that could not be read ends the stream like the end of the last one does.
+    if let Some(why) = second.failure() {
+        return Err(ReplayError::Capture(why.to_owned()));
+    }
     Ok(report(
         live,
         &replayed,

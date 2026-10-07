@@ -30,6 +30,7 @@ mod def;
 mod equiv;
 mod host;
 mod replay;
+pub mod research;
 mod runner;
 
 #[cfg(test)]
@@ -50,8 +51,8 @@ pub use daily::{CaptureFacts, DailyReport, StrategySection, SystemInputs, System
 pub use def::{Build, Certificate, Route, StrategyDef};
 pub use equiv::{Answer, Difference, Log, Rec, Verdict, compare, symbols_fingerprint};
 pub use host::{
-    AdmitError, BarsConfig, GapNote, Host, HostConfig, HostError, REASON_FLATTEN, Reference,
-    SlotState, StopReason, StrategyStats,
+    AdmitError, BarsConfig, FillNote, GapNote, Host, HostConfig, HostError, REASON_FLATTEN,
+    Reference, SlotState, StopReason, StrategyStats,
 };
 pub use replay::{
     ReplayError, Replayed, Report, replay, replay_capture, replay_events, replay_files, report,

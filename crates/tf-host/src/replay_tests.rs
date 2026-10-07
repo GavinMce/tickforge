@@ -495,7 +495,7 @@ fn evictions_and_promotions_replay_the_same_and_a_follower_agrees_after_every_ev
 
 // ---- a raw capture of a day ----
 
-fn scratch(name: &str) -> PathBuf {
+pub(crate) fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("tf-host-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     d
@@ -544,10 +544,15 @@ fn quote_rec(instrument: u32, ts_recv: u64, bid: i64, ask: i64) -> Cmbp1Msg {
 /// A DBN stream of a day: a symbol mapping for each symbol (raw id 20,000 + i), then each second every
 /// symbol quotes and trades `1 + i % 3` times. `bump` cents are added to S02's price from second 2 on.
 fn dbn_day(secs: u64, bump: i64) -> Vec<u8> {
+    dbn_day_at(T0, secs, bump)
+}
+
+/// [`dbn_day`] starting at `base` (nanoseconds since the epoch).
+pub(crate) fn dbn_day_at(base: u64, secs: u64, bump: i64) -> Vec<u8> {
     let md = MetadataBuilder::new()
         .dataset("XNAS.BASIC".to_owned())
         .schema(None)
-        .start(T0)
+        .start(base)
         .stype_in(None)
         .stype_out(SType::InstrumentId)
         .build();
@@ -557,7 +562,7 @@ fn dbn_day(secs: u64, bump: i64) -> Vec<u8> {
         for i in 0..SYMBOLS {
             let m = SymbolMappingMsg::new(
                 20_000 + i,
-                T0 - 1,
+                base - 1,
                 SType::RawSymbol,
                 &format!("S{i:02}"),
                 SType::RawSymbol,
@@ -572,7 +577,7 @@ fn dbn_day(secs: u64, bump: i64) -> Vec<u8> {
         let mut seq = 0u32;
         for sec in 0..secs {
             for i in 0..SYMBOLS {
-                let ts = T0 + sec * SEC + u64::from(i) * MS;
+                let ts = base + sec * SEC + u64::from(i) * MS;
                 let cents = 2_000 + if i == 2 && sec >= 2 { bump } else { 0 };
                 let q = quote_rec(
                     20_000 + i,
@@ -603,7 +608,7 @@ fn dbn_bytes<R: dbn::Record + dbn::encode::DbnEncodable>(r: &R) -> Vec<u8> {
     out
 }
 
-fn write_capture(dir: &std::path::Path, bytes: &[u8]) {
+pub(crate) fn write_capture(dir: &std::path::Path, bytes: &[u8]) {
     let (mut w, _) = RawWriter::open(CaptureConfig {
         segment_secs: 3,
         ..CaptureConfig::new(dir, "XNAS.BASIC")

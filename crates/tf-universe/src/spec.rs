@@ -8,6 +8,9 @@
 //! dynamic top 30 by gap_permille desc keep 45 every 5 where trades >= 20
 //! ```
 //!
+//! An optional `requires atr14 prev_high ...` line names columns the strategy reads from the snapshot without
+//! filtering on them: a snapshot that lacks one is refused, like one that lacks a column a condition uses.
+//!
 //! `static` conditions are all required of a symbol, judged from the reference snapshot before the
 //! session. `dynamic` picks, among those, the top N by a live measurement, re-ranked every so many
 //! seconds, with a symbol staying until it falls below rank `keep` so the set does not flicker.
@@ -108,6 +111,8 @@ pub struct Param {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spec {
     pub params: BTreeMap<String, Param>,
+    /// Columns the strategy reads without a condition on them; sorted, no repeats.
+    pub requires: Vec<StaticFeature>,
     pub statics: Vec<StaticCond>,
     pub dynamic: Option<Dynamic>,
 }
@@ -294,6 +299,8 @@ impl Spec {
         let mut statics: Vec<StaticCond> = Vec::new();
         let mut dyn_: Option<Dynamic> = None;
         let mut seen_static = false;
+        let mut requires: Vec<StaticFeature> = Vec::new();
+        let mut seen_requires = false;
         for (n, line) in lines {
             let err = |why: String| SpecError { line: n, why };
             if let Some(p) = line.strip_prefix("param ") {
@@ -312,6 +319,20 @@ impl Spec {
                 {
                     return Err(err(format!("param {name} declared twice")));
                 }
+            } else if let Some(r) = line.strip_prefix("requires ") {
+                if seen_requires {
+                    return Err(err(
+                        "only one `requires` line: separate columns with spaces".to_owned(),
+                    ));
+                }
+                seen_requires = true;
+                for name in r.split_whitespace() {
+                    requires.push(StaticFeature::parse(name).ok_or_else(|| {
+                        err(format!(
+                            "`{name}` is not a column of the reference snapshot"
+                        ))
+                    })?);
+                }
             } else if let Some(c) = line.strip_prefix("static ") {
                 if seen_static {
                     return Err(err(
@@ -328,7 +349,9 @@ impl Spec {
                 }
                 dyn_ = Some(dynamic(d, &mut uses).map_err(err)?);
             } else {
-                return Err(err(format!("`{line}`: expected param, static or dynamic")));
+                return Err(err(format!(
+                    "`{line}`: expected param, requires, static or dynamic"
+                )));
             }
         }
         let mut params = BTreeMap::new();
@@ -351,8 +374,11 @@ impl Spec {
         }
         statics.sort();
         statics.dedup();
+        requires.sort();
+        requires.dedup();
         Ok(Spec {
             params,
+            requires,
             statics,
             dynamic: dyn_,
         })
@@ -363,6 +389,10 @@ impl Spec {
         let mut s = String::from("universe v1\n");
         for (k, p) in &self.params {
             let _ = writeln!(s, "param {k} = {}", render_value(p.kind, p.raw));
+        }
+        if !self.requires.is_empty() {
+            let names: Vec<&str> = self.requires.iter().map(|f| f.name()).collect();
+            let _ = writeln!(s, "requires {}", names.join(" "));
         }
         if !self.statics.is_empty() {
             let parts: Vec<String> = self.statics.iter().map(|c| self.static_text(c)).collect();
@@ -427,6 +457,7 @@ impl Spec {
     /// The static features this spec needs a snapshot to have.
     pub fn needs(&self) -> Vec<StaticFeature> {
         let mut v: Vec<StaticFeature> = self.statics.iter().map(|c| c.feature).collect();
+        v.extend(self.requires.iter().copied());
         // Live features that are measured against the reference.
         if let Some(d) = &self.dynamic {
             let live: Vec<LiveFeature> = std::iter::once(d.by)

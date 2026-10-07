@@ -247,10 +247,7 @@ impl<S: LedgerStore> Host<S> {
         for row in &reference.snapshot.rows {
             if let Some(id) = reference.symbols.get(&row.symbol) {
                 if let Some(r) = refs.get_mut(id as usize) {
-                    *r = RefInfo {
-                        price: row.price,
-                        adv_shares: row.adv_shares,
-                    };
+                    *r = RefInfo::from_row(row);
                 }
             }
         }

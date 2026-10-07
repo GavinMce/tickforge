@@ -13,3 +13,5 @@ workspace = true
 [dependencies]
 tf-universe.workspace = true
 tf-alpaca.workspace = true
+tf-calendar.workspace = true
+tf-engine.workspace = true

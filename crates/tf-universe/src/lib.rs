@@ -14,8 +14,11 @@ mod spec;
 #[cfg(test)]
 mod tests;
 
-pub use dynamic::{Change, LiveView, RefInfo, Selector, Tier0View};
-pub use feature::{Kind, LIVE_FEATURES, LiveFeature, STATIC_FEATURES, StaticFeature};
+pub use dynamic::{Change, HistInfo, LiveView, RefInfo, Selector, Tier0View};
+pub use feature::{
+    CUMVOL_CHECKPOINTS, HISTORY_FEATURES, Kind, LIVE_FEATURES, LiveFeature, STATIC_FEATURES,
+    StaticFeature,
+};
 pub use reference::{RefRow, Snapshot, SnapshotError, valid_name};
 pub use select::{Diff, SelectError, Selection, diff, passes, select};
 pub use spec::{Cmp, Dynamic, LiveCond, Operand, Param, Spec, SpecError, StaticCond, Test};

@@ -1621,7 +1621,32 @@ epics:
       - id: E19-S04
         jira: TIC-158
         title: History-derived reference columns for intraday strategies
-        status: todo
+        status: done
+        evidence: >
+          tf_reference::MinuteHistory (ADR 0055): a Databento ohlcv-1m CSV of the live feed (XNAS.BASIC, fixed-point
+          prices, symbols mapped) is streamed, kept as a few numbers per symbol and session, and gives sixteen columns
+          appended to the snapshot (prev_high, prev_low, prev_close, atr14, ema100h_state and _count, vol_first1,
+          vol_first5, vol_pre, cumvol_0935 ... cumvol_1530); `tf reference build --minutes` (refuses minute bars that
+          end on another day than the daily ones), scripts/fetch_minutes.sh (cost asked first, refuses above
+          $MAX_COST). Sessions from tf-calendar (DST, early closes, outside-table is an error); only bars on or before
+          the date; every trading day between the first and last must have bars; a volume average needs 10 traded
+          sessions of 20, ATR 15 sessions, EMA 100 hourly closes, else unknown; early closes left out of the
+          time-of-day averages. The EMA is tf_engine::Ema (new Ema::state / Ema::resume, an average resumed from the
+          state continues identically to one run in a single pass). A strategy can require a column (`requires` line in
+          its universe spec): select and Host::add_strategy refuse a snapshot without it; RefInfo carries the values,
+          MemberView::reference gives them for members. A snapshot and spec from before keep their fingerprints and
+          stored selection (pinned from the code before the change). Real data, AAPL NVDA TSLA F SPY, 60 sessions to 2
+          October 2026 (303,753 bars, 15 s and $0.19 to pull; the whole market for the same window is quoted at
+          $112.43 pay-as-you-go, not pulled): all 80 values agree with an independent Python recomputation from the raw
+          CSV. Found: the feed's own minute highs and lows carry off-market prints (raw high more than 1% from the
+          consolidated daily high in 27% of 330 symbol-sessions, low 46%, up to 13.7%; a raw ATR of 6.9% of AAPL's price
+          against 2.1% consolidated), so a bar's wick is capped at 0.5% of its body (--wick-clip, reported) and the
+          columns are of capped bars: median error 0.00%, 90th percentile 0.2% against the consolidated bar (chosen
+          after seeing that sample; 0.25% and 0.1% are as good). 59 mutants of the new code (history builder 39,
+          spec 5, snapshot rows 5, RefInfo 5, Ema state 4, member view 1) all killed after a boundary test was
+          added. Narrowed: prev_high, prev_low and the ATR are of capped bars, not the raw high and low (the real fix is
+          trade flags, E19-S08); the live Tier 0 highs and lows are uncapped; vol_first5 and cumvol_0935 are the same
+          number; the whole-market pull was costed, not run.
         deps: [E18-S02, E19-S01]
         ac:
           - "From one-minute history the snapshot gains, per symbol: the previous regular session's high, low and close; ATR over 14 sessions in price units; the average volume of the first minute, the first five minutes and the premarket; the average cumulative volume at 09:35, 10:00, 10:30, 11:00, 12:00, 14:00 and 15:30 over 20 sessions; and the state of an EMA(100) over regular-session hourly closes"

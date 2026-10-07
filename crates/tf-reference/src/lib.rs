@@ -9,10 +9,17 @@
 mod assets;
 mod bars;
 mod build;
+mod history;
 
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod tests;
 
 pub use assets::{ASSET_COLUMNS, Asset, merge_assets, merge_etf_list, parse_assets};
 pub use bars::{Bar, ReadError, Symbology, date_days, date_text, read_bars};
 pub use build::{BAR_COLUMNS, BuildError, Params, Report, build};
+pub use history::{
+    ATR_PERIOD, DEFAULT_WICK_CLIP_PERMILLE, EMA_PERIOD, HISTORY_COLUMNS, HistoryError,
+    HistoryParams, HistoryReport, HistoryRow, MinuteHistory, merge_history, read_minute_bars,
+};

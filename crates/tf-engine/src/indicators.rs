@@ -148,6 +148,34 @@ impl Ema {
         self.count >= self.period
     }
 
+    /// The exact state once the seed is met: the average in raw price units shifted left 16 bits (it keeps a
+    /// 16-bit fraction between samples) and the samples seen. [`Ema::resume`] continues from it, so an average
+    /// carried from history and fed the rest equals one fed everything. `None` before the seed is met, or
+    /// when the state does not fit 64 bits (it always does for prices below the clamp, about $1,100).
+    pub fn state(&self) -> Option<(i64, u32)> {
+        let ready = match self.seed {
+            Seed::FirstValue => self.count > 0,
+            Seed::Sma => self.is_ready(),
+        };
+        let scaled = i64::try_from(self.scaled).ok()?;
+        ready.then_some((scaled, self.count))
+    }
+
+    /// An average that has already seen `count` samples, with the state [`Ema::state`] gave. Refused (`None`) for a
+    /// count short of the seed, which has no state to carry.
+    pub fn resume(period: u32, seed: Seed, scaled: i64, count: u32) -> Option<Ema> {
+        let e = Ema {
+            scaled: i128::from(scaled),
+            count,
+            ..Ema::new(period, seed)
+        };
+        match seed {
+            Seed::FirstValue if count == 0 => None,
+            Seed::Sma if count < e.period => None,
+            _ => Some(e),
+        }
+    }
+
     /// The average, rounded to the nearest raw unit.
     pub fn value(&self) -> Option<i64> {
         let available = match self.seed {
@@ -805,6 +833,59 @@ mod tests {
             assert_eq!(sma.is_ready(), i >= 4);
             assert_eq!(first.is_ready(), i >= 4);
         }
+    }
+
+    #[test]
+    fn an_ema_resumed_from_its_state_continues_exactly_like_one_run_in_a_single_pass() {
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for seed in [Seed::Sma, Seed::FirstValue] {
+            for period in [1u32, 3, 10, 100] {
+                let series: Vec<i64> = (0..400)
+                    .map(|_| 5_000_000_000_000 + (next() % 4_000_000_000) as i64)
+                    .collect();
+                let mut whole = Ema::new(period, seed);
+                for v in &series {
+                    whole.update(*v);
+                }
+                for cut in [150usize, 237, 399] {
+                    let mut head = Ema::new(period, seed);
+                    for v in &series[..cut] {
+                        head.update(*v);
+                    }
+                    let (scaled, count) = head.state().expect("seed met");
+                    assert_eq!(count as usize, cut);
+                    let mut tail = Ema::resume(period, seed, scaled, count).unwrap();
+                    assert_eq!(
+                        tail.value(),
+                        head.value(),
+                        "resumed value is the carried one"
+                    );
+                    for v in &series[cut..] {
+                        tail.update(*v);
+                    }
+                    assert_eq!(tail.state(), whole.state(), "{seed:?} {period} cut {cut}");
+                    assert_eq!(tail.value(), whole.value());
+                }
+            }
+        }
+        // Before the seed is met there is no state to carry.
+        let mut e = Ema::new(5, Seed::Sma);
+        for v in [10, 20, 30, 40] {
+            e.update(v);
+        }
+        assert_eq!(e.state(), None);
+        assert!(Ema::resume(5, Seed::Sma, 1 << 16, 4).is_none());
+        assert!(Ema::resume(5, Seed::FirstValue, 1 << 16, 0).is_none());
+        assert_eq!(
+            Ema::resume(5, Seed::Sma, 7 << 16, 5).unwrap().value(),
+            Some(7)
+        );
     }
 
     #[test]

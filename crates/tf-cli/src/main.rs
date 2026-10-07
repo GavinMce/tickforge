@@ -137,14 +137,20 @@ USAGE:
     The gates test internal consistency on synthetic sessions; they are not evidence of an edge.
 
     tf reference build --bars FILE --symbology FILE --out FILE [--assets FILE] [--etf-list FILE]
-                       [--up-to YYYY-MM-DD] [--window N] [--min-days N]
+                       [--minutes FILE [--history-sessions N] [--wick-clip PERMILLE]] [--up-to YYYY-MM-DD] [--window N] [--min-days N]
 
     Builds the reference snapshot a universe is judged from: per symbol the last close, average
     dollar and share volume over the last --window sessions (default 20; needs --min-days of them,
     default 10) and average true range, from daily bars and a symbology file (fetched by
     scripts/fetch_reference.sh). Only bars dated on or before --up-to are read. --assets adds
     Alpaca's tradable, shortable, easy_to_borrow and exchange; --etf-list (a file of symbols you
-    keep) adds etf. A column with no source is left out, so a universe that needs it refuses.
+    keep) adds etf. --minutes adds, from a one-minute bar history of the live feed (scripts/fetch_minutes.sh,
+    ending on the same day as the daily bars), the previous session's high, low and close, the 14-session ATR,
+    the first-minute, first-five-minute and premarket volume baselines, the cumulative volume at 09:35 to 15:30
+    and the state of an EMA(100) over regular-session hourly closes (the last --history-sessions, default 60).
+    A minute's high and low are capped at --wick-clip permille (default 5) beyond its open and close, because
+    the feed's raw highs and lows carry off-market prints; the build says how many bars that changed.
+    A column with no source is left out, so a universe or strategy that needs it refuses.
 
     tf universe show SPEC [--snapshot FILE]
     tf universe members SPEC --snapshot FILE [--out FILE]

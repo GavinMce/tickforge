@@ -10,7 +10,9 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use crate::feature::{Kind, STATIC_FEATURES, StaticFeature, parse_value, render_value};
+use crate::feature::{
+    CUMVOL_CHECKPOINTS, Kind, STATIC_FEATURES, StaticFeature, parse_value, render_value,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RefRow {
@@ -27,6 +29,17 @@ pub struct RefRow {
     pub tradable: Option<bool>,
     pub float: Option<i64>,
     pub short_interest: Option<i64>,
+    /// From one-minute history (E19-S04); see [`StaticFeature`].
+    pub prev_high: Option<i64>,
+    pub prev_low: Option<i64>,
+    pub prev_close: Option<i64>,
+    pub atr14: Option<i64>,
+    pub ema100h_state: Option<i64>,
+    pub ema100h_count: Option<i64>,
+    pub vol_first1: Option<i64>,
+    pub vol_first5: Option<i64>,
+    pub vol_pre: Option<i64>,
+    pub cumvol: [Option<i64>; 7],
 }
 
 impl RefRow {
@@ -38,7 +51,45 @@ impl RefRow {
             StaticFeature::AtrPermille => self.atr_permille,
             StaticFeature::Float => self.float,
             StaticFeature::ShortInterest => self.short_interest,
-            _ => None,
+            StaticFeature::PrevHigh => self.prev_high,
+            StaticFeature::PrevLow => self.prev_low,
+            StaticFeature::PrevClose => self.prev_close,
+            StaticFeature::Atr14 => self.atr14,
+            StaticFeature::Ema100hState => self.ema100h_state,
+            StaticFeature::Ema100hCount => self.ema100h_count,
+            StaticFeature::VolFirst1 => self.vol_first1,
+            StaticFeature::VolFirst5 => self.vol_first5,
+            StaticFeature::VolPremarket => self.vol_pre,
+            f => CUMVOL_CHECKPOINTS
+                .iter()
+                .position(|c| c.0 == f)
+                .and_then(|i| self.cumvol[i]),
+        }
+    }
+
+    /// Set one numeric column (the history builder's way in).
+    pub fn set_num(&mut self, f: StaticFeature, v: Option<i64>) {
+        match f {
+            StaticFeature::Price => self.price = v,
+            StaticFeature::AdvDollar => self.adv_dollar = v,
+            StaticFeature::AdvShares => self.adv_shares = v,
+            StaticFeature::AtrPermille => self.atr_permille = v,
+            StaticFeature::Float => self.float = v,
+            StaticFeature::ShortInterest => self.short_interest = v,
+            StaticFeature::PrevHigh => self.prev_high = v,
+            StaticFeature::PrevLow => self.prev_low = v,
+            StaticFeature::PrevClose => self.prev_close = v,
+            StaticFeature::Atr14 => self.atr14 = v,
+            StaticFeature::Ema100hState => self.ema100h_state = v,
+            StaticFeature::Ema100hCount => self.ema100h_count = v,
+            StaticFeature::VolFirst1 => self.vol_first1 = v,
+            StaticFeature::VolFirst5 => self.vol_first5 = v,
+            StaticFeature::VolPremarket => self.vol_pre = v,
+            f => {
+                if let Some(i) = CUMVOL_CHECKPOINTS.iter().position(|c| c.0 == f) {
+                    self.cumvol[i] = v;
+                }
+            }
         }
     }
 
@@ -66,15 +117,7 @@ impl RefRow {
         match f.kind() {
             Kind::Price | Kind::Int => {
                 let v = parse_value(f.kind(), cell)?;
-                match f {
-                    StaticFeature::Price => self.price = Some(v),
-                    StaticFeature::AdvDollar => self.adv_dollar = Some(v),
-                    StaticFeature::AdvShares => self.adv_shares = Some(v),
-                    StaticFeature::AtrPermille => self.atr_permille = Some(v),
-                    StaticFeature::Float => self.float = Some(v),
-                    StaticFeature::ShortInterest => self.short_interest = Some(v),
-                    _ => {}
-                }
+                self.set_num(f, Some(v));
             }
             Kind::Flag => {
                 let v = parse_value(Kind::Flag, cell)? != 0;

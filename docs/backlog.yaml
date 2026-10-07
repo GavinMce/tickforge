@@ -1813,7 +1813,60 @@ epics:
       - id: E19-S13
         jira: TIC-167
         title: "Research runner: strategies over stored days with quote-level fills, costs and per-trade records"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0059. tf_host::research: run(setup, day source, directory) takes the definitions the live host takes and runs
+          every day of the source through one Host (built as a replay builds it, with the calendar's session boundaries in
+          the new HostConfig::day), the simulated broker filling against the recorded quote after the cost model's latency;
+          twenty definitions cost one read of a day. Host::with_fill_log notes every execution with what its order was for
+          (strategy, order, side, purpose, reason, reference price, stop), and the assembler turns them into one record per
+          round trip, flat to flat per strategy and instrument: day, strategy name and variant (the definition's
+          fingerprint), symbol, side, size, entry and exit times and volume-weighted prices, gross, fees, borrow, slippage
+          against the intent's reference price, net, net in hundredths of a basis point, R in thousandths (absent when the
+          opening intent stated no stop), the exit reason code, and a flag for a trip still open when the day's events
+          ended (closed at the last trade and costed as a sale). The cost model (CostModel) is data stored whole in
+          research.cfg with the definitions and a fingerprint of the host's limits, and every day file carries the
+          configuration fingerprint and the data identifier: Section 31 by effective date ($0.00 per million from 14 May
+          2025, $20.60 from 4 April 2026, SEC fee advisories 2025-2 and 2026-2), the FINRA Trading Activity Fee by year
+          ($0.000166 up to $8.30 for 2024 and 2025, $0.000195 up to $9.79 for 2026, $0.000232 up to $11.61 for 2027, FINRA's
+          fee adjustment schedule), applied to sales only and exactly; a date the table does not cover (before 14 May 2025
+          or after 30 September 2026 for Section 31) is refused before the day is run, not given the nearest rate. A result
+          without its configuration is refused (Results::open, a run into a directory that has days and no research.cfg,
+          a day made under another configuration, a damaged day). Two runs leave byte-identical files (test); a run that
+          failed on a day goes on from it, skipping the finished days without loading them, and leaves what an
+          uninterrupted run leaves (test), and a day whose data or file changed is made again. A day run here replays
+          through replay_files, the live driver's check, to Equal, and to a difference under another latency (test).
+          Refusals are counted per day (gateway rejections, broker refusals) so that no trips is not mistaken for no edge:
+          a first run of a placeholder strategy on the real day found its protective orders refused in the premarket.
+          Found and fixed: CaptureReplay ended its stream silently at a file it could not open or decode (a shorter day
+          would have looked like a day); it now says why (failure()), the runner and replay_files turn that into an
+          error. The screening pass (tf_history::screen, tf history screen): per symbol the minutes traded, last close,
+          shares and dollars from ohlcv-1m files and the mean quoted spread over the mid at each two-sided quote of a stored
+          quote schema, and a selection by price range, dollars, minutes and spread (nothing from a bar's high or low,
+          ADR 0055); on the real store, 263 days of five symbols in 0.38 s, and on the tcbbo day AAPL 1.34 bp and F 9.68 bp
+          mean spread. Real data (7 October 2026): the one stored day of trades with quotes (2 October 2026, F and AAPL,
+          984,067 events through the host) runs in 1.2 to 1.6 s, about 620,000 events a second including the naming pass.
+          Speed test, not a result: that one day run as each of the 251 trading days from 2025-10-01 to 2026-09-30 is
+          247,000,817 events in 400.8 s (6 min 41 s) on the development machine, a results directory of 1 MB, and a rerun
+          skips all 251 days in 4 ms. Mutation run on the new code, 130 mutants (cost 32, trips 30, runner 35, screen 22, host 8, capture reader 3): the
+          first complete run left 24 survivors, and each got a test or an explanation. Tests added for: the Trading Activity Fee's
+          last day, a date with the wrong length or separators, a table missing only one of its two dates, the borrow fee on a
+          position large enough to show a nanosecond, the model's latency and borrow rate reaching the simulated broker, a trip
+          entered at a price of nothing, a day file carrying every count of the day (`DayFile::of`), a day's host configuration
+          (`day_config`), the easy-to-borrow set (`easy_to_borrow`), a day with no market event, a date the fee tables do not
+          cover refused even when nothing was sold, broker refusals before the open, the intent's number in the decision log and
+          in the fill notes, and in the capture reader a first file that cannot be opened and a record that cannot be decoded.
+          After them 3 mutants survive, each equivalent: the closing leg of a trip still open at the end takes its reference
+          from its own price, so which side it is marked as changes no slippage; the last event's time is the latest one for
+          events in arrival order; and the simulated broker never rate-limits, so counting those with the refusals changes
+          nothing here. 3 mutants did not compile, and 5 of the runner's no longer match after `day_config`, `easy_to_borrow`
+          and `DayFile::of` were taken out of it (they are tested directly). The first attempt at this run was lost: a mutant of
+          `Assembler::fill` that loops and allocates without end exhausted the machine's memory and left the file mutated, which
+          is why the run now commits first, caps each mutant's memory and time, and restores from git after every one. Narrowed: there is no command that names definitions, since there is no
+          strategy to name yet (the first, E19-S18, brings its registry); the library entry point and an example with a
+          store-backed source are what exists; and twelve months of real quotes are not stored (five symbols of trades
+          with quotes would be about $170 at the price paid for one day), so the stated time is the speed test above. Both
+          are E19-S31.
         deps: [E19-S01, E19-S05, E19-S06, E19-S07]
         ac:
           - "A command runs a list of strategy definitions (the same definitions the live host runs) over a range of stored days through the host with the simulated broker, one pass for all of them, and writes one record per round trip: day, strategy and variant, symbol, entry and exit times and prices, side, size, fees, slippage against the reference price, result in R and in basis points, and the reason it exited"
@@ -1972,3 +2025,11 @@ epics:
           - With the paid plan active and its entitlement to the history confirmed, scripts/pull_history.sh pulls twelve months of one-minute bars for the whole market (quoted at $415.63 pay-as-you-go on 7 October 2026, expected to be included in the plan) and a sample of whole-market trades-with-quote days (quoted at $36.07 a day), each under a stated cap, and tf history verify finds every file clean
           - The volume (files, records, bytes) and the cost the metadata service quoted are stated, and the days Databento returned nothing for are named and match the calendar's closures
           - The survivorship note is informative: the number of symbols on the first day that are not on the last is measured and the history is shown to contain names that later left the market, or the store says it does not
+      - id: E19-S31
+        jira: TIC-185
+        title: "Research command: definitions by name over a store, per-day snapshots, and a twelve-month run on real quotes"
+        status: todo
+        deps: [E19-S13, E19-S18]
+        ac:
+          - "`tf research run` takes strategy definitions by name and parameters (a registry the strategies add to), a store, a date range and a symbol subset (from the screening pass or a list), builds each day's reference snapshot as it was before that session (the E19-S04 columns up to the previous session), and runs tf_host::research::run into a results directory; `tf research show` prints the configuration and a per-variant summary of a directory and refuses one without its configuration"
+          - "Twelve months of trades with quotes for a stated subset of symbols is pulled under a stated cap (about $170 for five symbols at the price paid for one day of two), run through the command, and its time on the development machine stated against the 400.8 s speed test of E19-S13; the Section 31 rate for the fiscal year that began on 1 October 2026 is looked up and added to the cost model first"

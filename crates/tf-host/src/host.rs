@@ -37,6 +37,10 @@ pub struct HostConfig {
     /// Bars shared by the strategies (E19-S03); `None` for a host whose strategies need none, in which case
     /// their `track_bars` says it is not configured.
     pub bars: Option<BarsConfig>,
+    /// The session boundaries of the day the host starts on (`tf_calendar::Calendar::times`), given to Tier 0 at once;
+    /// `None` leaves Tier 0 with its day-wide figures until [`Host::start_day`]. A replay applies the same configuration,
+    /// so it sees the sessions the run it checks saw.
+    pub day: Option<tf_calendar::SessionTimes>,
 }
 
 /// The engine's shared multi-timeframe bars: how they are aligned and how many symbols may be tracked.
@@ -226,6 +230,36 @@ pub struct Host<S: LedgerStore> {
     lag_hist: [u64; 65],
     first_ts: Option<Nanos>,
     gaps: Vec<GapNote>,
+    fill_log: Option<FillLog>,
+}
+
+/// One execution and what the order it belongs to was for (E19-S13): what a research run needs to turn fills into
+/// round trips. Prices are raw (1e-9 dollars).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FillNote {
+    pub strategy: u16,
+    pub instrument: InstrumentId,
+    pub order: u64,
+    /// The intent's number within its strategy.
+    pub seq: u64,
+    pub side: Side,
+    pub purpose: Purpose,
+    /// The strategy's own code for why (an exit's is one of `tf_strategy::exits`' `REASON_*`).
+    pub reason: u16,
+    pub qty: u32,
+    pub px: i64,
+    pub ts: Nanos,
+    /// The price the intent was nearest to: its limit, or a collar's reference (`Pricing::reference_price`).
+    pub reference: i64,
+    /// The stop trigger of the intent's protective orders, if it had any.
+    pub stop: Option<i64>,
+}
+
+#[derive(Default)]
+struct FillLog {
+    /// What each accepted order was for, until the day ends.
+    meta: BTreeMap<OrderId, FillNote>,
+    notes: Vec<FillNote>,
 }
 
 /// A break the ingest queue reported: events of one kind lost between two times.
@@ -278,8 +312,12 @@ impl<S: LedgerStore> Host<S> {
         }
         let promoter = Promoter::new(cfg.promoter, cfg.scanner, cfg.id_space)
             .map_err(|e| HostError::Ledger(JournalError::Structure(e.0.to_owned())))?;
+        let mut tier0 = Tier0::new(cfg.id_space);
+        if let Some(day) = cfg.day {
+            tier0.set_day(day);
+        }
         Ok(Host {
-            tier0: Tier0::new(cfg.id_space),
+            tier0,
             bars: cfg
                 .bars
                 .map(|b| SharedBars::new(b.mtf, cfg.id_space, b.max_tracked)),
@@ -316,6 +354,7 @@ impl<S: LedgerStore> Host<S> {
             lag_hist: [0; 65],
             first_ts: None,
             gaps: Vec::new(),
+            fill_log: None,
             reference,
             cfg,
         })
@@ -326,6 +365,20 @@ impl<S: LedgerStore> Host<S> {
     pub fn record(mut self) -> Self {
         self.log = Some(Log::new(self.cfg.id_space, &self.reference.symbols));
         self
+    }
+
+    /// Keep a note of every execution with what its order was for ([`FillNote`]). Call before the first event.
+    pub fn with_fill_log(mut self) -> Self {
+        self.fill_log = Some(FillLog::default());
+        self
+    }
+
+    /// The executions noted since the last call, in the order they were recorded.
+    pub fn take_fill_notes(&mut self) -> Vec<FillNote> {
+        self.fill_log
+            .as_mut()
+            .map(|l| std::mem::take(&mut l.notes))
+            .unwrap_or_default()
     }
 
     /// The decision log so far, if recording.
@@ -688,6 +741,25 @@ impl<S: LedgerStore> Host<S> {
                 self.accepted += 1;
                 self.slots[k].stats.accepted += 1;
                 self.orders.insert(order, (s, intent.instrument, route));
+                if let Some(l) = self.fill_log.as_mut() {
+                    l.meta.insert(
+                        order,
+                        FillNote {
+                            strategy: s,
+                            instrument: intent.instrument,
+                            order: order.0,
+                            seq: intent.id.seq,
+                            side: intent.side,
+                            purpose: intent.purpose,
+                            reason: intent.reason,
+                            qty: 0,
+                            px: 0,
+                            ts: 0,
+                            reference: intent.pricing.reference_price().raw(),
+                            stop: intent.protect.map(|p| p.stop_trigger.raw()),
+                        },
+                    );
+                }
                 self.working.insert(order);
                 *self.working_by.entry((s, intent.instrument)).or_insert(0) += 1;
                 self.touched.insert((s, intent.instrument));
@@ -755,6 +827,16 @@ impl<S: LedgerStore> Host<S> {
                     self.hash.put(u64::from(qty));
                     self.hash.put(px.raw() as u64);
                     self.hash.put(e.ts);
+                    if let Some(l) = self.fill_log.as_mut() {
+                        if let Some(m) = l.meta.get(&e.order) {
+                            l.notes.push(FillNote {
+                                qty,
+                                px: px.raw(),
+                                ts: e.ts,
+                                ..*m
+                            });
+                        }
+                    }
                     if let Some(&(s, instrument, _)) = self.orders.get(&e.order) {
                         let f = self.fills_by.entry((s, instrument)).or_insert((0, 0));
                         f.0 += u64::from(qty);

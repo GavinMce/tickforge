@@ -147,6 +147,7 @@ fn host_cfg() -> HostConfig {
         min_certified_events: 10,
         start_ts: 0,
         bars: None,
+        day: None,
     }
 }
 

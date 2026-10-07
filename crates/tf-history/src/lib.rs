@@ -647,5 +647,9 @@ pub fn describe(store: &Store) -> String {
     s
 }
 
+pub mod screen;
+
+#[cfg(test)]
+mod screen_tests;
 #[cfg(test)]
 mod tests;

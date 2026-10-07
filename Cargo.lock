@@ -470,6 +470,7 @@ dependencies = [
  "tf-strategy",
  "tf-synth",
  "tf-universe",
+ "zstd 0.13.3",
 ]
 
 [[package]]

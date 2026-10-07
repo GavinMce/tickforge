@@ -674,3 +674,87 @@ fn each_thing_the_manifest_records_is_checked_on_its_own() {
     assert!(verify(&dir).unwrap().is_clean());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_replay_that_ended_because_a_file_could_not_be_read_says_so() {
+    let dir = scratch("failure");
+    let (mut w, _) = RawWriter::open(cfg(&dir, 2)).unwrap();
+    feed(&mut w, &session(8, 1_000_000_000, 500_000_000));
+    w.finish().unwrap();
+    let files: Vec<PathBuf> = list(&dir)
+        .unwrap()
+        .iter()
+        .map(|e| dir.join(&e.file))
+        .collect();
+    assert!(files.len() >= 3);
+    let drain = |files: Vec<PathBuf>| {
+        let mut r = CaptureReplay::from_files(files);
+        let mut n = 0;
+        loop {
+            let mut out = Vec::new();
+            match r.poll(&mut out, 100) {
+                Poll::Events(k) => n += k,
+                _ => break,
+            }
+        }
+        (n, r.failure().map(str::to_owned))
+    };
+    // Whole: it ends and there is nothing to say.
+    let (all, why) = drain(files.clone());
+    assert!(all > 10 && why.is_none());
+    // A file missing after the first, and one that is not zstd, in the middle: the stream ends there and says why.
+    let mut gone = files.clone();
+    gone.insert(2, dir.join("missing.dbn.zst"));
+    let (n, why) = drain(gone);
+    assert!(n < all && why.unwrap().contains("missing.dbn.zst"));
+    let junk = dir.join("junk.dbn.zst");
+    fs::write(&junk, b"not zstd at all").unwrap();
+    let mut bad = files.clone();
+    bad.insert(1, junk);
+    let (n, why) = drain(bad);
+    assert!(n < all && why.unwrap().contains("junk.dbn.zst"));
+    // A file cut short in its compressed stream.
+    let cut = &files[1];
+    let b = fs::read(cut).unwrap();
+    fs::write(cut, &b[..b.len() / 2]).unwrap();
+    let (n, why) = drain(files);
+    assert!(n < all && why.is_some());
+}
+
+#[test]
+fn a_first_file_that_is_missing_and_a_record_that_cannot_be_decoded_each_say_so() {
+    let dir = scratch("failure-first");
+    let (mut w, _) = RawWriter::open(cfg(&dir, 2)).unwrap();
+    feed(&mut w, &session(8, 1_000_000_000, 500_000_000));
+    w.finish().unwrap();
+    let files: Vec<PathBuf> = list(&dir)
+        .unwrap()
+        .iter()
+        .map(|e| dir.join(&e.file))
+        .collect();
+    let drain = |files: Vec<PathBuf>| {
+        let mut r = CaptureReplay::from_files(files);
+        let mut n = 0;
+        loop {
+            let mut out = Vec::new();
+            match r.poll(&mut out, 100) {
+                Poll::Events(k) => n += k,
+                _ => break,
+            }
+        }
+        (n, r.failure().map(str::to_owned))
+    };
+    // The very first file cannot be opened: nothing comes out, and the replay says which file it was.
+    let (n, why) = drain(vec![dir.join("missing.dbn.zst")]);
+    assert_eq!(n, 0);
+    assert!(why.unwrap().contains("missing.dbn.zst"));
+    // A file that is a whole zstd stream with a well-formed header and a first record whose length is zero.
+    let mut raw = zstd::decode_all(fs::File::open(&files[0]).unwrap()).unwrap();
+    let meta = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
+    raw[8 + meta] = 0;
+    let bad = dir.join("bad-record.dbn.zst");
+    fs::write(&bad, zstd::encode_all(&raw[..], 0).unwrap()).unwrap();
+    let (n, why) = drain(vec![bad.clone(), files[1].clone()]);
+    assert_eq!(n, 0, "nothing after the record that cannot be read");
+    assert!(why.is_some());
+}

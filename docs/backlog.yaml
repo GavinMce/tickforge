@@ -2288,3 +2288,30 @@ epics:
         ac:
           - "The criteria for buying the plan are written down before the decision, each with a check that can be run or read from the backlog; candidates: the live adapter, driver and capture (done), finished capture segments shipped to MinIO and verified (E06-S08), the operating runbook with alerts and time sync (E18-S09), the Alpaca asset list checked against the real endpoint (E18-S10), the history pull and verify pipeline tried on a small real pull (E19-S30, E19-S31), the Proxmox storage for history mounted and sized, results viewable on the dev server (E19-S35, E19-S38), and the strategy set with its metrics fixed in advance (E18-S08)"
           - "A page on the dev server shows each criterion's state from the backlog and the checks, and the whole as go or not yet; it says what the month buys (twelve months of history for the gate, E19-S29, and the live forward sample) and what the history costs outside it (about $416 pay-as-you-go for whole-market minute bars alone against $199 for the plan)"
+      - id: E19-S40
+        jira: TIC-194
+        title: "Backtest view: the strategy panel on the trade replay (parameters, universe, reference price, stop)"
+        status: done
+        evidence: >-
+          ADR 0067. Each day now keeps a host trace of its executions (`fills`, strategy 0, beside `instruments`): for every fill the
+          strategy, symbol, time, side, purpose, reason, shares, price, the reference price the intent was nearest to (its limit, or a
+          collar's reference) and the stop trigger of its protective orders, which the round trip keeps only in total; the trips file is
+          unchanged, a day kept before this says so on the page and shows the rest. The trade page has a "The strategy" panel: name and
+          parameters as chips, the universe filter as written, where the strategy's own account names the symbol (for T04 the ranking row
+          and its status), and for each execution of the trade the reference price, the fill, what the fill cost against the reference
+          (positive worse, in dollars and basis points), the protective stop and its distance from the fill in tenths of a percent, and for
+          an exit why it exited. It does not claim the symbol passed the universe filter (the features are not kept with the results).
+          Checked in a browser on a T04 scenario at 1280 px: the panel shows the nine parameters, the filter `adv_shares <= 600`, row 1
+          of 6 entered, an entry with a stop at $18.0090 (10.0% from the fill) and an exit 10.29 bp worse than its reference. Tests: the
+          page's data for a T04 trade (definition, two legs with references, slippage, stop and its distance, membership), a day without the
+          fills trace (no legs and the note), the legs of a trade (another strategy's, symbol's, later or unreadable rows left out,
+          edges inclusive), slippage signs for a buy, a sale and a short sale, the stop distance rounding, membership in the first trace
+          that names the symbol, and the leg JSON including a zero reference. Full workspace 1,183 passed; clippy and fmt clean. Mutation
+          run, 29 mutants of the new code: 1 survivor on the first run (a zero reference would divide), given a test and killed on the
+          rerun. Not measured: the size of the fills trace at whole-market scale (about forty rows a day for T04; a hundred null seeds a few
+          thousand).
+        deps: [E19-S35]
+        ac:
+          - "Each day keeps, with its other companions, the host's trace of its executions: the strategy, symbol, time, side, purpose, reason, shares, price, the reference price and the stop trigger of its protective orders; a day kept before this says so on the page and shows the rest"
+          - "The trade page has a strategy panel: name and parameters, the universe filter as written, where the strategy's own account names the symbol, and for each execution the reference price, the fill, what it cost against the reference, the protective stop and its distance from the fill, and for an exit why it exited"
+          - "It does not claim the symbol passed the universe filter (the features are not kept with the results); the panel is checked in a browser"

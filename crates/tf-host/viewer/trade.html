@@ -283,9 +283,48 @@ tr.gap td{text-align:center;color:var(--mute)}
     kv("Borrow", "-$" + m.borrow),
     kv("Net", usd4(m.net) + "  (" + usd4(m.net_cents).replace(/^(-?\$)/, "$1") + ")", cls(m.net)),
     kv("Net, in basis points of what it put in", m.bp + " bp", cls(m.bp)),
-    kv("Slippage against the price the strategy asked for", usd4(m.slippage) + " (" + m.slip_bp + " bp)", num(m.slippage) > 0 ? "neg" : ""),
+    kv("Slippage against the reference price", usd4(m.slippage) + " (" + m.slip_bp + " bp)", num(m.slippage) > 0 ? "neg" : ""),
     kv("Return on the money at risk", m.r === null ? "not stated: the strategy holds its own stop" : m.r + " R"),
     h("div", { "class": "small mute", style: "margin-top:6px" }, "Slippage is already in the prices above (positive: worse than asked); it is shown, not taken off again."));
+
+  // ---- the strategy as configured, and what it asked for ----------------------------------------------
+  function paramChips(text) {
+    var toks = text.split(/\s+/).filter(function (t) { return t; });
+    if (!toks.length) return [];
+    if (toks.every(function (t) { return t.indexOf("=") >= 0; })) return toks;
+    var out = [];
+    for (var i = 0; i + 1 < toks.length; i += 2) out.push(toks[i] + " " + toks[i + 1]);
+    return toks.length % 2 ? toks : out;
+  }
+  var chip = function (t) { return h("span", { style: "background:var(--soft);border-radius:99px;padding:1px 9px;font-family:var(--mono);font-size:12px" }, t); };
+  var stratBody = [
+    h("div", null, h("b", null, D.def.name)),
+    D.def.params ? h("div", { "class": "row" }, paramChips(D.def.params).map(chip)) : h("div", { "class": "small mute" }, "No parameters."),
+    h("div", { "class": "small mute", style: "margin-top:4px" }, "Universe filter"),
+    h("pre", { "class": "mono small", style: "margin:0;white-space:pre-wrap;overflow-wrap:anywhere" }, D.def.universe.replace(/^universe v1\n/, "").replace(/\n+$/, "") || "everything")
+  ];
+  if (D.listed) {
+    stratBody.push(h("div", { "class": "small" }, "Named in the strategy's " + D.listed.kind + " at " + D.listed.time + ": row " + D.listed.row + " of " + D.listed.of + (D.listed.status ? ", " + D.listed.status : "") + "."));
+  }
+  if (D.legs === null) {
+    stratBody.push(h("div", { "class": "small mute" }, "What each fill was asked for was not recorded for this day."));
+  } else if (!D.legs.length) {
+    stratBody.push(h("div", { "class": "small mute" }, "No fills of this trade were found among the day's executions."));
+  } else {
+    D.legs.forEach(function (l) {
+      var entry = l.purpose === "open";
+      var worse = num(l.slip) > 0;
+      stratBody.push(h("div", { "style": "border-top:1px solid var(--soft);padding-top:6px;display:flex;flex-direction:column;gap:2px" },
+        h("b", { "class": "small" }, (entry ? "Entry" : "Exit") + " at " + l.time + ": " + l.side + " " + l.qty),
+        kv("Reference price when it decided", "$" + l.reference),
+        kv("Filled at", "$" + l.px),
+        kv("Against the reference price", (num(l.slip) === 0 ? "$0.0000" : (worse ? "-$" : "+$") + l.slip.replace("-", "")) + (num(l.slip) === 0 ? "" : "  (" + l.slip_bp.replace("-", "") + " bp " + (worse ? "worse" : "better") + ")"), worse ? "neg" : ""),
+        l.stop !== null ? kv("Protective stop", "$" + l.stop + "  (" + l.stop_pct + "% from the fill)") : (entry ? kv("Protective stop", "none stated") : null),
+        entry ? null : kv("Why it exited", l.reason)));
+    });
+  }
+  var stratCard = h("section", { "class": "card", style: "display:flex;flex-direction:column;gap:8px", "aria-label": "The strategy" },
+    h("h2", null, "The strategy"), stratBody);
 
   // ---- why the strategy did it --------------------------------------------------------------------
   var why = D.evidence.map(function (t) {
@@ -307,7 +346,7 @@ tr.gap td{text-align:center;color:var(--mute)}
       t.total ? h("div", { "class": "small mute" }, t.total + " rows; the shaded row is " + D.symbol + ".") : null);
   });
 
-  kids.push(h("div", { "class": "cols" }, h("div", { "class": "main" }, chartCard, lifeCard), h("div", { "class": "side" }, [costs].concat(why).reduce(function (a, c) { a.push(c); return a; }, []).reduce(function (box, c) { box.appendChild(c); return box; }, h("div", { style: "display:flex;flex-direction:column;gap:16px" })))));
+  kids.push(h("div", { "class": "cols" }, h("div", { "class": "main" }, chartCard, lifeCard), h("div", { "class": "side" }, [costs, stratCard].concat(why).reduce(function (a, c) { a.push(c); return a; }, []).reduce(function (box, c) { box.appendChild(c); return box; }, h("div", { style: "display:flex;flex-direction:column;gap:16px" })))));
   app.replaceChildren.apply(app, kids);
   setCursor(D.exit_us + 1);
 })();

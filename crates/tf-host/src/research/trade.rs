@@ -16,7 +16,7 @@ use tf_strategy::trace::Trace;
 
 use super::cost::CostModel;
 use super::keep::EvEvent;
-use super::run::INSTRUMENTS;
+use super::run::{FILLS, INSTRUMENTS};
 use super::trips::Trip;
 use super::view::{
     ViewError, bp, day_of, dollars, et, js, milli, open, price, reason_text, strategy_of,
@@ -322,6 +322,158 @@ pub(super) fn fee_parts(
     (i128::try_from(sec + taf).ok() == Some(i128::from(trip.fees))).then_some((sec, taf))
 }
 
+/// One execution of a trade, with what the intent behind it was for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Leg {
+    pub ts: Nanos,
+    /// `Buy`, `Sell` or `SellShort`.
+    pub side: String,
+    /// `Open` or `Close`.
+    pub purpose: String,
+    pub reason: u16,
+    pub qty: u32,
+    pub px: i64,
+    /// The price the intent was nearest to: its limit, or a collar's reference.
+    pub reference: i64,
+    /// The trigger of the protective stop the intent carried.
+    pub stop: Option<i64>,
+}
+
+impl Leg {
+    /// What the fill cost against the price asked for, raw, positive when worse: paying above on a buy, receiving below on a sale.
+    pub fn slippage(&self) -> i64 {
+        if self.side == "Buy" {
+            self.px - self.reference
+        } else {
+            self.reference - self.px
+        }
+    }
+}
+
+/// The strategy's executions in `symbol` from `from` to `to` (inclusive), from the host's own trace of the day's fills. `None` if
+/// the day was kept before the host recorded them.
+pub(super) fn legs_of(
+    traces: &[(u16, Trace)],
+    strategy: u16,
+    symbol: &str,
+    from: Nanos,
+    to: Nanos,
+) -> Option<Vec<Leg>> {
+    let (_, t) = traces.iter().find(|(s, t)| *s == 0 && t.kind == FILLS)?;
+    let col = |name: &str| t.columns.iter().position(|c| c == name);
+    let (ci, cs, cts, cside, cpur, crea, cq, cpx, cref, cstop) = (
+        col("strategy")?,
+        col("symbol")?,
+        col("ts")?,
+        col("side")?,
+        col("purpose")?,
+        col("reason")?,
+        col("qty")?,
+        col("px")?,
+        col("reference")?,
+        col("stop")?,
+    );
+    let mut legs = Vec::new();
+    for r in &t.rows {
+        let (Ok(id), Ok(ts)) = (r[ci].parse::<u16>(), r[cts].parse::<Nanos>()) else {
+            continue;
+        };
+        if id != strategy || r[cs] != symbol || ts < from || ts > to {
+            continue;
+        }
+        let (Ok(reason), Ok(qty), Ok(px), Ok(reference)) = (
+            r[crea].parse::<u16>(),
+            r[cq].parse::<u32>(),
+            r[cpx].parse::<i64>(),
+            r[cref].parse::<i64>(),
+        ) else {
+            continue;
+        };
+        legs.push(Leg {
+            ts,
+            side: r[cside].clone(),
+            purpose: r[cpur].clone(),
+            reason,
+            qty,
+            px,
+            reference,
+            stop: r[cstop].parse().ok(),
+        });
+    }
+    Some(legs)
+}
+
+/// Tenths of a percent from `price` to `level`, as text: 10.0 for a stop a tenth below.
+pub(super) fn tenths_pct(price: i64, level: i64) -> String {
+    if price <= 0 {
+        return "0.0".to_owned();
+    }
+    let t = (i128::from((price - level).abs()) * 1000 + i128::from(price) / 2) / i128::from(price);
+    format!("{}.{}", t / 10, t % 10)
+}
+
+/// Where the strategy's own account lists `symbol`: the first of its traces with a symbol column that has a row for it.
+pub(super) fn listed_in(own: &[&Trace], symbol: &str) -> Option<String> {
+    for t in own {
+        let Some(i) = t.columns.iter().position(|c| c == "symbol") else {
+            continue;
+        };
+        if let Some(row) = t
+            .rows
+            .iter()
+            .position(|r| r.get(i).is_some_and(|c| c == symbol))
+        {
+            let status = t
+                .columns
+                .iter()
+                .position(|c| c == "status")
+                .and_then(|j| t.rows[row].get(j))
+                .map_or("null".to_owned(), |v| js(v));
+            return Some(format!(
+                "{{\"kind\":{},\"time\":{},\"row\":{},\"of\":{},\"status\":{status}}}",
+                js(&t.kind),
+                js(&et(t.ts)),
+                row + 1,
+                t.rows.len()
+            ));
+        }
+    }
+    None
+}
+
+pub(super) fn legs_json(legs: &[Leg], us: &dyn Fn(Nanos) -> i64) -> String {
+    let rows: Vec<String> = legs
+        .iter()
+        .map(|l| {
+            let slip = l.slippage();
+            let slip_bp = if l.reference > 0 {
+                let v = i128::from(slip) * 1_000_000 / i128::from(l.reference);
+                bp(i64::try_from(v).unwrap_or(0))
+            } else {
+                bp(0)
+            };
+            let (stop, pct) = match l.stop {
+                Some(v) => (js(&price(v)), js(&tenths_pct(l.px, v))),
+                None => ("null".to_owned(), "null".to_owned()),
+            };
+            format!(
+                "{{\"us\":{},\"time\":{},\"side\":{},\"purpose\":{},\"reason\":{},\"qty\":{},\"px\":{},\"reference\":{},\"slip\":{},\"slip_bp\":{},\"stop\":{stop},\"stop_pct\":{pct}}}",
+                us(l.ts),
+                js(&et(l.ts)),
+                js(&l.side.to_lowercase()),
+                js(&l.purpose.to_lowercase()),
+                js(&reason_text(l.reason)),
+                l.qty,
+                js(&price(l.px)),
+                js(&price(l.reference)),
+                js(&price(slip)),
+                js(&slip_bp)
+            )
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
 struct Order {
     us: i64,
     text: String,
@@ -527,6 +679,21 @@ pub(super) fn trade_json(
     }
     let evidence: Vec<String> = own.iter().map(|t| trace_json(t, &trip.symbol)).collect();
 
+    // The strategy as configured, and what it did at each execution.
+    let legs = legs_of(&traces, strategy, &trip.symbol, trip.entry_ts, trip.exit_ts);
+    if legs.is_none() {
+        notes.push("This day was kept before the host recorded what each fill was for, so the price the strategy asked for and its stop are not shown.".to_owned());
+    }
+    let legs_json = legs
+        .as_deref()
+        .map_or("null".to_owned(), |l| legs_json(l, &us));
+    let listed = listed_in(&own, &trip.symbol).unwrap_or_else(|| "null".to_owned());
+    let def_json = format!(
+        "{{\"name\":{},\"params\":{},\"universe\":{}}}",
+        js(&line.name),
+        js(&line.params),
+        js(&line.universe)
+    );
     let marks_json: Vec<String> = marks
         .iter()
         .map(|(u, k, l)| format!("{{\"us\":{u},\"kind\":{},\"label\":{}}}", js(k), js(l)))
@@ -534,7 +701,7 @@ pub(super) fn trade_json(
     let notes_json: Vec<String> = notes.iter().map(|n| js(n)).collect();
     let life_json: Vec<&str> = life.iter().map(|o| o.text.as_str()).collect();
     Ok(format!(
-        "{{\"scenario\":{},\"day\":{},\"strategy\":{{\"id\":{},\"name\":{}}},\"n\":{n},\"of\":{},\"symbol\":{},\"side\":{},\"qty\":{},\"open_at_end\":{},\"base_s\":{base_s},\"entry_us\":{},\"exit_us\":{},\"entry\":{},\"exit\":{},\"entry_px\":{},\"exit_px\":{},\"entry_px4\":{},\"exit_px4\":{},\"exit_reason\":{},\"money\":{money},\"orders\":[{}],\"marks\":[{}],\"market\":{market},\"evidence\":[{}],\"notes\":[{}]}}",
+        "{{\"scenario\":{},\"day\":{},\"strategy\":{{\"id\":{},\"name\":{}}},\"n\":{n},\"of\":{},\"symbol\":{},\"side\":{},\"qty\":{},\"open_at_end\":{},\"base_s\":{base_s},\"entry_us\":{},\"exit_us\":{},\"entry\":{},\"exit\":{},\"entry_px\":{},\"exit_px\":{},\"entry_px4\":{},\"exit_px4\":{},\"exit_reason\":{},\"money\":{money},\"orders\":[{}],\"marks\":[{}],\"market\":{market},\"evidence\":[{}],\"notes\":[{}],\"def\":{def_json},\"legs\":{legs_json},\"listed\":{listed}}}",
         js(scenario),
         js(day),
         line.id,

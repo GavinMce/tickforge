@@ -2153,7 +2153,33 @@ epics:
       - id: E19-S33
         jira: TIC-187
         title: "Persist each day's decision log and traces with the results, and an evidence pass that keeps the market around every trade"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0064. A day keeps, beside <date>.trips, <date>.log (the host's decision log), <date>.trace (the strategies' traces) and,
+          when asked for, <date>.evidence.zst. Each companion begins with its kind, the day, the configuration's fingerprint and the
+          day's outcome hash and ends with a checksum, so a file of another day, another run or another configuration, a damaged, cut or
+          extended one, or one of another kind is refused when read (Results::log, traces, evidence); the day file's format is unchanged,
+          so earlier results read and their days are made again for lack of companions. The trips file is written last, so a day is there
+          whole or not at all; a day is whole when its trips, log and traces read back, and its evidence if asked for (a day made again
+          without evidence leaves none from before; asking for evidence of a directory without it makes its days again).
+          RunOptions { evidence } and run_with (run keeps none): after a day's run the evidence pass reads the day's files once more,
+          sequentially, reusing the symbol table the run built (one read, not two), and keeps for each symbol traded every trade, quote and
+          status in a window around its trips (default ten minutes before the entry to two after the exit; overlapping windows are one;
+          events as the host saw them, the gateway's repeats taken once; the edges inclusive), as deterministic text compressed with zstd,
+          so two runs leave the same bytes; trips with nothing kept around them are named in RunReport::no_evidence. Tests: log and
+          traces read back equal to the day's run, a companion swapped between days, altered, of another configuration or outcome, of
+          another kind, cut, extended, or gone is refused and the day made again to byte-identical files, the evidence equals an independent
+          decode of the same files in the windows (the whole ten seconds of the fixture), overlapping windows merged and the gaps between
+          windows not kept, events exactly on the edges kept (and lost one nanosecond inside), the results readable with the data deleted,
+          evidence asked for and not asked for again, the text refusing 11 kinds of damage, and a T04 day through the host keeping its six-name
+          ranked cross-section with symbols and the market around the three names it bought. Measured on a synthetic hour of 8.64 million events
+          (553 MB of DBN, 58 MB compressed; six names at a busy name's pace): the evidence pass for three names' 42-minute windows (2.8 million
+          events) takes 5.6 s, about 1.5 million events a second, so a whole-market tcbbo day (82.4 million records) would add about 55 s to a
+          host pass of about 133 s (unverified at that scale). The size of a real T04 day's evidence is not measured (no real day is stored): by
+          estimate a few megabytes of text, one to a few compressed (cmbp-1 about seven times that). Mutation run, 27 mutants of the new code: 6
+          survivors on the first run, 5 given tests (the default window's values, events exactly on a window's start and end, a trailer cut off a
+          body that says end); 1 remains, equivalent: merging windows that exactly touch (an event is kept once either way). Not here: the view
+          (E19-S34, E19-S35).
         deps: [E19-S32, E19-S13]
         ac:
           - "A results directory keeps, beside each day's trips, that day's decision log and traces; a day made without them is made again, and two runs leave byte-identical files"

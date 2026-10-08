@@ -31,9 +31,12 @@ use tf_capture::CaptureReplay;
 use tf_core::{Event, Nanos};
 use tf_provider::{Poll, Provider};
 use tf_stats::StatsError;
+use tf_strategy::Trace;
+use tf_strategy::trace::{parse_all, render_all};
 use tf_universe::Snapshot;
 
 use super::cost::{CostError, CostModel, is_date};
+use super::keep::{self, Evidence, EvidenceWindow, gather_evidence_with};
 use super::trips::{Assembler, COLUMNS, Trip, Who};
 use crate::def::{StrategyDef, fnv};
 use crate::equiv::Log;
@@ -44,6 +47,9 @@ pub const CONFIG_FILE: &str = "research.cfg";
 const CONFIG_HEADER: &str = "research config v1";
 const DAY_HEADER: &str = "research trips v1";
 const EXT: &str = ".trips";
+const LOG_EXT: &str = ".log";
+const TRACE_EXT: &str = ".trace";
+const EVIDENCE_EXT: &str = ".evidence.zst";
 
 #[derive(Debug)]
 pub enum ResearchError {
@@ -127,6 +133,10 @@ pub struct DayOutcome {
     pub refused: u64,
     /// Every execution with what its order was for, in the order they happened: what the trips were made from.
     pub notes: Vec<FillNote>,
+    /// Why the strategies acted, as they recorded it, by strategy number (E19-S32).
+    pub traces: Vec<(u16, Trace)>,
+    /// The names of the day's instruments, as the run numbered them.
+    pub symbols: tf_core::SymbolTable,
 }
 
 /// What a run did.
@@ -136,6 +146,15 @@ pub struct RunReport {
     pub skipped: Vec<String>,
     pub events: u64,
     pub trips: u64,
+    /// Trips that nothing was kept around (only when evidence was asked for): day, symbol, strategy and entry time.
+    pub no_evidence: Vec<String>,
+}
+
+/// What a run keeps beyond what every run keeps (the trips, the decision log and the traces of each day).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunOptions {
+    /// Keep the market around every trade (a second, sequential read of each day's files after it is run).
+    pub evidence: Option<EvidenceWindow>,
 }
 
 fn escape(s: &str) -> String {
@@ -374,6 +393,92 @@ impl Results {
     fn write_day(&self, d: &DayFile) -> Result<(), ResearchError> {
         write_whole(&day_path(&self.dir, &d.day), &d.render())
     }
+
+    fn companion(&self, date: &str, ext: &str) -> PathBuf {
+        self.dir.join(format!("{date}{ext}"))
+    }
+
+    /// Keep a day's decision log and traces, and its evidence if there is any, beside its trips.
+    fn write_companions(
+        &self,
+        date: &str,
+        out: &DayOutcome,
+        evidence: Option<&Evidence>,
+    ) -> Result<(), ResearchError> {
+        let (fp, outcome) = (self.fingerprint, out.outcome_hash);
+        write_whole(
+            &self.companion(date, LOG_EXT),
+            &keep::wrap("research log", date, fp, outcome, &out.log.render()),
+        )?;
+        write_whole(
+            &self.companion(date, TRACE_EXT),
+            &keep::wrap(
+                "research trace",
+                date,
+                fp,
+                outcome,
+                &render_all(&out.traces),
+            ),
+        )?;
+        let path = self.companion(date, EVIDENCE_EXT);
+        match evidence {
+            Some(e) => {
+                let part = path.with_extension("part");
+                fs::write(&part, keep::evidence_file(date, fp, outcome, e))
+                    .map_err(|e| io(&part, e))?;
+                fs::rename(&part, &path).map_err(|e| io(&path, e))
+            }
+            // A day made again without evidence leaves none from an earlier run.
+            None => {
+                let _ = fs::remove_file(&path);
+                Ok(())
+            }
+        }
+    }
+
+    fn read_companion(&self, date: &str, ext: &str, kind: &str) -> Result<String, ResearchError> {
+        let outcome = self.day(date)?.outcome_hash;
+        let path = self.companion(date, ext);
+        let text = fs::read_to_string(&path).map_err(|e| io(&path, e))?;
+        keep::unwrap(kind, &text, date, self.fingerprint, outcome)
+            .map(str::to_owned)
+            .map_err(|m| ResearchError::Results(format!("{}: {m}", path.display())))
+    }
+
+    /// The host's decision log of a day, checked to be that day's, under this configuration, with that outcome.
+    pub fn log(&self, date: &str) -> Result<Log, ResearchError> {
+        let body = self.read_companion(date, LOG_EXT, "research log")?;
+        Log::parse(&body).map_err(|m| {
+            ResearchError::Results(format!("{}: {m}", self.companion(date, LOG_EXT).display()))
+        })
+    }
+
+    /// What the strategies recorded of why they acted on a day, by strategy number.
+    pub fn traces(&self, date: &str) -> Result<Vec<(u16, Trace)>, ResearchError> {
+        let body = self.read_companion(date, TRACE_EXT, "research trace")?;
+        parse_all(&body).map_err(|m| {
+            ResearchError::Results(format!(
+                "{}: {m}",
+                self.companion(date, TRACE_EXT).display()
+            ))
+        })
+    }
+
+    /// The market kept around the day's trades. An error if the day was run without evidence.
+    pub fn evidence(&self, date: &str) -> Result<Evidence, ResearchError> {
+        let outcome = self.day(date)?.outcome_hash;
+        let path = self.companion(date, EVIDENCE_EXT);
+        let bytes = fs::read(&path).map_err(|e| io(&path, e))?;
+        keep::read_evidence(&bytes, date, self.fingerprint, outcome)
+            .map_err(|m| ResearchError::Results(format!("{}: {m}", path.display())))
+    }
+
+    /// Whether a day's companions are there and whole (its evidence too, if `with_evidence`).
+    fn companions_ok(&self, date: &str, with_evidence: bool) -> bool {
+        self.log(date).is_ok()
+            && self.traces(date).is_ok()
+            && (!with_evidence || self.evidence(date).is_ok())
+    }
 }
 
 fn has_days(dir: &Path) -> Result<bool, ResearchError> {
@@ -559,7 +664,8 @@ pub fn run_day(
     let cfg = day_config(setup.host, setup.cost, times);
     let mut host = replay_host(&cfg, &reference)
         .map_err(ResearchError::Host)?
-        .with_fill_log();
+        .with_fill_log()
+        .with_traces();
     for def in setup.defs {
         host.install(def)
             .map_err(|e| fail(format!("strategy {} cannot be set up: {e:?}", def.id)))?;
@@ -590,6 +696,7 @@ pub fn run_day(
     }
     host.end_of_day(last).map_err(ResearchError::Host)?;
     notes.extend(host.take_fill_notes());
+    let traces = host.take_traces();
     let who: BTreeMap<u16, Who> = setup
         .defs
         .iter()
@@ -632,6 +739,8 @@ pub fn run_day(
             .map(|s| s.refused_by_broker + s.rate_limited)
             .sum(),
         notes,
+        traces,
+        symbols: reference.symbols.clone(),
     })
 }
 
@@ -642,6 +751,17 @@ pub fn run(
     source: &mut dyn DaySource,
     dir: &Path,
 ) -> Result<RunReport, ResearchError> {
+    run_with(setup, source, dir, &RunOptions::default())
+}
+
+/// [`run`] with options. A day is there when its trips, its decision log and its traces are (and its evidence, if asked for):
+/// a day made without them is made again.
+pub fn run_with(
+    setup: &Setup<'_>,
+    source: &mut dyn DaySource,
+    dir: &Path,
+    opts: &RunOptions,
+) -> Result<RunReport, ResearchError> {
     let results = Results::start(dir, setup)?;
     let mut report = RunReport::default();
     for date in source.dates() {
@@ -651,7 +771,7 @@ pub fn run(
         };
         let data_id = source.data_id(&date).map_err(day_err)?;
         if let Ok(have) = results.day(&date) {
-            if have.data == data_id {
+            if have.data == data_id && results.companions_ok(&date, opts.evidence.is_some()) {
                 report.skipped.push(date);
                 continue;
             }
@@ -660,6 +780,17 @@ pub fn run(
         let out = run_day(&date, &input, setup)?;
         report.events += out.events;
         report.trips += out.trips.len() as u64;
+        let evidence = match opts.evidence {
+            Some(w) => {
+                let e = gather_evidence_with(&input.files, &out.symbols, &out.trips, w)
+                    .map_err(day_err)?;
+                report.no_evidence.extend(e.missing(&date, &out.trips, w));
+                Some(e)
+            }
+            None => None,
+        };
+        // The companions first and the trips last: the trips file is what says a day is there.
+        results.write_companions(&date, &out, evidence.as_ref())?;
         results.write_day(&DayFile::of(&date, results.fingerprint, data_id, out))?;
         report.ran.push(date);
     }

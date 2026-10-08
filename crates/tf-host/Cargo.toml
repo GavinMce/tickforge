@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+zstd = "0.13"
 tf-capture.workspace = true
 tf-core.workspace = true
 tf-engine.workspace = true
@@ -25,7 +26,6 @@ tf-universe.workspace = true
 
 [dev-dependencies]
 dbn = { version = "0.71" }
-zstd = "0.13"
 tf-databento.workspace = true
 tf-history.workspace = true
 tf-budget.workspace = true

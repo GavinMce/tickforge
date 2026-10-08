@@ -1,0 +1,133 @@
+# The two daily jobs, on New York time. Both run on the node the workspace runs on (it holds the volumes), with the strategy set
+# and live config from the ConfigMap and the Databento key from a secret made by scripts/deploy-dev.sh.
+#
+# prepare (02:30): the day's reference snapshot and, if the strategy set has changed, the certificates (scripts/prepare-day.sh).
+# live (03:50): `tf live run` to the 20:00 close. A crash mid-day is run again twice at most: the ledger continues, the day gets a
+#   numbered directory. Nothing here sends an order to a broker.
+#
+# Run either by hand (a manual job from the cron job): kubectl -n tickforge create job --from=cronjob/tickforge-live live-now
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tickforge-prepare
+  namespace: tickforge
+  labels: {app.kubernetes.io/part-of: tickforge}
+spec:
+  schedule: "30 2 * * 1-5"
+  timeZone: America/New_York
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 7200
+      template:
+        metadata:
+          labels: {app.kubernetes.io/name: tickforge-prepare, app.kubernetes.io/part-of: tickforge}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile: {type: RuntimeDefault}
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels: {app.kubernetes.io/name: tickforge-workspace}
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: prepare
+              image: ghcr.io/gavinmce/tickforge:main
+              command: ["/opt/tickforge/scripts/prepare-day.sh"]
+              env:
+                - name: DATABENTO_API_KEY
+                  valueFrom: {secretKeyRef: {name: tickforge-databento, key: api-key}}
+              resources:
+                requests: {cpu: 200m, memory: 512Mi}
+                limits: {cpu: "2", memory: 3Gi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: config, mountPath: /config, readOnly: true}
+                - {name: live, mountPath: /data/live}
+                - {name: history, mountPath: /data/history}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: config
+              configMap: {name: tickforge-config}
+            - name: live
+              persistentVolumeClaim: {claimName: tickforge-live}
+            - name: history
+              persistentVolumeClaim: {claimName: tickforge-history}
+            - name: tmp
+              emptyDir: {}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tickforge-live
+  namespace: tickforge
+  labels: {app.kubernetes.io/part-of: tickforge}
+spec:
+  schedule: "50 3 * * 1-5"
+  timeZone: America/New_York
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # 03:55 to 20:00 is sixteen hours; a little over that.
+      activeDeadlineSeconds: 64800
+      template:
+        metadata:
+          labels: {app.kubernetes.io/name: tickforge-live, app.kubernetes.io/part-of: tickforge}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile: {type: RuntimeDefault}
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels: {app.kubernetes.io/name: tickforge-workspace}
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: live
+              image: ghcr.io/gavinmce/tickforge:main
+              args: ["live", "run", "--config=/config/live.cfg", "--start-at=03:55"]
+              env:
+                - name: DATABENTO_API_KEY
+                  valueFrom: {secretKeyRef: {name: tickforge-databento, key: api-key}}
+              resources:
+                requests: {cpu: 500m, memory: 1Gi}
+                limits: {cpu: "3", memory: 4Gi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: config, mountPath: /config, readOnly: true}
+                - {name: live, mountPath: /data/live}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: config
+              configMap: {name: tickforge-config}
+            - name: live
+              persistentVolumeClaim: {claimName: tickforge-live}
+            - name: tmp
+              emptyDir: {}

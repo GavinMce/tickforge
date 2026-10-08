@@ -19,19 +19,20 @@ All times are New York time unless they say CDT. The gateway should be open befo
 ```sh
 export DATABENTO_API_KEY=$(cat ~/.config/tickforge/databento.key)
 
-# 0. Free: what the plan gives. The dataset must list `tcbbo` and `status`.
+# 0. Free: what the plan gives. On 2026-10-08 EQUS.MINI listed mbp-1, tbbo, trades, bbo-1s, bbo-1m, ohlcv-1s/1m/1h/1d and
+#    definition (no tcbbo, cmbp-1 or status), with history from 2023-03-28.
 curl -fsS -u "$DATABENTO_API_KEY:" https://hist.databento.com/v0/metadata.list_schemas -d dataset=EQUS.MINI
 
-# 1. A real day of the same feed, to certify the strategies on (the cost is asked first and refused above $MAX_COST).
-MAX_COST=60 scripts/pull_history.sh store EQUS.MINI tcbbo ALL_SYMBOLS 2026-10-07 2026-10-08
-tf history index store --dataset EQUS.MINI --schema tcbbo && tf history verify store
+# 1. A real day of the same feed, to certify the strategies on (a day of tbbo for the whole market was quoted at $3.37 on 2026-10-08; the cost is asked first and refused above $MAX_COST).
+MAX_COST=8 scripts/pull_history.sh store EQUS.MINI tbbo ALL_SYMBOLS 2026-10-07 2026-10-08
+tf history index store --dataset EQUS.MINI --schema tbbo && tf history verify store
 
 # 2. The reference for the tape's day and for the live day: daily bars to 2026-10-07, then one snapshot per trading day.
 scripts/fetch_reference.sh ref 2026-08-01 2026-10-08
 tf research snapshots --bars ref/bars.csv --symbology ref/symbology.json --from 2026-10-07 --to 2026-10-08 --out snapshots
 
 # 3. Certify every strategy on the stored day. Nothing is written if one fails; do it again after any change to the set.
-tf live certify --set month.set --store store --dataset EQUS.MINI --schema tcbbo --date 2026-10-07 \
+tf live certify --set month.set --store store --dataset EQUS.MINI --schema tbbo --date 2026-10-07 \
     --snapshots snapshots --out certificates.txt
 
 # 4. Log in and read for a minute without placing anything. Between 04:00 and 20:00 it should say events were read.

@@ -1,0 +1,11 @@
+strategy set v1
+# What the budgets divide, in dollars. Nothing here places an order with a broker: the strategies trade on the simulated broker,
+# filled against the recorded quotes.
+balance 100000
+# A strategy stops opening at 3% of its own budget lost in a day and is flattened at 6%.
+loss 300 600
+# Three variants of the closing reversal over one universe, and a null with the same exits to compare against.
+strategy 1 rev3 t04 universe=universe-liquid.txt names=3 dollars=2000
+strategy 2 rev10 t04 universe=universe-liquid.txt names=10 dollars=2000
+strategy 3 rev3b t04 universe=universe-liquid.txt names=3 dollars=2000 extreme_bp=100
+strategy 4 null1 t14 universe=universe-liquid.txt seed=1 names=3 dollars=2000 window_start_minutes=30 window_end_minutes=30 hold_seconds=1770

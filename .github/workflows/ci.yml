@@ -44,6 +44,15 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The cluster manifests against their rules, and the deploy and prepare scripts against stand-ins for kubectl and the
+      # network (kubectl is on the runner; the checker reads YAML).
+      - name: Cluster manifests and scripts
+        run: |
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          python3 -B scripts/check_manifests.py
+          bash scripts/test_deploy_dev.sh
+          bash scripts/test_prepare_day.sh
+
   # Determinism is a feature (README, "Rules of the road"): the synthetic stream
   # and its encoding must hash identically on every platform. The golden hash in
   # crates/tf-synth/src/tests.rs pins the value, so running it on each arch is

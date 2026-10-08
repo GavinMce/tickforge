@@ -1,0 +1,48 @@
+# LAN only: the host name is not in public DNS (add `10.0.30.41 tickforge.homelab.lan` to the hosts file of the machine that opens
+# it). Traefik terminates TLS with a certificate this namespace's own issuer signs; browsers will warn until it is trusted, or until
+# a real name and the cluster's `letsencrypt` issuer replace it (docs/runbooks/dev-environment.md). It is not exposed beyond the LAN
+# before an identity provider is chosen (E17-S17).
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned
+  namespace: tickforge
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tickforge-tls
+  namespace: tickforge
+spec:
+  secretName: tickforge-tls
+  dnsNames: [tickforge.homelab.lan]
+  issuerRef:
+    name: selfsigned
+    kind: Issuer
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tickforge-workspace
+  namespace: tickforge
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [tickforge.homelab.lan]
+      secretName: tickforge-tls
+  rules:
+    - host: tickforge.homelab.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tickforge-workspace
+                port:
+                  name: http

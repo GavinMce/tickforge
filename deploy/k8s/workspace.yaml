@@ -1,0 +1,97 @@
+# The workspace: the overview, the strategy runs, the replayed days and the trade replay, read from the live ledger and the research
+# results. Read only apart from the budget requests it files for the engine (ADR 0034). The token is a secret made by
+# scripts/deploy-dev.sh, never in this repository.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tickforge-workspace
+  namespace: tickforge
+  labels:
+    app.kubernetes.io/name: tickforge-workspace
+    app.kubernetes.io/part-of: tickforge
+spec:
+  replicas: 1
+  # The volumes are mounted by one node at a time: stop the old pod before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tickforge-workspace
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tickforge-workspace
+        app.kubernetes.io/part-of: tickforge
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: directories
+          image: ghcr.io/gavinmce/tickforge:main
+          command: ["/bin/sh", "-c", "mkdir -p /data/live/run/ledger /data/live/snapshots /data/history/store /data/history/research"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext: &locked
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts: &volumes
+            - {name: live, mountPath: /data/live}
+            - {name: history, mountPath: /data/history}
+      containers:
+        - name: workspace
+          image: ghcr.io/gavinmce/tickforge:main
+          args:
+            - serve
+            - --token-file=/secrets/token
+            - --ledger=/data/live/run/ledger
+            - --kind=live
+            - --research=/data/history/research
+            - --addr=0.0.0.0:8787
+          ports:
+            - {name: http, containerPort: 8787}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          securityContext: *locked
+          volumeMounts:
+            - {name: live, mountPath: /data/live}
+            - {name: history, mountPath: /data/history}
+            - {name: token, mountPath: /secrets, readOnly: true}
+      volumes:
+        - name: live
+          persistentVolumeClaim: {claimName: tickforge-live}
+        - name: history
+          persistentVolumeClaim: {claimName: tickforge-history}
+        - name: token
+          secret:
+            secretName: tickforge-token
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tickforge-workspace
+  namespace: tickforge
+  labels:
+    app.kubernetes.io/name: tickforge-workspace
+spec:
+  selector:
+    app.kubernetes.io/name: tickforge-workspace
+  ports:
+    - {name: http, port: 80, targetPort: http}

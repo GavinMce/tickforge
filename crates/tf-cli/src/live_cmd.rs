@@ -6,8 +6,7 @@
 //! ```text
 //! live config v1
 //! dataset EQUS.MINI
-//! subscribe tcbbo ALL_SYMBOLS
-//! subscribe status ALL_SYMBOLS
+//! subscribe tbbo ALL_SYMBOLS
 //! key_env DATABENTO_API_KEY
 //! set month.set
 //! snapshots snapshots
@@ -1467,7 +1466,7 @@ mod tests {
             LiveConfig::parse(include_str!("../../../docs/examples/live/live.cfg"), base).unwrap();
         assert_eq!(
             (cfg.dataset.as_str(), cfg.subs.len(), cfg.key_env.as_str()),
-            ("EQUS.MINI", 2, "DATABENTO_API_KEY")
+            ("EQUS.MINI", 1, "DATABENTO_API_KEY")
         );
         let set =
             StrategySet::parse(include_str!("../../../docs/examples/live/month.set")).unwrap();
@@ -1484,5 +1483,67 @@ mod tests {
         fps.sort();
         fps.dedup();
         assert_eq!(fps.len(), 4);
+    }
+
+    #[test]
+    fn the_clusters_config_files_read_and_agree_with_the_manifests_and_the_prepare_script() {
+        let cfg = LiveConfig::parse(
+            include_str!("../../../deploy/k8s/config/live.cfg"),
+            Path::new("/config"),
+        )
+        .unwrap();
+        assert_eq!(
+            (cfg.dataset.as_str(), cfg.key_env.as_str()),
+            ("EQUS.MINI", "DATABENTO_API_KEY")
+        );
+        assert_eq!(
+            cfg.subs,
+            [("tbbo".to_owned(), vec![])],
+            "EQUS.MINI has no status and no tcbbo"
+        );
+        assert_eq!(cfg.set, Path::new("/config/month.set"));
+        assert_eq!(
+            (
+                cfg.snapshots.as_path(),
+                cfg.certificates.as_path(),
+                cfg.dir.as_path()
+            ),
+            (
+                Path::new("/data/live/snapshots"),
+                Path::new("/data/live/certificates.txt"),
+                Path::new("/data/live/run")
+            )
+        );
+        // The set reads, with its universe beside it, and is the example's.
+        let set = StrategySet::parse(include_str!("../../../deploy/k8s/config/month.set")).unwrap();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/k8s/config");
+        assert!(set.definitions(&dir).is_ok());
+        assert_eq!(
+            include_str!("../../../deploy/k8s/config/month.set"),
+            include_str!("../../../docs/examples/live/month.set")
+        );
+        // The workspace reads the ledger the live job writes; the prepare script writes where the live job reads.
+        let workspace = include_str!("../../../deploy/k8s/workspace.yaml");
+        assert!(
+            workspace.contains(&format!("--ledger={}/ledger", cfg.dir.display())),
+            "the workspace reads another ledger"
+        );
+        let script = include_str!("../../../scripts/prepare-day.sh");
+        assert!(
+            script.contains(&format!("SNAPS=${{SNAPS:-{}}}", cfg.snapshots.display())),
+            "the snapshots are not where the config reads them"
+        );
+        assert!(
+            script.contains(&format!("CERTS=${{CERTS:-{}}}", cfg.certificates.display())),
+            "the certificates are not where the config reads them"
+        );
+        assert!(
+            script.contains("SET=${SET:-/config/month.set}")
+                && script.contains("SCHEMA=${SCHEMA:-tbbo}")
+                && script.contains("DATASET=${DATASET:-EQUS.MINI}")
+        );
+        // The live job is told to start where the config is, five minutes before the premarket.
+        let jobs = include_str!("../../../deploy/k8s/jobs.yaml");
+        assert!(jobs.contains("--config=/config/live.cfg") && jobs.contains("--start-at=03:55"));
     }
 }

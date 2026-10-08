@@ -109,14 +109,12 @@ impl ResearchView for ResultsDir {
 
     fn trade_page(
         &self,
-        _scenario: &str,
-        _day: &str,
-        _strategy: u16,
-        _n: usize,
+        scenario: &str,
+        day: &str,
+        strategy: u16,
+        n: usize,
     ) -> Result<String, ResearchError> {
-        Err(ResearchError::NotFound(
-            "the trade page is not in this build".to_owned(),
-        ))
+        tf_host::research::view::trade_page(&self.0, scenario, day, strategy, n).map_err(view_error)
     }
 }
 

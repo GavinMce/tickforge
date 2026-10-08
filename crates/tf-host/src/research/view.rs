@@ -13,6 +13,12 @@ use tf_core::Nanos;
 
 use super::cost::is_date;
 use super::run::{CONFIG_FILE, DefLine, ResearchError, Results};
+pub use super::trade::trade_page;
+
+#[cfg(test)]
+pub(crate) fn dollars_for_tests(raw: i128) -> String {
+    dollars(raw)
+}
 use super::trips::{OPEN_AT_END, Trip};
 use crate::equiv::{Answer, Rec};
 
@@ -131,7 +137,7 @@ pub(crate) fn valid_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-fn open(root: &Path, scenario: &str) -> Result<Results, ViewError> {
+pub(super) fn open(root: &Path, scenario: &str) -> Result<Results, ViewError> {
     if !valid_name(scenario) || !root.join(scenario).join(CONFIG_FILE).is_file() {
         return Err(ViewError::NotFound(format!("no scenario `{scenario}`")));
     }
@@ -320,7 +326,7 @@ pub fn scenario_dir(root: &Path, scenario: &str) -> Option<PathBuf> {
         .then(|| root.join(scenario))
 }
 
-fn day_of(r: &Results, day: &str) -> Result<(), ViewError> {
+pub(super) fn day_of(r: &Results, day: &str) -> Result<(), ViewError> {
     if !is_date(day) || !r.dates()?.iter().any(|d| d == day) {
         return Err(ViewError::NotFound(format!(
             "no day `{day}` in this scenario"
@@ -329,7 +335,7 @@ fn day_of(r: &Results, day: &str) -> Result<(), ViewError> {
     Ok(())
 }
 
-fn strategy_of(r: &Results, id: u16) -> Result<DefLine, ViewError> {
+pub(super) fn strategy_of(r: &Results, id: u16) -> Result<DefLine, ViewError> {
     r.definition_lines()?
         .into_iter()
         .find(|l| l.id == id)

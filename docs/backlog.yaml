@@ -2219,7 +2219,37 @@ epics:
       - id: E19-S35
         jira: TIC-189
         title: "Backtest view: replay one trade"
-        status: todo
+        status: done
+        evidence: >-
+          ADR 0066. /research/trade?scenario=&day=&strategy=&n= is one self-contained page with its data embedded (GET only, sign-in, the
+          explorer's policy: its own script, nothing loaded or sent; a test pins that it holds no address it fetches from and that the data
+          cannot end the script block). The trade is the strategy's nth trip of the day. The orders come from the decision log, joined by
+          instrument through a host trace of the day's instruments (number and symbol) that each day now keeps; a day kept before that, a
+          day run without evidence and a strategy that recorded no trace each show everything else and say what is missing. The page: a
+          chart of the market kept around the trade (quotes as steps, trades as points, thinned to at most 4,000 of each away from the
+          trade, with how many of how many), markers for the decision (the accepted order is the order sent), the entry fill with its
+          latency, the exit decision and fill, or the end of the day for a position still held; a replay cursor that draws only what has
+          happened by it (play, pause, 1 to 100 times real time, step to the previous or next event, jump to the previous or next marker,
+          replay from the start, three zooms) with a readout of the quote, the position and the open profit before costs; the order
+          lifecycle (every decision with the gateway's answer or refusal reason, every fill with its latency); the cost breakdown (gross,
+          Section 31 and Trading Activity Fee recomputed from the sale fills and shown only if they add up to what the trade paid, borrow,
+          slippage against the price asked for, net in dollars and basis points, R where the strategy states a stop); and the strategy's
+          own account (for T04 the ranked cross-section with the symbol's row shaded, prices as dollars, the close as a time; long traces
+          show the first twenty rows and every row about the symbol). Checked in a browser on a served three-day T04 scenario with
+          evidence at 1280 and 390 px: no console errors, no horizontal scroll, no request but the page's own; the controls driven
+          (jump to each marker, step, play at 100 times for 2.2 s, pause, zoom): the readout, markers drawn and dimmed order rows follow the
+          cursor. Tests: the page's data for a T04 trade (orders, 50 ms latencies, markers and their labels, fees equal to their two parts
+          and gross less fees equal to net, the market span, the rank row marked), each trade of a day its own page, not found for a trade
+          that does not exist (with the count), missing evidence, a day without the instruments trace, a strategy without a trace and a
+          damaged log, the join (the strategy's decisions in the instrument between its trades, the edges inclusive and exclusive as
+          decided, another strategy's or instrument's not there), the marker choices (a refused opening before the accepted one, a refused
+          closing after it, a position held at the end), the fee split (partial fills adding, a short, a long held at the end, a day without
+          rates, any difference), the thinning with exact examples, and the trace rows. Full workspace 1,178 passed; clippy and fmt clean.
+          Mutation run, 81 mutants of the new code: 28 survivors on the first run; the code was split into testable functions and
+          given those tests; 77 mutants, 6 survivors, then exact thinning examples left 2, both equivalent (with as many events as the
+          cap the thinning step is 1 either way); the sale fee parts (12 mutants) all killed or not compiling. Not measured: a real T04
+          day's page size (no real day is stored); the page takes the strategy's trace as its own account, not an independent rebuild
+          (E19-S37 replays the log).
         deps: [E19-S34]
         ac:
           - "Opening a trade shows the symbol's price and quote chart around it with a replay cursor (play, step, jump to the next marker) that draws only what has happened by the cursor, with markers for the decision, the order sent, the fill (with its latency), the exit decision and the exit fill"

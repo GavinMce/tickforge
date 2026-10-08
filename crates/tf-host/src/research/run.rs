@@ -39,7 +39,7 @@ use super::cost::{CostError, CostModel, is_date};
 use super::keep::{self, Evidence, EvidenceWindow, gather_evidence_with};
 use super::trips::{Assembler, COLUMNS, Trip, Who};
 use crate::def::{StrategyDef, fnv};
-use crate::equiv::Log;
+use crate::equiv::{Log, Rec};
 use crate::host::{FillNote, HostConfig, HostError, Reference};
 use crate::replay::{learn_symbols, replay_host};
 
@@ -728,6 +728,9 @@ pub(crate) fn easy_to_borrow(reference: &Reference) -> BTreeSet<u32> {
         .collect()
 }
 
+/// The kind of the host's trace of the instruments a day traded, by number and symbol (strategy 0 in a day's traces).
+pub const INSTRUMENTS: &str = "instruments";
+
 /// What a strategy's orders met that was not the gateway's limits: the broker's refusals and the rate limit.
 pub(crate) fn refusals(st: &crate::host::StrategyStats) -> u64 {
     st.refused_by_broker + st.rate_limited
@@ -839,6 +842,22 @@ pub fn run_day(
         asm.fill(n);
     }
     let trips = asm.end(last, |i| host.journal().gateway().mark_of(i))?;
+    // The log names instruments by number; the view names them by symbol. Kept for the instruments the day traded, as
+    // the host's own (strategy 0) trace, so that a trip can be followed through the log without the day's files.
+    let mut traded = std::collections::BTreeSet::new();
+    for rec in &host.log().expect("recording").recs {
+        match rec {
+            Rec::Decision { instrument, .. } | Rec::Fill { instrument, .. } => {
+                traded.insert(*instrument);
+            }
+            _ => {}
+        }
+    }
+    let mut book = Trace::new(last, INSTRUMENTS).with_columns(&["instrument", "symbol"]);
+    for i in traded {
+        book.push_row(vec![i.to_string(), symbol(i)]);
+    }
+    traces.push((0, book));
     Ok(DayOutcome {
         trips,
         events: host.events(),

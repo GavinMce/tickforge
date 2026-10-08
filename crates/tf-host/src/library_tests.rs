@@ -870,3 +870,69 @@ fn the_null_strategys_draw_and_entries_are_traced_through_the_host_with_symbols(
         assert_eq!(t.rows[0][2], "entered");
     }
 }
+
+// ---- what a T04 day keeps (E19-S33) ----
+
+#[test]
+fn a_t04_day_keeps_its_ranked_cross_section_and_the_market_around_its_trades() {
+    use crate::replay_tests::scratch;
+    use crate::research::{EvidenceWindow, RunOptions, run_with};
+    let mut src = afternoons("keep-t04", drifting);
+    let def3 = def(3);
+    let (host_cfg, cost) = (config(1), CostModel::published());
+    let dir = scratch("keep-t04-out");
+    let opts = RunOptions {
+        evidence: Some(EvidenceWindow::default()),
+    };
+    let rep = run_with(
+        &Setup {
+            host: &host_cfg,
+            cost: &cost,
+            defs: std::slice::from_ref(&def3),
+        },
+        &mut src,
+        &dir,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!((rep.ran.len(), rep.trips, rep.no_evidence.len()), (3, 9, 0));
+    let results = Results::open(&dir).unwrap();
+    for date in results.dates().unwrap() {
+        // The day's one decision, with symbols: the three the strategy bought and the others ranked.
+        let traces = results.traces(&date).unwrap();
+        assert_eq!(traces.len(), 1);
+        let (strategy, t) = &traces[0];
+        assert_eq!((*strategy, t.kind.as_str(), t.rows.len()), (1, "rank", 6));
+        assert_eq!(t.columns[1], "symbol");
+        assert_eq!(t.value("entered"), Some("3"));
+        let entered: Vec<&str> = t
+            .column("symbol")
+            .unwrap()
+            .into_iter()
+            .zip(t.column("status").unwrap())
+            .filter(|&(_, st)| st == "entered")
+            .map(|(s, _)| s)
+            .collect();
+        // They are the symbols of the day's trips.
+        let trips = results.day(&date).unwrap().trips;
+        let mut traded: Vec<&str> = trips.iter().map(|x| x.symbol.as_str()).collect();
+        traded.sort();
+        let mut want = entered.clone();
+        want.sort();
+        assert_eq!(traded, want);
+        // The market around each of them was kept.
+        let ev = results.evidence(&date).unwrap();
+        assert_eq!(
+            ev.symbols.keys().map(String::as_str).collect::<Vec<_>>(),
+            want
+        );
+        for tr in &trips {
+            let around = ev.slice(&tr.symbol, tr.entry_ts, tr.exit_ts);
+            assert!(
+                !around.is_empty(),
+                "{} has nothing from entry to exit",
+                tr.symbol
+            );
+        }
+    }
+}

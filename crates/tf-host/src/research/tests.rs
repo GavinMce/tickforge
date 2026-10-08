@@ -765,9 +765,19 @@ struct RoundTrip {
     sell_at: u32,
     reviews: u32,
     held: Option<u32>,
+    tracing: bool,
+    traces: Vec<tf_strategy::Trace>,
 }
 
 impl CrossStrategy for RoundTrip {
+    fn set_tracing(&mut self, on: bool) {
+        self.tracing = on;
+    }
+
+    fn take_traces(&mut self) -> Vec<tf_strategy::Trace> {
+        std::mem::take(&mut self.traces)
+    }
+
     fn id(&self) -> StrategyId {
         StrategyId(self.id)
     }
@@ -786,6 +796,13 @@ impl CrossStrategy for RoundTrip {
                 return;
             };
             self.held = Some(id);
+            if self.tracing {
+                let mut t = tf_strategy::Trace::new(ctx.now(), "buy")
+                    .with("review", self.reviews)
+                    .with_columns(&["instrument", "last"]);
+                t.push_row(vec![id.to_string(), last.raw().to_string()]);
+                self.traces.push(t);
+            }
             let _ = ctx.submit(
                 id,
                 Request {
@@ -843,6 +860,8 @@ fn round_trip_of(id: u16, qty: u32, universe: &str, buy_at: u32, sell_at: u32) -
                 sell_at,
                 reviews: 0,
                 held: None,
+                tracing: false,
+                traces: Vec::new(),
             })
         }),
     }
@@ -931,14 +950,14 @@ fn setup<'a>(host: &'a HostConfig, cost: &'a CostModel, defs: &'a [StrategyDef])
     Setup { host, cost, defs }
 }
 
-fn read_all(dir: &Path) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = fs::read_dir(dir)
+fn read_all(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<(String, Vec<u8>)> = fs::read_dir(dir)
         .unwrap()
         .map(|e| {
             let p = e.unwrap().path();
             (
                 p.file_name().unwrap().to_string_lossy().into_owned(),
-                fs::read_to_string(&p).unwrap(),
+                fs::read(&p).unwrap(),
             )
         })
         .collect();
@@ -1005,7 +1024,8 @@ fn two_runs_of_the_same_days_and_definitions_leave_identical_files() {
     run(&setup(&host, &cost, &defs), &mut days, &a).unwrap();
     run(&setup(&host, &cost, &defs), &mut days, &b).unwrap();
     assert_eq!(read_all(&a), read_all(&b));
-    assert_eq!(read_all(&a).len(), 4);
+    // The configuration, and for each of the three days its trips, its decision log and its traces.
+    assert_eq!(read_all(&a).len(), 10);
 }
 
 #[test]
@@ -1777,4 +1797,587 @@ fn a_trip_of_a_strategy_the_configuration_does_not_list_is_an_error_not_a_droppe
     more.push((7, "idle".into()));
     let g = group(more, &trips).unwrap();
     assert_eq!((g.len(), g[2].outcomes.len(), g[2].fingerprint), (3, 0, 7));
+}
+
+// ---- what a day keeps beside its trips (E19-S33) ----
+
+/// A trip with only what the evidence pass reads: a symbol and the times.
+fn trip_at(symbol: &str, entry: tf_core::Nanos, exit: tf_core::Nanos) -> Trip {
+    Trip {
+        day: "2026-05-01".into(),
+        strategy: 1,
+        name: "round1".into(),
+        variant: 1,
+        symbol: symbol.into(),
+        long: true,
+        qty: 100,
+        entry_ts: entry,
+        entry_px: 20 * D,
+        exit_ts: exit,
+        exit_px: 20 * D,
+        gross: 0,
+        fees: 0,
+        borrow: 0,
+        slippage: 0,
+        net: 0,
+        net_bps_x100: 0,
+        slip_bps_x100: 0,
+        r_milli: None,
+        entry_reason: 1,
+        exit_reason: 0,
+        open_at_end: false,
+    }
+}
+
+/// What the day's files hold of `symbol` between two times, found without the evidence pass: every event the host would have
+/// been given (what the gateway sent twice taken once), in the integers the evidence keeps.
+fn independent(
+    files: &[PathBuf],
+    symbol: &str,
+    from: tf_core::Nanos,
+    to: tf_core::Nanos,
+) -> Vec<EvEvent> {
+    use tf_capture::CaptureReplay;
+    use tf_core::{Dedupe, Event};
+    use tf_provider::{Poll, Provider};
+    let id = crate::replay::learn_symbols(files)
+        .get(symbol)
+        .expect("a known symbol");
+    let mut src = CaptureReplay::from_files(files.to_vec());
+    let (mut dedupe, mut raw, mut out) = (Dedupe::new(), Vec::new(), Vec::new());
+    loop {
+        raw.clear();
+        match src.poll(&mut raw, 4096) {
+            Poll::Events(_) => {}
+            _ => break,
+        }
+        for ev in raw.iter().filter(|e| dedupe.admit(e)) {
+            if ev.instrument() != id || ev.ts_recv() < from || ev.ts_recv() > to {
+                continue;
+            }
+            match ev {
+                Event::Trade(t) => out.push(EvEvent::Trade {
+                    ts: t.hdr.ts_recv,
+                    px: t.px.raw(),
+                    size: t.size,
+                }),
+                Event::Quote(q) => out.push(EvEvent::Quote {
+                    ts: q.hdr.ts_recv,
+                    bid: q.bid_px.raw(),
+                    ask: q.ask_px.raw(),
+                    bid_sz: q.bid_sz,
+                    ask_sz: q.ask_sz,
+                }),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_run_keeps_each_days_log_and_traces_beside_its_trips_and_reads_them_back() {
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("keep-days", 3);
+    let dir = out_dir("keep-out");
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    let results = Results::open(&dir).unwrap();
+    for date in results.dates().unwrap() {
+        // The log is the one the day's run made; reading it back gives that log.
+        let input = days.load(&date).unwrap();
+        let out = run_day(&date, &input, &setup(&host, &cost, &defs)).unwrap();
+        assert_eq!(results.log(&date).unwrap().render(), out.log.render());
+        assert!(!results.log(&date).unwrap().recs.is_empty());
+        // The test strategies trace nothing but are asked: one trace each, the buy.
+        let traces = results.traces(&date).unwrap();
+        assert_eq!(traces, out.traces);
+        assert_eq!(
+            traces
+                .iter()
+                .map(|t| (t.0, t.1.kind.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "buy"), (2, "buy")]
+        );
+        assert_eq!(traces[0].1.columns[1], "last");
+        // No evidence was asked for.
+        assert!(results.evidence(&date).is_err());
+    }
+    assert!(results.log("2026-05-09").is_err());
+}
+
+#[test]
+fn a_companion_of_another_day_or_run_or_a_damaged_one_is_refused_and_a_day_without_them_is_made_again()
+ {
+    use super::keep::wrap;
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("link-days", 3);
+    let dir = out_dir("link-out");
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    let whole = read_all(&dir);
+    let results = Results::open(&dir).unwrap();
+    let (d1, d2) = ("2026-05-01", "2026-05-04");
+    let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
+    // The log of one day put where another's is.
+    fs::write(dir.join(format!("{d2}.log")), read(&format!("{d1}.log"))).unwrap();
+    assert!(
+        results
+            .log(d2)
+            .unwrap_err()
+            .to_string()
+            .contains("another day")
+    );
+    // One altered letter.
+    let t = read(&format!("{d1}.trace"));
+    fs::write(dir.join(format!("{d1}.trace")), t.replacen("buy", "bux", 1)).unwrap();
+    assert!(
+        results
+            .traces(d1)
+            .unwrap_err()
+            .to_string()
+            .contains("checksum")
+    );
+    // Another run's configuration, and another outcome, under a checksum that is right.
+    let outcome = results.day(d1).unwrap().outcome_hash;
+    let log_body = results.log(d1).unwrap().render();
+    fs::write(
+        dir.join(format!("{d1}.log")),
+        wrap("research log", d1, 1, outcome, &log_body),
+    )
+    .unwrap();
+    assert!(
+        results
+            .log(d1)
+            .unwrap_err()
+            .to_string()
+            .contains("another configuration")
+    );
+    fs::write(
+        dir.join(format!("{d1}.log")),
+        wrap(
+            "research log",
+            d1,
+            results.fingerprint(),
+            outcome ^ 1,
+            &log_body,
+        ),
+    )
+    .unwrap();
+    assert!(
+        results
+            .log(d1)
+            .unwrap_err()
+            .to_string()
+            .contains("another outcome")
+    );
+    // A file of another kind, a cut one, one with text after its end, and none.
+    fs::write(
+        dir.join(format!("{d1}.log")),
+        wrap(
+            "research trace",
+            d1,
+            results.fingerprint(),
+            outcome,
+            &log_body,
+        ),
+    )
+    .unwrap();
+    assert!(
+        results
+            .log(d1)
+            .unwrap_err()
+            .to_string()
+            .contains("not `research log v1`")
+    );
+    let good = wrap(
+        "research log",
+        d1,
+        results.fingerprint(),
+        outcome,
+        &log_body,
+    );
+    fs::write(dir.join(format!("{d1}.log")), &good[..good.len() - 20]).unwrap();
+    assert!(results.log(d1).is_err());
+    fs::write(dir.join(format!("{d1}.log")), format!("{good}extra\n")).unwrap();
+    assert!(
+        results
+            .log(d1)
+            .unwrap_err()
+            .to_string()
+            .contains("after `end`")
+    );
+    fs::remove_file(dir.join(format!("{d1}.log"))).unwrap();
+    assert!(results.log(d1).is_err());
+    // A run goes on from the days whose companions are not whole, and leaves what an uninterrupted run left.
+    days.loads = 0;
+    let rep = run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    assert_eq!(
+        (rep.ran.as_slice(), days.loads),
+        (&[d1.to_owned(), d2.to_owned()][..], 2)
+    );
+    assert_eq!(rep.skipped, ["2026-05-05"]);
+    assert_eq!(read_all(&dir), whole);
+    // A day with no trace file is made again too.
+    fs::remove_file(dir.join("2026-05-05.trace")).unwrap();
+    let rep = run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    assert_eq!(rep.ran, ["2026-05-05"]);
+    assert_eq!(read_all(&dir), whole);
+}
+
+#[test]
+fn the_evidence_pass_keeps_the_market_around_each_trade_as_the_host_saw_it() {
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("ev-days", 3);
+    let (a, b) = (out_dir("ev-a"), out_dir("ev-b"));
+    let opts = RunOptions {
+        evidence: Some(EvidenceWindow::default()),
+    };
+    let rep = run_with(&setup(&host, &cost, &defs), &mut days, &a, &opts).unwrap();
+    assert_eq!((rep.ran.len(), rep.no_evidence.len()), (3, 0));
+    run_with(&setup(&host, &cost, &defs), &mut days, &b, &opts).unwrap();
+    // Two runs leave the same files, the compressed evidence included.
+    assert_eq!(read_all(&a), read_all(&b));
+    let results = Results::open(&a).unwrap();
+    let date = "2026-05-01";
+    let e = results.evidence(date).unwrap();
+    assert_eq!(e.window, Some(EvidenceWindow::default()));
+    // The two names the strategies traded, and nothing else.
+    assert_eq!(e.symbols.keys().collect::<Vec<_>>(), ["S02", "S08"]);
+    // Every event of those names in the windows, found independently from the day's files: the whole ten seconds of data, as
+    // the windows reach far beyond them.
+    let w = EvidenceWindow::default();
+    let files = days.files(date);
+    let trips = results.day(date).unwrap().trips;
+    for sym in ["S02", "S08"] {
+        let (from, to) = (
+            trips
+                .iter()
+                .filter(|t| t.symbol == sym)
+                .map(|t| t.entry_ts)
+                .min()
+                .unwrap()
+                - w.before,
+            trips
+                .iter()
+                .filter(|t| t.symbol == sym)
+                .map(|t| t.exit_ts)
+                .max()
+                .unwrap()
+                + w.after,
+        );
+        let want = independent(&files, sym, from, to);
+        assert!(want.len() > 20, "{sym}: {}", want.len());
+        assert_eq!(e.symbols[sym], want, "{sym}");
+    }
+    // The results are readable with the store gone.
+    let root = days.files(date)[0]
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    fs::remove_dir_all(&root).unwrap();
+    assert!(!root.exists());
+    assert!(
+        results.log(date).is_ok() && results.traces(date).is_ok() && results.evidence(date).is_ok()
+    );
+}
+
+#[test]
+fn evidence_is_made_when_asked_for_and_not_asked_for_again_and_a_day_made_without_it_is_made_again()
+{
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("ask-days", 2);
+    let dir = out_dir("ask-out");
+    let with = RunOptions {
+        evidence: Some(EvidenceWindow::default()),
+    };
+    // Without: no evidence file.
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    assert!(Results::open(&dir).unwrap().evidence("2026-05-01").is_err());
+    // Asked for afterwards: the days are made again, and have it.
+    let rep = run_with(&setup(&host, &cost, &defs), &mut days, &dir, &with).unwrap();
+    assert_eq!((rep.ran.len(), rep.skipped.len()), (2, 0));
+    assert!(Results::open(&dir).unwrap().evidence("2026-05-01").is_ok());
+    // Asked for again: nothing to do. Not asked for: nothing to do either, and the evidence stays.
+    let rep = run_with(&setup(&host, &cost, &defs), &mut days, &dir, &with).unwrap();
+    assert_eq!((rep.ran.len(), rep.skipped.len()), (0, 2));
+    let rep = run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    assert_eq!((rep.ran.len(), rep.skipped.len()), (0, 2));
+    assert!(Results::open(&dir).unwrap().evidence("2026-05-04").is_ok());
+    // A day damaged and made again without evidence leaves none from before.
+    fs::write(dir.join("2026-05-04.log"), "damaged").unwrap();
+    let rep = run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    assert_eq!(rep.ran, ["2026-05-04"]);
+    assert!(Results::open(&dir).unwrap().evidence("2026-05-04").is_err());
+    assert!(Results::open(&dir).unwrap().evidence("2026-05-01").is_ok());
+}
+
+#[test]
+fn overlapping_windows_of_one_name_are_one_and_the_gaps_between_windows_are_not_kept() {
+    let days = Days::new("merge-days", 1);
+    let files = days.files("2026-05-01");
+    let base = OPENS[0].1 * SEC;
+    let w = EvidenceWindow {
+        before: SEC / 2,
+        after: SEC / 2,
+    };
+    // Trips of S02 at seconds 1 to 2 and 2 to 3 (their windows overlap: one), and at 8 to 9; and of S05 at 4 to 5.
+    let trips = vec![
+        trip_at("S02", base + SEC, base + 2 * SEC),
+        trip_at("S02", base + 2 * SEC + SEC / 4, base + 3 * SEC),
+        trip_at("S02", base + 8 * SEC, base + 9 * SEC),
+        trip_at("S05", base + 4 * SEC, base + 5 * SEC),
+    ];
+    let e = super::keep::gather_evidence(&files, &trips, w).unwrap();
+    let lo = |s: u64, f: u64| base + s * SEC - f;
+    let mut want = independent(&files, "S02", lo(1, SEC / 2), lo(3, 0) + SEC / 2);
+    want.extend(independent(
+        &files,
+        "S02",
+        lo(8, SEC / 2),
+        lo(9, 0) + SEC / 2,
+    ));
+    assert_eq!(e.symbols["S02"], want);
+    assert!(e.symbols["S02"].iter().all(|ev| {
+        let t = ev.ts();
+        (t >= lo(1, SEC / 2) && t <= lo(3, 0) + SEC / 2)
+            || (t >= lo(8, SEC / 2) && t <= lo(9, 0) + SEC / 2)
+    }));
+    // Nothing from between the two stretches, and no event twice.
+    assert!(
+        !e.symbols["S02"]
+            .iter()
+            .any(|ev| ev.ts() > lo(3, 0) + SEC / 2 && ev.ts() < lo(8, SEC / 2))
+    );
+    let mut times: Vec<_> = e.symbols["S02"]
+        .iter()
+        .map(|ev| format!("{ev:?}"))
+        .collect();
+    let n = times.len();
+    times.sort();
+    times.dedup();
+    assert_eq!(times.len(), n);
+    assert_eq!(
+        e.symbols["S05"],
+        independent(&files, "S05", lo(4, SEC / 2), lo(5, 0) + SEC / 2)
+    );
+    // A symbol the day does not have is not kept, and unreadable data is an error, not a shorter day.
+    let none =
+        super::keep::gather_evidence(&files, &[trip_at("NOPE", base, base + SEC)], w).unwrap();
+    assert!(none.symbols.is_empty());
+    let mut broken = files.clone();
+    broken.insert(1, files[0].with_file_name("not-there.dbn.zst"));
+    assert!(
+        super::keep::gather_evidence(&broken, &trips, w)
+            .unwrap_err()
+            .contains("cannot be read")
+    );
+}
+
+#[test]
+fn a_trip_with_nothing_kept_around_it_is_named_and_a_slice_is_inclusive_at_both_ends() {
+    let w = EvidenceWindow {
+        before: 10,
+        after: 10,
+    };
+    let q = |ts| EvEvent::Quote {
+        ts,
+        bid: 1,
+        ask: 2,
+        bid_sz: 3,
+        ask_sz: 4,
+    };
+    let e = Evidence {
+        window: Some(w),
+        symbols: [("A".to_owned(), vec![q(100), q(105), q(110)])].into(),
+    };
+    assert_eq!(e.slice("A", 105, 110).len(), 2);
+    assert_eq!(e.slice("A", 100, 100).len(), 1);
+    assert_eq!(e.slice("A", 101, 104).len(), 0);
+    assert_eq!(e.slice("B", 0, 1_000).len(), 0);
+    // A trip from 100 to 110 has its window 90 to 120: it has events. One at 200 to 210 has none; so has one in a symbol absent.
+    let trips = [
+        trip_at("A", 100, 110),
+        trip_at("A", 200, 210),
+        trip_at("B", 100, 110),
+    ];
+    let missing = e.missing("2026-05-01", &trips, w);
+    assert_eq!(
+        missing,
+        ["2026-05-01 A round1 200", "2026-05-01 B round1 100"]
+    );
+    // The edge of a window counts: a trip entering at 120 has its window from 110.
+    assert!(e.missing("d", &[trip_at("A", 120, 130)], w).is_empty());
+    assert_eq!(e.missing("d", &[trip_at("A", 121, 130)], w).len(), 1);
+}
+
+#[test]
+fn the_text_of_the_evidence_and_of_a_companion_file_refuses_every_kind_of_damage() {
+    use super::keep::{evidence_file, read_evidence, unwrap, wrap};
+    let e = Evidence {
+        window: Some(EvidenceWindow {
+            before: 7,
+            after: 9,
+        }),
+        symbols: [
+            (
+                "A".to_owned(),
+                vec![
+                    EvEvent::Trade {
+                        ts: 1,
+                        px: 5,
+                        size: 6,
+                    },
+                    EvEvent::Quote {
+                        ts: 2,
+                        bid: 3,
+                        ask: 4,
+                        bid_sz: 5,
+                        ask_sz: 6,
+                    },
+                    EvEvent::Status {
+                        ts: 3,
+                        kind: 2,
+                        lo: -7,
+                        hi: 8,
+                    },
+                ],
+            ),
+            ("B".to_owned(), vec![]),
+        ]
+        .into(),
+    };
+    let bytes = evidence_file("2026-05-01", 0xabc, 0xdef, &e);
+    assert_eq!(
+        read_evidence(&bytes, "2026-05-01", 0xabc, 0xdef).unwrap(),
+        e
+    );
+    // The same evidence always gives the same bytes.
+    assert_eq!(bytes, evidence_file("2026-05-01", 0xabc, 0xdef, &e));
+    assert!(
+        read_evidence(&bytes, "2026-05-02", 0xabc, 0xdef)
+            .unwrap_err()
+            .contains("another day")
+    );
+    assert!(
+        read_evidence(&bytes, "2026-05-01", 1, 0xdef)
+            .unwrap_err()
+            .contains("another configuration")
+    );
+    assert!(
+        read_evidence(&bytes, "2026-05-01", 0xabc, 1)
+            .unwrap_err()
+            .contains("another outcome")
+    );
+    assert!(
+        read_evidence(b"plain text", "2026-05-01", 0xabc, 0xdef)
+            .unwrap_err()
+            .contains("not compressed")
+    );
+    assert!(
+        read_evidence(&zstd::encode_all(&[0xff, 0xfe][..], 3).unwrap(), "d", 1, 1)
+            .unwrap_err()
+            .contains("not text")
+    );
+    // A body that is not evidence, under a checksum that is right.
+    let ev = |body: &str| {
+        let text = wrap("research evidence", "d", 1, 2, body);
+        read_evidence(&zstd::encode_all(text.as_bytes(), 3).unwrap(), "d", 1, 2)
+    };
+    for (body, what) in [
+        ("", "no `window` line"),
+        ("window\tx\t1\n", "not a number"),
+        ("window\t1\t1\nt\t1\t2\t3\n", "before any `symbol`"),
+        ("window\t1\t1\nsymbol\tA\t1\n", "has 0 events, not 1"),
+        (
+            "window\t1\t1\nsymbol\tA\t0\nt\t1\t2\t3\n",
+            "has 1 events, not 0",
+        ),
+        ("window\t1\t1\nsymbol\tA\t0\nsymbol\tA\t0\n", "twice"),
+        ("window\t1\t1\nsymbol\tA\t1\nt\t1\n", "does not know"),
+        ("window\t1\t1\nsymbol\tA\t1\nz\t1\t2\t3\n", "does not know"),
+        ("window\t1\t1\nsymbol\tA\t1\nt\t1\tx\t3\n", "not a number"),
+        (
+            "window\t1\t1\nsymbol\tA\t1\nq\t1\t2\t3\t4\n",
+            "does not know",
+        ),
+        ("window\t1\t1\nsymbol\tA\t1\ns\t1\t2\t3\n", "does not know"),
+    ] {
+        let err = ev(body).unwrap_err();
+        assert!(err.contains(what), "{body:?}: {err}");
+    }
+    assert!(ev("window\t1\t1\n").unwrap().symbols.is_empty());
+    // The wrapper: whole or refused.
+    let good = wrap("k", "d", 1, 2, "body\n");
+    assert_eq!(unwrap("k", &good, "d", 1, 2).unwrap(), "body\n");
+    for (bad, what) in [
+        (good.replacen("body", "bady", 1), "checksum"),
+        (good.replace("end ", "ent "), "cut short"),
+        (format!("{good}x\n"), "after `end`"),
+        (good.replace("end ", "end zz"), "hexadecimal"),
+    ] {
+        assert!(
+            unwrap("k", &bad, "d", 1, 2).unwrap_err().contains(what),
+            "{what}"
+        );
+    }
+    assert!(
+        unwrap("other", &good, "d", 1, 2)
+            .unwrap_err()
+            .contains("not `other v1`")
+    );
+    // A value that says `end ` does not end the file.
+    let tricky = wrap("k", "d", 1, 2, "the end of it\n");
+    assert_eq!(unwrap("k", &tricky, "d", 1, 2).unwrap(), "the end of it\n");
+}
+
+#[test]
+fn the_default_window_is_ten_minutes_before_and_two_after() {
+    let w = EvidenceWindow::default();
+    assert_eq!((w.before, w.after), (600 * SEC, 120 * SEC));
+}
+
+#[test]
+fn an_event_exactly_at_the_edge_of_a_window_is_kept_at_both_ends() {
+    let days = Days::new("edge-days", 1);
+    let files = days.files("2026-05-01");
+    let base = OPENS[0].1 * SEC;
+    // S02's events in the fixture: a quote at the start of each second plus 2 ms, and trades just after it. Windows that begin and
+    // end exactly on events: from the quote at second 2 to the quote at second 4.
+    let (start, end) = (
+        base + 2 * SEC + 2 * 1_000_000,
+        base + 4 * SEC + 2 * 1_000_000,
+    );
+    let w = EvidenceWindow {
+        before: 1_000,
+        after: 1_000,
+    };
+    let trips = vec![trip_at("S02", start + w.before, end - w.after)];
+    let e = super::keep::gather_evidence(&files, &trips, w).unwrap();
+    let want = independent(&files, "S02", start, end);
+    assert_eq!(e.symbols["S02"], want);
+    assert_eq!(e.symbols["S02"].first().map(EvEvent::ts), Some(start));
+    assert_eq!(e.symbols["S02"].last().map(EvEvent::ts), Some(end));
+    // One nanosecond either side loses the edge events.
+    let tight = vec![trip_at("S02", start + w.before + 1, end - w.after - 1)];
+    let t = super::keep::gather_evidence(&files, &tight, w).unwrap();
+    assert!(
+        t.symbols["S02"]
+            .iter()
+            .all(|ev| ev.ts() > start && ev.ts() < end)
+    );
+    assert_eq!(t.symbols["S02"].len(), want.len() - 2);
+}
+
+#[test]
+fn a_companion_whose_trailer_is_gone_is_cut_short_not_misread_from_a_body_that_says_end() {
+    use super::keep::{unwrap, wrap};
+    let tricky = wrap("k", "d", 1, 2, "the end of it\n");
+    let cut = &tricky[..tricky.rfind("end ").unwrap()];
+    assert!(cut.contains("the end of it"));
+    assert!(
+        unwrap("k", cut, "d", 1, 2)
+            .unwrap_err()
+            .contains("cut short")
+    );
 }

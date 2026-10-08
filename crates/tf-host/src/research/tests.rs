@@ -1888,7 +1888,7 @@ fn a_run_keeps_each_days_log_and_traces_beside_its_trips_and_reads_them_back() {
         let out = run_day(&date, &input, &setup(&host, &cost, &defs)).unwrap();
         assert_eq!(results.log(&date).unwrap().render(), out.log.render());
         assert!(!results.log(&date).unwrap().recs.is_empty());
-        // The test strategies trace nothing but are asked: one trace each, the buy.
+        // The test strategies trace nothing but are asked: one trace each, the buy; then the host's counts and instruments.
         let traces = results.traces(&date).unwrap();
         assert_eq!(traces, out.traces);
         assert_eq!(
@@ -1896,7 +1896,13 @@ fn a_run_keeps_each_days_log_and_traces_beside_its_trips_and_reads_them_back() {
                 .iter()
                 .map(|t| (t.0, t.1.kind.as_str()))
                 .collect::<Vec<_>>(),
-            [(1, "buy"), (2, "buy"), (1, "stats"), (2, "stats")]
+            [
+                (1, "buy"),
+                (2, "buy"),
+                (1, "stats"),
+                (2, "stats"),
+                (0, "instruments")
+            ]
         );
         // What each strategy was allowed to do and refused, from the host's counts: a buy and a sell each, accepted.
         for (k, id) in [(2usize, 1u16), (3, 2)] {
@@ -3001,4 +3007,530 @@ fn what_the_broker_and_the_rate_limit_turned_away_is_one_count() {
     };
     assert_eq!(super::run::refusals(&st), 5);
     assert_eq!(super::run::refusals(&StrategyStats::default()), 0);
+}
+
+#[test]
+fn the_chart_keeps_every_event_near_the_trade_and_thins_the_rest_evenly() {
+    use super::trade::{px4, thin};
+    // 1e-4 dollars, rounded half up.
+    assert_eq!(
+        (
+            px4(20_010_000_000),
+            px4(49_999),
+            px4(50_000),
+            px4(-50_000),
+            px4(0)
+        ),
+        (200_100, 0, 1, 0, 0)
+    );
+    // At or under the cap nothing is dropped.
+    let few: Vec<u64> = (0..100).collect();
+    assert_eq!(thin(&few, |e| *e, 40, 60, 100), few);
+    // Over it: all of those inside [40_000, 41_000] stay, the others are thinned, order and the newest event are kept.
+    let many: Vec<u64> = (0..100_000).collect();
+    let kept = thin(&many, |e| *e, 40_000, 41_000, 5_000);
+    assert!(kept.len() <= 5_000 && kept.len() > 1_000, "{}", kept.len());
+    assert!(kept.windows(2).all(|w| w[0] < w[1]));
+    assert!(
+        (40_000..=41_000).all(|e| kept.contains(&e)),
+        "every event near the trade is kept"
+    );
+    assert!(
+        kept.iter().any(|&e| e > 99_000),
+        "the end of the day is kept"
+    );
+    let outside = kept
+        .iter()
+        .filter(|&&e| !(40_000..=41_000).contains(&e))
+        .count();
+    assert!(outside < 4_000 && outside > 500, "{outside}");
+    // Too many even near the trade: thinned to the cap.
+    let crowded = thin(&many, |e| *e, 0, u64::MAX, 1_000);
+    assert!(
+        crowded.len() <= 1_000 && crowded.len() > 400,
+        "{}",
+        crowded.len()
+    );
+}
+
+#[test]
+fn a_long_trace_shows_its_first_rows_and_every_row_about_the_symbol() {
+    use super::trade::trace_json;
+    use tf_strategy::trace::Trace;
+    let mut t = Trace::new(0, "rank").with_columns(&["rank", "symbol", "bid"]);
+    for i in 0..100 {
+        t.push_row(vec![
+            i.to_string(),
+            format!("S{i:02}"),
+            "20010000000".into(),
+        ]);
+    }
+    let j = json(&trace_json(&t, "S77"));
+    assert_eq!(j.get("total").s(), "100");
+    let rows = j.get("rows").arr();
+    // The first twenty, and the one about S77; each says whether it is about the symbol; the price column is dollars.
+    assert_eq!(rows.len(), 21);
+    assert_eq!(rows[19].arr()[0].s(), "19");
+    assert_eq!(rows[20].arr()[0].s(), "77");
+    assert_eq!(
+        rows.iter()
+            .map(|r| r.arr()[1].s())
+            .filter(|m| *m == "1")
+            .count(),
+        1
+    );
+    assert_eq!(rows[20].arr()[1].s(), "1");
+    assert_eq!(rows[20].arr()[2].arr()[2].s(), "20.0100");
+    // A short one is whole.
+    let mut short = Trace::new(0, "draw").with_columns(&["symbol"]);
+    for i in 0..40 {
+        short.push_row(vec![format!("S{i}")]);
+    }
+    assert_eq!(
+        json(&trace_json(&short, "none")).get("rows").arr().len(),
+        40
+    );
+    short.push_row(vec!["S40".into()]);
+    assert_eq!(json(&trace_json(&short, "S40")).get("rows").arr().len(), 21);
+    // No symbol column: no row is marked; a head value that is a time says the time.
+    let mut plain = Trace::new(0, "x")
+        .with("close", 1_777_924_800_000_000_000u64)
+        .with("n", 5);
+    plain.columns = vec!["a".into()];
+    plain.push_row(vec!["1".into()]);
+    let p = json(&trace_json(&plain, "S1"));
+    assert_eq!(p.get("rows").arr()[0].arr()[1].s(), "0");
+    let head: Vec<(String, String)> = p
+        .get("head")
+        .arr()
+        .iter()
+        .map(|h| (h.arr()[0].s().to_owned(), h.arr()[1].s().to_owned()))
+        .collect();
+    assert_eq!(head[0].0, "close");
+    assert!(
+        head[0].1.contains(':') && head[0].1.ends_with(".000"),
+        "{head:?}"
+    );
+    assert_eq!(head[1], ("n".to_owned(), "5".to_owned()));
+}
+
+#[test]
+fn the_two_fees_of_a_sale_are_its_total() {
+    let c = CostModel::published();
+    for (q, px) in [
+        (1u32, 1_000_000_000i64),
+        (99, 20_010_000_000),
+        (100_000, 5_000_000_000),
+    ] {
+        let (a, b) = c.sale_fee_parts("2026-05-04", q, px).unwrap();
+        assert_eq!(a + b, c.sale_fees("2026-05-04", q, px).unwrap());
+        assert!(a > 0 && b > 0);
+    }
+    assert!(c.sale_fee_parts("2099-01-01", 1, 1).is_err());
+}
+
+// ---- the pieces of a trade's page (E19-S35) ----
+
+mod trade_parts {
+    use super::super::trade::{
+        Dec, fee_parts, instrument_of, marks_of, previous_exit, thin, trade_recs,
+    };
+    use super::*;
+    use crate::equiv::{Answer, Rec};
+    use tf_strategy::trace::Trace;
+
+    fn dec(
+        ts: Nanos,
+        strategy: u16,
+        instrument: u32,
+        side: Side,
+        purpose: Purpose,
+        answer: Answer,
+    ) -> Rec {
+        Rec::Decision {
+            idx: 0,
+            ts,
+            strategy,
+            seq: 0,
+            instrument,
+            side,
+            qty: 100,
+            purpose,
+            limit: 20_100_000_000,
+            reason: 0xE503,
+            answer,
+        }
+    }
+
+    fn fill(ts: Nanos, order: u64, instrument: u32, qty: u32, px: i64) -> Rec {
+        Rec::Fill {
+            idx: 0,
+            ts,
+            order,
+            instrument,
+            qty,
+            px,
+        }
+    }
+
+    fn acc(o: u64) -> Answer {
+        Answer::Accepted(o)
+    }
+
+    fn trip(symbol: &str, long: bool, qty: u32, entry_ts: Nanos, exit_ts: Nanos) -> Trip {
+        Trip {
+            day: "2026-05-04".into(),
+            strategy: 1,
+            name: "t".into(),
+            variant: 1,
+            symbol: symbol.into(),
+            long,
+            qty,
+            entry_ts,
+            entry_px: 20_010_000_000,
+            exit_ts,
+            exit_px: 19_400_000_000,
+            gross: 0,
+            fees: 0,
+            borrow: 0,
+            slippage: 0,
+            net: 0,
+            net_bps_x100: 0,
+            slip_bps_x100: 0,
+            r_milli: None,
+            entry_reason: 0,
+            exit_reason: 0xE503,
+            open_at_end: false,
+        }
+    }
+
+    const MS: Nanos = 1_000_000;
+
+    fn log() -> Vec<Rec> {
+        use Purpose::{Close, Open};
+        vec![
+            dec(10, 1, 5, Side::Buy, Open, acc(1)),
+            fill(15, 1, 5, 100, 20_010_000_000),
+            dec(20, 1, 5, Side::Sell, Close, acc(2)),
+            fill(25, 2, 5, 100, 19_990_000_000),
+            // Not this strategy's, not this instrument's, not accepted.
+            dec(30, 2, 5, Side::Buy, Open, acc(8)),
+            dec(31, 1, 6, Side::Buy, Open, acc(9)),
+            fill(32, 8, 5, 5, 1),
+            fill(33, 9, 6, 5, 1),
+            dec(
+                100,
+                1,
+                5,
+                Side::Buy,
+                Open,
+                Answer::Rejected("no_budget".into()),
+            ),
+            dec(110, 1, 5, Side::Buy, Open, acc(3)),
+            fill(120, 3, 5, 100, 20_000_000_000),
+            dec(130, 1, 5, Side::Sell, Close, acc(4)),
+            fill(140, 4, 5, 100, 19_900_000_000),
+        ]
+    }
+
+    #[test]
+    fn the_orders_of_a_trade_are_the_strategys_decisions_in_the_instrument_between_its_trades() {
+        let recs = log();
+        let ts = |d: &[Dec]| d.iter().map(|d| d.ts).collect::<Vec<_>>();
+        let orders = |f: &[(Nanos, u64, u32, i64)]| f.iter().map(|f| f.1).collect::<Vec<_>>();
+        // The first trade: everything of the strategy's in the instrument to its exit, and the fills of those orders only.
+        let (d, f) = trade_recs(&recs, 1, 5, None, 25);
+        assert_eq!((ts(&d), orders(&f)), (vec![10, 20], vec![1, 2]));
+        // The second: after the first ended, with the refusal, to its exit decision (inclusive).
+        let (d, f) = trade_recs(&recs, 1, 5, Some(25), 130);
+        assert_eq!(ts(&d), [100, 110, 130]);
+        assert_eq!(orders(&f), [3, 4]);
+        assert_eq!((d[0].order, d[0].why.as_deref()), (None, Some("no_budget")));
+        assert_eq!((d[1].order, d[1].why.clone()), (Some(3), None));
+        // The edges: a decision at the previous exit's time is the previous trade's; one at the exit's time is this one's.
+        assert_eq!(
+            ts(&trade_recs(&recs, 1, 5, Some(20), 25).0),
+            Vec::<Nanos>::new()
+        );
+        assert_eq!(ts(&trade_recs(&recs, 1, 5, Some(19), 25).0), [20]);
+        assert_eq!(ts(&trade_recs(&recs, 1, 5, None, 20).0), [10, 20]);
+        assert_eq!(ts(&trade_recs(&recs, 1, 5, None, 19).0), [10]);
+        // Another strategy's or instrument's orders are not here.
+        assert_eq!(ts(&trade_recs(&recs, 2, 5, None, 1000).0), [30]);
+        assert_eq!(ts(&trade_recs(&recs, 1, 6, None, 1000).0), [31]);
+        // The decision keeps what it said.
+        let (d, _) = trade_recs(&recs, 1, 5, None, 25);
+        assert_eq!(
+            (d[0].side, d[0].purpose, d[0].qty, d[0].limit, d[0].reason),
+            (Side::Buy, Purpose::Open, 100, 20_100_000_000, 0xE503)
+        );
+    }
+
+    #[test]
+    fn a_trade_follows_the_last_earlier_trade_in_the_same_symbol() {
+        let (a, b, c, d) = (
+            trip("A", true, 1, 1, 50),
+            trip("B", true, 1, 1, 90),
+            trip("A", true, 1, 60, 70),
+            trip("A", true, 1, 80, 200),
+        );
+        let mine = [&a, &b, &c, &d];
+        assert_eq!(previous_exit(&mine, 3, "A"), Some(70));
+        assert_eq!(previous_exit(&mine, 3, "B"), Some(90));
+        assert_eq!(previous_exit(&mine, 1, "A"), Some(50));
+        assert_eq!(previous_exit(&mine, 3, "C"), None);
+        assert_eq!(previous_exit(&mine, 0, "A"), None);
+    }
+
+    #[test]
+    fn the_symbols_instrument_is_read_from_the_hosts_own_trace_and_no_other() {
+        let book = |pairs: &[(&str, &str)]| {
+            let mut t = Trace::new(0, "instruments").with_columns(&["instrument", "symbol"]);
+            for (i, s) in pairs {
+                t.push_row(vec![(*i).into(), (*s).into()]);
+            }
+            t
+        };
+        let traces = vec![
+            // A strategy's trace of the same kind is not the host's.
+            (1, book(&[("9", "A")])),
+            (0, Trace::new(0, "stats")),
+            (0, book(&[("5", "A"), ("6", "B"), ("x", "C")])),
+        ];
+        assert_eq!(instrument_of(&traces, "A"), Some(5));
+        assert_eq!(instrument_of(&traces, "B"), Some(6));
+        assert_eq!(instrument_of(&traces, "C"), None, "not a number");
+        assert_eq!(instrument_of(&traces, "D"), None);
+        assert_eq!(instrument_of(&[], "A"), None);
+        assert_eq!(
+            instrument_of(&[(0, Trace::new(0, "instruments"))], "A"),
+            None,
+            "no columns"
+        );
+    }
+
+    #[test]
+    fn the_markers_are_the_first_accepted_opening_and_the_last_accepted_closing_decision_with_their_fills()
+     {
+        use Purpose::{Close, Open};
+        let us = |ts: Nanos| (ts / 1000) as i64;
+        let decs = vec![
+            Dec {
+                ts: 5 * MS,
+                side: Side::Buy,
+                qty: 100,
+                purpose: Open,
+                limit: 20_100_000_000,
+                reason: 1,
+                order: None,
+                why: Some("max_notional".into()),
+            },
+            Dec {
+                ts: 10 * MS,
+                side: Side::Buy,
+                qty: 100,
+                purpose: Open,
+                limit: 20_100_000_000,
+                reason: 1,
+                order: Some(1),
+                why: None,
+            },
+            Dec {
+                ts: 900 * MS,
+                side: Side::Sell,
+                qty: 100,
+                purpose: Close,
+                limit: 19_000_000_000,
+                reason: 0xE503,
+                order: Some(2),
+                why: None,
+            },
+            Dec {
+                ts: 950 * MS,
+                side: Side::Sell,
+                qty: 100,
+                purpose: Close,
+                limit: 19_000_000_000,
+                reason: 0xE503,
+                order: None,
+                why: Some("nothing_to_close".into()),
+            },
+        ];
+        let fills = vec![
+            (60 * MS, 1, 100, 20_010_000_000),
+            (960 * MS, 2, 100, 19_400_000_000),
+        ];
+        let t = trip("S00", true, 100, 60 * MS, 960 * MS);
+        let m = marks_of(&decs, &fills, &t, &us);
+        assert_eq!(
+            m,
+            vec![
+                (
+                    10_000,
+                    "decision",
+                    "Decision: buy 100 at most 20.1000; accepted and sent as order 1".to_owned()
+                ),
+                (
+                    60_000,
+                    "fill",
+                    "Filled 100 at 20.0100, 50 ms after the decision".to_owned()
+                ),
+                (
+                    900_000,
+                    "exit_decision",
+                    "Exit decision: sell 100, time exit; sent as order 2".to_owned()
+                ),
+                (
+                    960_000,
+                    "exit_fill",
+                    "Exit filled 100 at 19.4000, 60 ms after the decision".to_owned()
+                ),
+            ]
+        );
+        // Still held at the end of the day: no exit, the end instead.
+        let mut open = trip("S00", true, 100, 60 * MS, 1_000 * MS);
+        open.open_at_end = true;
+        let m = marks_of(&decs[..2], &fills[..1], &open, &us);
+        assert_eq!(
+            m.iter().map(|x| x.1).collect::<Vec<_>>(),
+            ["decision", "fill", "end"]
+        );
+        assert_eq!(m[2].0, 1_000_000);
+        assert!(
+            m[2].2.contains("still held") && m[2].2.contains("19.4000"),
+            "{}",
+            m[2].2
+        );
+        // Nothing accepted: nothing to mark.
+        assert!(marks_of(&decs[..1], &[], &t, &us).is_empty());
+        assert!(marks_of(&[], &[], &open, &us).iter().all(|x| x.1 == "end"));
+        // An accepted order that was never filled has its decision and no fill.
+        let m = marks_of(&decs[1..2], &[], &open, &us);
+        assert_eq!(
+            m.iter().map(|x| x.1).collect::<Vec<_>>(),
+            ["decision", "end"]
+        );
+    }
+
+    fn sells_and_buys() -> Vec<Dec> {
+        let d = |side, purpose, order| Dec {
+            ts: 0,
+            side,
+            qty: 100,
+            purpose,
+            limit: 0,
+            reason: 0,
+            order: Some(order),
+            why: None,
+        };
+        vec![
+            d(Side::Buy, Purpose::Open, 1),
+            d(Side::Sell, Purpose::Close, 2),
+            d(Side::Sell, Purpose::Close, 3),
+            d(Side::SellShort, Purpose::Open, 4),
+            d(Side::Buy, Purpose::Close, 5),
+        ]
+    }
+
+    #[test]
+    fn the_fees_are_split_from_the_sale_fills_and_only_if_they_add_up() {
+        let cost = CostModel::published();
+        let day = "2026-05-04";
+        let decs = sells_and_buys();
+        let (px_a, px_b) = (19_400_000_000i64, 19_450_000_000i64);
+        let (a1, t1) = cost.sale_fee_parts(day, 60, px_a).unwrap();
+        let (a2, t2) = cost.sale_fee_parts(day, 40, px_b).unwrap();
+        // A long: bought, then sold in two fills. Only the sales pay; the parts add over the fills.
+        let fills = vec![
+            (0, 1, 100, 20_010_000_000),
+            (1, 2, 60, px_a),
+            (2, 3, 40, px_b),
+        ];
+        let mut t = trip("S00", true, 100, 0, 2);
+        t.fees = (a1 + t1 + a2 + t2) as i64;
+        assert_eq!(
+            fee_parts(&cost, day, &decs, &fills, &t),
+            Some((a1 + a2, t1 + t2))
+        );
+        // What the trade paid differs by anything: only the total can be shown.
+        t.fees += 1;
+        assert_eq!(fee_parts(&cost, day, &decs, &fills, &t), None);
+        t.fees -= 2;
+        assert_eq!(fee_parts(&cost, day, &decs, &fills, &t), None);
+        // A day the cost model has no rate for.
+        t.fees = (a1 + t1 + a2 + t2) as i64;
+        assert_eq!(fee_parts(&cost, "2099-01-01", &decs, &fills, &t), None);
+        // A short pays on its entries (the short sale) and not on the buy that covers.
+        let (a3, t3) = cost.sale_fee_parts(day, 100, 20_000_000_000).unwrap();
+        let fills = vec![(0, 4, 100, 20_000_000_000), (1, 5, 100, 19_000_000_000)];
+        let mut s = trip("S01", false, 100, 0, 1);
+        s.fees = (a3 + t3) as i64;
+        assert_eq!(fee_parts(&cost, day, &decs, &fills, &s), Some((a3, t3)));
+        // A long still held at the end of the day is counted as sold at the mark: no sale fill, the fee of one.
+        let (a4, t4) = cost.sale_fee_parts(day, 100, 19_400_000_000).unwrap();
+        let mut o = trip("S02", true, 100, 0, 3);
+        o.open_at_end = true;
+        o.fees = (a4 + t4) as i64;
+        assert_eq!(
+            fee_parts(&cost, day, &decs, &[(0, 1, 100, 20_010_000_000)], &o),
+            Some((a4, t4))
+        );
+        // Not for a short held at the end: its sales are its entries.
+        let mut so = trip("S03", false, 100, 0, 3);
+        so.open_at_end = true;
+        so.fees = 0;
+        assert_eq!(
+            fee_parts(&cost, day, &decs, &[(0, 1, 100, 20_010_000_000)], &so),
+            Some((0, 0))
+        );
+        // A trade that paid nothing and sold nothing.
+        assert_eq!(
+            fee_parts(&cost, day, &[], &[], &trip("S04", true, 1, 0, 1)),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn a_chart_keeps_the_edges_of_the_trade_and_what_comes_just_before_it() {
+        let all: Vec<u64> = (0..1000).collect();
+        // Exactly the cap: nothing is dropped, even with nothing near.
+        let ten: Vec<u64> = (0..10).collect();
+        assert_eq!(thin(&ten, |e| *e, 100, 200, 10), ten);
+        // 11 events near (401 to 411, inclusive), 989 far, room for 40 of them: every 25th far event, and the one just before the
+        // near ones; 51 in all, which is the cap and is not thinned again.
+        let kept = thin(&all, |e| *e, 401, 411, 51);
+        assert_eq!(kept.len(), 51);
+        assert!((401..=411).all(|e| kept.contains(&e)));
+        assert!(
+            kept.contains(&400),
+            "the event before the trade is the level it starts from"
+        );
+        assert_eq!(
+            kept.iter().filter(|&&e| !(401..=411).contains(&e)).count(),
+            40
+        );
+        assert!(kept.windows(2).all(|w| w[0] < w[1]));
+        // Exact examples, where counting an edge event as near or not, or the event after the last near one, changes what is kept:
+        // a range of eight events and one of a single event, in 200.
+        let two: Vec<u64> = (0..200).collect();
+        assert_eq!(
+            thin(&two, |e| *e, 50, 55, 12),
+            [32, 49, 50, 51, 52, 53, 54, 55, 71, 104, 137, 170]
+        );
+        assert_eq!(
+            thin(&two, |e| *e, 50, 50, 12),
+            [18, 37, 49, 50, 57, 76, 95, 114, 133, 152, 171, 190]
+        );
+    }
+
+    #[test]
+    fn a_trace_cell_beyond_the_named_columns_is_left_as_it_is() {
+        use super::super::trade::trace_json;
+        let mut t = Trace::new(0, "x").with_columns(&["bid"]);
+        t.rows
+            .push(vec!["20010000000".into(), "20010000000".into()]);
+        let j = json(&trace_json(&t, "S"));
+        let cells = j.get("rows").arr()[0].arr()[2].arr().to_vec();
+        assert_eq!((cells[0].s(), cells[1].s()), ("20.0100", "20010000000"));
+    }
 }

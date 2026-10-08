@@ -900,8 +900,20 @@ fn a_t04_day_keeps_its_ranked_cross_section_and_the_market_around_its_trades() {
     for date in results.dates().unwrap() {
         // The day's one decision, with symbols: the three the strategy bought and the others ranked.
         let traces = results.traces(&date).unwrap();
-        assert_eq!(traces.len(), 2);
-        // The strategy's rank trace, and the host's count of what it tried (three buys and three sells, all accepted).
+        assert_eq!(traces.len(), 3);
+        // The strategy's rank trace, the host's count of what it tried (three buys and three sells, all accepted) and the instruments.
+        assert_eq!((traces[2].0, traces[2].1.kind.as_str()), (0, "instruments"));
+        let mut names: Vec<&str> = traces[2].1.column("symbol").unwrap();
+        names.sort();
+        let mut bought: Vec<String> = results
+            .day(&date)
+            .unwrap()
+            .trips
+            .iter()
+            .map(|x| x.symbol.clone())
+            .collect();
+        bought.sort();
+        assert_eq!(names, bought.iter().map(String::as_str).collect::<Vec<_>>());
         assert_eq!(traces[1].1.kind, "stats");
         assert_eq!(
             (traces[1].1.value("accepted"), traces[1].1.value("rejected")),
@@ -940,5 +952,468 @@ fn a_t04_day_keeps_its_ranked_cross_section_and_the_market_around_its_trades() {
                 tr.symbol
             );
         }
+    }
+}
+
+// ---- one trade replayed (E19-S35) ----
+
+mod trade_view {
+    use super::*;
+    use crate::research::view::{ViewError, trade_page};
+    use crate::research::{EvidenceWindow, RunOptions, run_with};
+
+    /// Minimal strict JSON reader for what the page embeds (text, numbers, arrays, objects).
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum J {
+        Null,
+        Bool(bool),
+        Num(String),
+        Str(String),
+        Arr(Vec<J>),
+        Obj(Vec<(String, J)>),
+    }
+
+    impl J {
+        pub fn get(&self, k: &str) -> &J {
+            match self {
+                J::Obj(v) => v
+                    .iter()
+                    .find(|(x, _)| x == k)
+                    .map(|(_, v)| v)
+                    .unwrap_or_else(|| panic!("no `{k}`")),
+                _ => panic!("not an object"),
+            }
+        }
+        pub fn s(&self) -> &str {
+            match self {
+                J::Str(s) | J::Num(s) => s,
+                o => panic!("not text: {o:?}"),
+            }
+        }
+        pub fn a(&self) -> &[J] {
+            match self {
+                J::Arr(v) => v,
+                o => panic!("not an array: {o:?}"),
+            }
+        }
+    }
+
+    pub fn parse(text: &str) -> J {
+        fn ws(b: &[u8], i: &mut usize) {
+            while *i < b.len() && b[*i].is_ascii_whitespace() {
+                *i += 1;
+            }
+        }
+        fn string(b: &[u8], i: &mut usize) -> String {
+            assert_eq!(b[*i], b'"');
+            *i += 1;
+            let mut out = Vec::new();
+            while b[*i] != b'"' {
+                if b[*i] == b'\\' {
+                    *i += 1;
+                    match b[*i] {
+                        b'"' => out.push(b'"'),
+                        b'\\' => out.push(b'\\'),
+                        b'n' => out.push(b'\n'),
+                        b'u' => {
+                            let h = std::str::from_utf8(&b[*i + 1..*i + 5]).unwrap();
+                            let c = char::from_u32(u32::from_str_radix(h, 16).unwrap()).unwrap();
+                            out.extend_from_slice(c.to_string().as_bytes());
+                            *i += 4;
+                        }
+                        o => panic!("escape {}", o as char),
+                    }
+                } else {
+                    out.push(b[*i]);
+                }
+                *i += 1;
+            }
+            *i += 1;
+            String::from_utf8(out).unwrap()
+        }
+        fn value(b: &[u8], i: &mut usize) -> J {
+            ws(b, i);
+            match b[*i] {
+                b'{' => {
+                    *i += 1;
+                    let mut v = Vec::new();
+                    ws(b, i);
+                    if b[*i] == b'}' {
+                        *i += 1;
+                        return J::Obj(v);
+                    }
+                    loop {
+                        ws(b, i);
+                        let k = string(b, i);
+                        ws(b, i);
+                        assert_eq!(b[*i], b':');
+                        *i += 1;
+                        v.push((k, value(b, i)));
+                        ws(b, i);
+                        match b[*i] {
+                            b',' => *i += 1,
+                            b'}' => {
+                                *i += 1;
+                                return J::Obj(v);
+                            }
+                            c => panic!("{}", c as char),
+                        }
+                    }
+                }
+                b'[' => {
+                    *i += 1;
+                    let mut v = Vec::new();
+                    ws(b, i);
+                    if b[*i] == b']' {
+                        *i += 1;
+                        return J::Arr(v);
+                    }
+                    loop {
+                        v.push(value(b, i));
+                        ws(b, i);
+                        match b[*i] {
+                            b',' => *i += 1,
+                            b']' => {
+                                *i += 1;
+                                return J::Arr(v);
+                            }
+                            c => panic!("{}", c as char),
+                        }
+                    }
+                }
+                b'"' => J::Str(string(b, i)),
+                b't' => {
+                    *i += 4;
+                    J::Bool(true)
+                }
+                b'f' => {
+                    *i += 5;
+                    J::Bool(false)
+                }
+                b'n' => {
+                    *i += 4;
+                    J::Null
+                }
+                _ => {
+                    let s = *i;
+                    while *i < b.len()
+                        && (b[*i].is_ascii_digit()
+                            || matches!(b[*i], b'-' | b'.' | b'e' | b'E' | b'+'))
+                    {
+                        *i += 1;
+                    }
+                    assert!(*i > s, "not a value at {s}");
+                    J::Num(String::from_utf8_lossy(&b[s..*i]).into_owned())
+                }
+            }
+        }
+        let b = text.as_bytes();
+        let mut i = 0;
+        let v = value(b, &mut i);
+        ws(b, &mut i);
+        assert_eq!(i, b.len());
+        v
+    }
+
+    /// The T04 scenario `s` (three days, evidence kept) under a fresh root.
+    pub fn root(name: &str) -> std::path::PathBuf {
+        let mut src = afternoons(&format!("{name}-days"), drifting);
+        let def3 = def(3);
+        let (host_cfg, cost) = (config(1), CostModel::published());
+        let root = crate::replay_tests::scratch(&format!("{name}-root"));
+        run_with(
+            &Setup {
+                host: &host_cfg,
+                cost: &cost,
+                defs: std::slice::from_ref(&def3),
+            },
+            &mut src,
+            &root.join("s"),
+            &RunOptions {
+                evidence: Some(EvidenceWindow::default()),
+            },
+        )
+        .unwrap();
+        root
+    }
+
+    /// "20.0100" as 200100.
+    fn px(s: &str) -> i64 {
+        s.replace('.', "").parse().unwrap()
+    }
+
+    pub fn data(root: &std::path::Path, day: &str, n: usize) -> J {
+        let page = trade_page(root, "s", day, 1, n).unwrap();
+        let open = "<script id=\"data\" type=\"application/json\">";
+        let body = &page[page.find(open).unwrap() + open.len()..];
+        parse(&body[..body.find("</script>").unwrap()])
+    }
+
+    #[test]
+    fn a_trade_is_shown_with_its_orders_its_markers_its_costs_and_the_strategys_account() {
+        let root = root("tp1");
+        let j = data(&root, "2026-05-04", 0);
+        assert_eq!(
+            (
+                j.get("scenario").s(),
+                j.get("day").s(),
+                j.get("n").s(),
+                j.get("of").s()
+            ),
+            ("s", "2026-05-04", "0", "3")
+        );
+        assert_eq!(
+            (
+                j.get("strategy").get("name").s(),
+                j.get("side").s(),
+                j.get("qty").s()
+            ),
+            ("t04", "long", "99")
+        );
+        assert_eq!(j.get("open_at_end"), &J::Bool(false));
+        assert!(j.get("notes").a().is_empty(), "{:?}", j.get("notes"));
+        // The orders: the entry decision, its fill 50 ms later, the exit decision and its fill 50 ms later.
+        let kinds: Vec<&str> = j
+            .get("orders")
+            .a()
+            .iter()
+            .map(|o| o.get("kind").s())
+            .collect();
+        assert_eq!(kinds, ["decision", "fill", "decision", "fill"]);
+        let o = j.get("orders").a();
+        assert_eq!(
+            (
+                o[0].get("side").s(),
+                o[0].get("purpose").s(),
+                o[0].get("answer").s()
+            ),
+            ("buy", "open", "accepted")
+        );
+        assert_eq!(
+            (
+                o[2].get("side").s(),
+                o[2].get("purpose").s(),
+                o[2].get("reason").s()
+            ),
+            ("sell", "close", "time exit")
+        );
+        assert_eq!(
+            (o[1].get("latency_ms").s(), o[3].get("latency_ms").s()),
+            ("50", "50")
+        );
+        assert_eq!(
+            (o[1].get("px").s(), o[3].get("px").s()),
+            (j.get("entry_px").s(), j.get("exit_px").s())
+        );
+        assert_eq!(o[1].get("order").s(), o[0].get("order").s());
+        // Microseconds from the entry's second: the decision at 15:30:00.000 and the fill 50 ms on.
+        assert_eq!((o[0].get("us").s(), o[1].get("us").s()), ("0", "50000"));
+        let marks: Vec<(&str, &str)> = j
+            .get("marks")
+            .a()
+            .iter()
+            .map(|m| (m.get("kind").s(), m.get("us").s()))
+            .collect();
+        assert_eq!(marks[0], ("decision", "0"));
+        assert_eq!(marks[1], ("fill", "50000"));
+        assert_eq!(
+            marks.iter().map(|m| m.0).collect::<Vec<_>>(),
+            ["decision", "fill", "exit_decision", "exit_fill"]
+        );
+        let labels: Vec<&str> = j
+            .get("marks")
+            .a()
+            .iter()
+            .map(|m| m.get("label").s())
+            .collect();
+        assert_eq!(labels[1], "Filled 99 at 20.0100, 50 ms after the decision");
+        assert_eq!(
+            labels[3],
+            "Exit filled 99 at 19.4000, 50 ms after the decision"
+        );
+        // The fees split into Section 31 and the Trading Activity Fee, and add up to what the trade paid; gross less fees is net.
+        let m = j.get("money");
+        let (gross, sec, taf, fees, net) = (
+            px(m.get("gross").s()),
+            px(m.get("sec").s()),
+            px(m.get("taf").s()),
+            px(m.get("fees").s()),
+            px(m.get("net").s()),
+        );
+        assert!(sec > 0 && taf > 0, "{sec} {taf}");
+        assert_eq!(sec + taf, fees);
+        assert_eq!(gross - fees - px(m.get("borrow").s()), net);
+        // The trade of the day's file: the same numbers as the trips.
+        let trips = Results::open(&root.join("s"))
+            .unwrap()
+            .day("2026-05-04")
+            .unwrap()
+            .trips;
+        assert_eq!(
+            m.get("net_cents").s(),
+            crate::research::view::dollars_for_tests(i128::from(trips[0].net))
+        );
+        // The market was kept: quotes and trades from before the entry to after the exit.
+        let mk = j.get("market");
+        assert!(mk.get("quotes").a().len() > 10 && !mk.get("trades").a().is_empty());
+        assert!(mk.get("from_us").s().parse::<i64>().unwrap() < 0);
+        // The span is the first and the last event kept (nothing was thinned here).
+        let firsts = [
+            mk.get("quotes").a()[0].a()[0].s(),
+            mk.get("trades").a()[0].a()[0].s(),
+        ];
+        let first = firsts
+            .iter()
+            .map(|x| x.parse::<i64>().unwrap())
+            .min()
+            .unwrap();
+        assert_eq!(mk.get("from_us").s().parse::<i64>().unwrap(), first);
+        let (lq, lt) = (
+            mk.get("quotes").a().last().unwrap(),
+            mk.get("trades").a().last().unwrap(),
+        );
+        let last = lq.a()[0]
+            .s()
+            .parse::<i64>()
+            .unwrap()
+            .max(lt.a()[0].s().parse::<i64>().unwrap());
+        assert_eq!(mk.get("to_us").s().parse::<i64>().unwrap(), last);
+        assert!(
+            mk.get("to_us").s().parse::<i64>().unwrap()
+                > j.get("exit_us").s().parse::<i64>().unwrap()
+        );
+        // Why: the rank, with the symbol's row marked, the prices as dollars and the close as a time.
+        let ev = &j.get("evidence").a()[0];
+        assert_eq!(ev.get("kind").s(), "rank");
+        let head: Vec<(&str, &str)> = ev
+            .get("head")
+            .a()
+            .iter()
+            .map(|h| (h.a()[0].s(), h.a()[1].s()))
+            .collect();
+        assert!(head.contains(&("close", "16:00:00.000")), "{head:?}");
+        assert!(head.contains(&("entered", "3")));
+        let cols: Vec<&str> = ev.get("columns").a().iter().map(J::s).collect();
+        assert_eq!(&cols[..4], ["rank", "symbol", "prior_close", "ref_px"]);
+        let rows = ev.get("rows").a();
+        assert_eq!(rows.len(), 6);
+        let marked: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.a()[1].s() == "1")
+            .map(|r| r.a()[2].a()[1].s())
+            .collect();
+        assert_eq!(marked, [j.get("symbol").s()]);
+        assert_eq!(rows[0].a()[2].a()[2].s(), "20.0000");
+    }
+
+    #[test]
+    fn each_trade_of_the_day_is_its_own_page_and_one_that_is_not_is_not_found() {
+        let root = root("tp2");
+        let a = data(&root, "2026-05-04", 0);
+        let c = data(&root, "2026-05-04", 2);
+        assert_ne!(a.get("symbol").s(), c.get("symbol").s());
+        assert_eq!(c.get("n").s(), "2");
+        assert!(
+            matches!(trade_page(&root, "s", "2026-05-04", 1, 3), Err(ViewError::NotFound(m)) if m.contains("3 trades") && m.contains("no trade 4"))
+        );
+        assert!(matches!(
+            trade_page(&root, "s", "2026-05-04", 9, 0),
+            Err(ViewError::NotFound(_))
+        ));
+        assert!(matches!(
+            trade_page(&root, "s", "2026-05-02", 1, 0),
+            Err(ViewError::NotFound(_))
+        ));
+        assert!(matches!(
+            trade_page(&root, "..", "2026-05-04", 1, 0),
+            Err(ViewError::NotFound(_))
+        ));
+        // The page is whole: the data is in the place for it, once, and the mark is gone.
+        let page = trade_page(&root, "s", "2026-05-04", 1, 0).unwrap();
+        assert!(!page.contains("TRADE_DATA") && page.matches("id=\"data\"").count() == 1);
+        // It asks nobody for anything.
+        // (the SVG namespace is a name, not an address anything is fetched from)
+        let page = page.replace("http://www.w3.org/2000/svg", "");
+        for outside in [
+            "https://",
+            "http://",
+            "//cdn",
+            "@import",
+            "src=\"http",
+            "fetch(",
+            "XMLHttpRequest",
+            "innerHTML",
+        ] {
+            assert!(!page.contains(outside), "{outside}");
+        }
+        // And what the data holds cannot end the script early.
+        let body = &page[page.find("type=\"application/json\">").unwrap()..];
+        assert!(!body[..body.find("</script>").unwrap()].contains('<'));
+    }
+
+    #[test]
+    fn what_is_missing_is_said_and_the_rest_is_shown() {
+        let root = root("tp3");
+        let day = "2026-05-04";
+        // Without the market kept: no chart and a note, the orders and costs still there.
+        std::fs::remove_file(root.join("s").join(format!("{day}.evidence.zst"))).unwrap();
+        let j = data(&root, day, 0);
+        assert_eq!(j.get("market"), &J::Null);
+        assert!(
+            j.get("notes")
+                .a()
+                .iter()
+                .any(|n| n.s().contains("without evidence"))
+        );
+        assert_eq!(j.get("orders").a().len(), 4);
+        // A day kept before the instruments were recorded: the orders cannot be followed, and it says so.
+        let r = Results::open(&root.join("s")).unwrap();
+        let (cfg, outcome) = (r.fingerprint(), r.day(day).unwrap().outcome_hash);
+        let kept: Vec<_> = r
+            .traces(day)
+            .unwrap()
+            .into_iter()
+            .filter(|(s, _)| *s != 0)
+            .collect();
+        let body = tf_strategy::trace::render_all(&kept);
+        let text = crate::research::keep_wrap_for_tests("research trace", day, cfg, outcome, &body);
+        std::fs::write(root.join("s").join(format!("{day}.trace")), text).unwrap();
+        let j = data(&root, day, 0);
+        assert!(j.get("orders").a().is_empty() && j.get("marks").a().is_empty());
+        assert!(
+            j.get("notes")
+                .a()
+                .iter()
+                .any(|n| n.s().contains("kept before the host recorded"))
+        );
+        assert_eq!(
+            j.get("evidence").a().len(),
+            1,
+            "the strategy's account is still there"
+        );
+        // A strategy that recorded nothing says so (the trace is dropped too).
+        let none: Vec<_> = kept.into_iter().filter(|(s, _)| *s == 99).collect();
+        let text = crate::research::keep_wrap_for_tests(
+            "research trace",
+            day,
+            cfg,
+            outcome,
+            &tf_strategy::trace::render_all(&none),
+        );
+        std::fs::write(root.join("s").join(format!("{day}.trace")), text).unwrap();
+        let j = data(&root, day, 0);
+        assert!(j.get("evidence").a().is_empty());
+        assert!(
+            j.get("notes")
+                .a()
+                .iter()
+                .any(|n| n.s().contains("recorded no account"))
+        );
+        // A damaged log refuses the page, with why.
+        std::fs::write(root.join("s").join(format!("{day}.log")), "garbage").unwrap();
+        assert!(matches!(
+            trade_page(&root, "s", day, 1, 0),
+            Err(ViewError::Refused(_))
+        ));
     }
 }

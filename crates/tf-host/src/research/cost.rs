@@ -149,13 +149,19 @@ impl CostModel {
 
     /// The regulatory fees on a sale of `qty` shares at `px` (raw) on `date`, in raw price units.
     pub fn sale_fees(&self, date: &str, qty: u32, px: i64) -> Result<u128, CostError> {
+        let (sec, taf) = self.sale_fee_parts(date, qty, px)?;
+        Ok(sec + taf)
+    }
+
+    /// The same, as its two parts: Section 31 and the Trading Activity Fee.
+    pub fn sale_fee_parts(&self, date: &str, qty: u32, px: i64) -> Result<(u128, u128), CostError> {
         let sec = self.sec_rate(date)?;
         let (taf, cap) = self.taf_rate(date)?;
         let notional = u128::from(qty) * u128::try_from(px).unwrap_or(0);
         let sec_fee = notional * u128::try_from(sec.raw()).unwrap_or(0) / PER_MILLION;
         let taf_fee = (u128::from(qty) * u128::try_from(taf.raw()).unwrap_or(0))
             .min(u128::try_from(cap.raw()).unwrap_or(0));
-        Ok(sec_fee + taf_fee)
+        Ok((sec_fee, taf_fee))
     }
 
     /// The borrow fee on a short of `notional` (raw) held for `held` nanoseconds.

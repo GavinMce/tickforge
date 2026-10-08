@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trade replay</title>
+<style>
+:root{--bg:#F2F1EC;--card:#fff;--line:#DAD8D0;--soft:#E9E7E0;--ink:#1B2124;--mute:#566066;--pos:#0E5E51;--neg:#9B2C2C;--link:#2C63B8;--warnbg:#F6EAD2;--warn:#4F3504;--bid:#2C63B8;--ask:#B26A0B;--trade:#1B2124;--mono:ui-monospace,"IBM Plex Mono",SFMono-Regular,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#15191B;--card:#1E2427;--line:#343C40;--soft:#2A3236;--ink:#ECEBE6;--mute:#9AA4A9;--pos:#5FC3AE;--neg:#F08A8A;--link:#8FB4F0;--warnbg:#3B2E12;--warn:#F3DDAE;--bid:#8FB4F0;--ask:#F0B35F;--trade:#ECEBE6}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "IBM Plex Sans",system-ui,sans-serif}
+main{max-width:1280px;margin:0 auto;padding:20px 16px 48px;display:flex;flex-direction:column;gap:16px}
+h1{margin:0;font-size:24px;font-weight:600;letter-spacing:-.01em}
+h2{margin:0;font-size:14px;font-weight:600}
+a{color:var(--link)}
+.mono{font-family:var(--mono)}.mute{color:var(--mute)}.small{font-size:12px}.pos{color:var(--pos)}.neg{color:var(--neg)}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.cols{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.main{flex:999 1 640px;min-width:0;display:flex;flex-direction:column;gap:16px}
+.side{flex:1 1 340px;min-width:0;display:flex;flex-direction:column;gap:16px}
+.note{background:var(--warnbg);color:var(--warn);border-radius:8px;padding:10px 14px}
+.btn{min-height:40px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);font:inherit;cursor:pointer;display:inline-flex;align-items:center;text-decoration:none}
+.btn:disabled{opacity:.45;cursor:default}
+.btn:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--link);outline-offset:2px}
+.btn.dark{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+select{min-height:40px;font:inherit;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);padding:0 6px}
+input[type=range]{width:100%;min-height:36px}
+svg{display:block;width:100%;height:auto;background:var(--bg);border-radius:6px}
+.axis{stroke:var(--line);stroke-width:1}.tick{fill:var(--mute);font-size:11px;font-family:var(--mono)}
+.bid{fill:none;stroke:var(--bid);stroke-width:1.5}.ask{fill:none;stroke:var(--ask);stroke-width:1.5}
+.dot{fill:var(--trade)}
+.cursor{stroke:var(--ink);stroke-width:1;stroke-dasharray:3 3}
+.mk{stroke-width:1.5}
+.k-decision{stroke:#8A4FB0;fill:#8A4FB0}.k-fill{stroke:#0E7C6B;fill:#0E7C6B}.k-exit_decision{stroke:#B33A5B;fill:#B33A5B}.k-exit_fill{stroke:#B26A0B;fill:#B26A0B}.k-end{stroke:var(--mute);fill:var(--mute)}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:3px 0;border-bottom:1px solid var(--soft)}.kv:last-child{border-bottom:0}
+.kv b{font-weight:600}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{font-weight:600;color:var(--mute);text-align:left;padding:4px 8px;border-bottom:1px solid var(--soft);white-space:nowrap}
+td{padding:4px 8px;border-bottom:1px solid var(--soft);vertical-align:top;font-family:var(--mono)}
+.scroll{overflow-x:auto}
+tr.future td{opacity:.35}
+tr.hit td{background:var(--soft);font-weight:600}
+tr.gap td{text-align:center;color:var(--mute)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+</style>
+</head>
+<body>
+<main id="app"><p class="mute">Loading…</p></main>
+<script id="data" type="application/json">/*TRADE_DATA*/null</script>
+<script>
+(function () {
+  "use strict";
+  var D = JSON.parse(document.getElementById("data").textContent);
+  var app = document.getElementById("app");
+  function h(tag, props) {
+    var el = document.createElement(tag), kids = [];
+    Array.prototype.slice.call(arguments, 2).forEach(function (c) { kids = kids.concat(c); });
+    Object.keys(props || {}).forEach(function (k) { if (k === "class") el.className = props[k]; else el.setAttribute(k, props[k]); });
+    kids.forEach(function (c) { if (c === null || c === undefined || c === false) return; el.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return el;
+  }
+  function svg(tag, props) {
+    var el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    Object.keys(props || {}).forEach(function (k) { el.setAttribute(k, props[k]); });
+    return el;
+  }
+  function num(s) { return parseFloat(s) || 0; }
+  function usd4(s) { return (s.charAt(0) === "-" ? "-$" + s.slice(1) : "$" + s); }
+  function cls(s) { var n = num(s); return n > 0 ? "pos" : n < 0 ? "neg" : ""; }
+  function pad(n, w) { var s = String(n); while (s.length < w) s = "0" + s; return s; }
+  // New York time of day for an offset in microseconds from the second the trade was entered in.
+  function clock(us, ms) {
+    var t = D.base_s * 1000 + Math.floor(us / 1000);
+    var s = Math.floor(t / 1000), m = t - s * 1000;
+    return pad(Math.floor(s / 3600), 2) + ":" + pad(Math.floor(s % 3600 / 60), 2) + ":" + pad(s % 60, 2) + (ms === false ? "" : "." + pad(m, 3));
+  }
+  var SWATCH = { decision: "#8A4FB0", fill: "#0E7C6B", exit_decision: "#B33A5B", exit_fill: "#B26A0B", end: "var(--mute)" };
+  var KIND = { decision: "Decision", fill: "Entry fill", exit_decision: "Exit decision", exit_fill: "Exit fill", end: "End of day" };
+
+  // ---- the header -----------------------------------------------------------------------------
+  var head = h("header", { "class": "stack" },
+    h("div", { "class": "row small" },
+      h("a", { "class": "btn", href: "/#/backtests/" + encodeURIComponent(D.scenario) + "/" + encodeURIComponent(D.day) + "/" + encodeURIComponent(D.strategy.id) }, "‹ Back to the trades"),
+      h("span", { "class": "mute" }, D.scenario + " · " + D.day + " · " + D.strategy.name + " · trade " + (D.n + 1) + " of " + D.of)),
+    h("h1", null, D.symbol + " " + D.side + " " + D.qty),
+    h("div", { "class": "row" },
+      h("span", { "class": "mono" }, D.entry + " at $" + D.entry_px + "  →  " + (D.open_at_end ? "held to the end of the day, counted at $" + D.exit_px : D.exit + " at $" + D.exit_px)),
+      h("span", { "class": "mono " + cls(D.money.net) }, "net " + usd4(D.money.net) + " (" + D.money.bp + " bp)"),
+      h("span", { "class": "mute small" }, D.exit_reason)));
+
+  var kids = [head];
+  D.notes.forEach(function (n) { kids.push(h("div", { "class": "note", role: "note" }, n)); });
+
+  // ---- the chart --------------------------------------------------------------------------------
+  var M = D.market;
+  var span = Math.max(D.exit_us - D.entry_us, 1000000);
+  var ZOOMS = [["trade", "The trade and a little either side", Math.max(10000000, span)], ["wide", "Two minutes either side", 120000000], ["all", "All the market kept", null]];
+  var st = { zoom: 0, cursor: D.exit_us + 1, speed: 5, timer: null };
+  var W = 900, H = 340, L = 54, R = 12, T = 10, B = 26;
+  var chartBox = h("div"), readout = h("div", { "class": "row small mono", "aria-live": "off" });
+  var slider = h("input", { type: "range", "aria-label": "Replay cursor", min: "0", max: "1000", value: "1000" });
+
+  function domain() {
+    var z = ZOOMS[st.zoom][2];
+    var lo = D.entry_us - (z === null ? 1e15 : z), hi = D.exit_us + (z === null ? 1e15 : z);
+    if (M) { lo = Math.max(lo, M.from_us); hi = Math.min(hi, M.to_us); }
+    if (hi <= lo) hi = lo + 1000000;
+    return [lo, hi];
+  }
+  function lastAtOrBefore(arr, us) {
+    var lo = 0, hi = arr.length - 1, ans = -1;
+    while (lo <= hi) { var mid = (lo + hi) >> 1; if (arr[mid][0] <= us) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
+    return ans;
+  }
+  function drawChart() {
+    var dom = domain(), x0 = dom[0], x1 = dom[1];
+    var shown = function (a) { return a.filter(function (p) { return p[0] >= x0 && p[0] <= x1 && p[0] <= st.cursor; }); };
+    var q = M ? shown(M.quotes) : [], tr = M ? shown(M.trades) : [];
+    var lo = Infinity, hi = -Infinity;
+    q.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[2]); });
+    tr.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); });
+    [D.entry_px4, D.exit_px4].forEach(function (p) { if (D.marks.some(function (m) { return m.us <= st.cursor; })) { lo = Math.min(lo, p); hi = Math.max(hi, p); } });
+    if (!isFinite(lo)) { lo = D.entry_px4 - 50; hi = D.entry_px4 + 50; }
+    if (hi - lo < 4) { lo -= 2; hi += 2; }
+    var pad4 = (hi - lo) * 0.08; lo -= pad4; hi += pad4;
+    function X(us) { return L + (us - x0) / (x1 - x0) * (W - L - R); }
+    function Y(p) { return T + (hi - p) / (hi - lo) * (H - T - B); }
+    var s = svg("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Price chart of " + D.symbol + " with the trade's markers" });
+    s.appendChild(svg("line", { x1: L, y1: H - B, x2: W - R, y2: H - B, "class": "axis" }));
+    s.appendChild(svg("line", { x1: L, y1: T, x2: L, y2: H - B, "class": "axis" }));
+    for (var i = 0; i <= 4; i++) {
+      var p = lo + (hi - lo) * i / 4, y = Y(p);
+      s.appendChild(svg("line", { x1: L, y1: y, x2: W - R, y2: y, "class": "axis", opacity: "0.5" }));
+      var t = svg("text", { x: L - 6, y: y + 4, "text-anchor": "end", "class": "tick" }); t.textContent = (p / 10000).toFixed(2); s.appendChild(t);
+      var ux = x0 + (x1 - x0) * i / 4, tx = svg("text", { x: X(ux), y: H - 8, "text-anchor": i === 0 ? "start" : i === 4 ? "end" : "middle", "class": "tick" });
+      tx.textContent = clock(ux, (x1 - x0) < 20000000); s.appendChild(tx);
+    }
+    function path(pts, k) {
+      if (!pts.length) return;
+      var d = "";
+      pts.forEach(function (pt, j) { d += (j ? "H" + X(pt[0]).toFixed(1) + "V" : "M" + X(pt[0]).toFixed(1) + " ") + Y(pt[k]).toFixed(1); if (j) { /* step */ } });
+      // A quote holds until the next one: step lines, to the cursor.
+      d = "";
+      pts.forEach(function (pt, j) { var x = X(pt[0]).toFixed(1), y = Y(pt[k]).toFixed(1); d += (j ? "H" + x + "V" + y : "M" + x + " " + y); });
+      d += "H" + X(Math.min(st.cursor, x1)).toFixed(1);
+      s.appendChild(svg("path", { d: d, "class": k === 1 ? "bid" : "ask" }));
+    }
+    path(q, 1); path(q, 2);
+    tr.forEach(function (pt) { s.appendChild(svg("circle", { cx: X(pt[0]), cy: Y(pt[1]), r: 2, "class": "dot" })); });
+    D.marks.forEach(function (m) {
+      if (m.us > st.cursor || m.us < x0 || m.us > x1) return;
+      var line = svg("line", { x1: X(m.us), y1: T, x2: X(m.us), y2: H - B, "class": "mk k-" + m.kind });
+      var ttl = svg("title"); ttl.textContent = clock(m.us) + "  " + m.label; line.appendChild(ttl);
+      s.appendChild(line);
+      s.appendChild(svg("circle", { cx: X(m.us), cy: T + 6 + (m.kind === "fill" || m.kind === "exit_fill" ? 14 : 0), r: 5, "class": "k-" + m.kind }));
+    });
+    if (st.cursor >= x0 && st.cursor <= x1) s.appendChild(svg("line", { x1: X(st.cursor), y1: T, x2: X(st.cursor), y2: H - B, "class": "cursor" }));
+    chartBox.replaceChildren(s);
+  }
+
+  // What the cursor stands at: the quote, the position and what it would be worth now.
+  function drawReadout() {
+    var c = st.cursor, parts = [h("b", null, clock(c))];
+    var qi = M ? lastAtOrBefore(M.quotes, c) : -1;
+    var ti = M ? lastAtOrBefore(M.trades, c) : -1;
+    if (qi >= 0) parts.push(h("span", null, "bid " + (M.quotes[qi][1] / 10000).toFixed(2) + "  ask " + (M.quotes[qi][2] / 10000).toFixed(2)));
+    if (ti >= 0) parts.push(h("span", null, "last " + (M.trades[ti][1] / 10000).toFixed(2)));
+    var held = 0, cost = 0;
+    D.orders.forEach(function (o) {
+      if (o.kind !== "fill" || o.us > c) return;
+      var dec = D.orders.filter(function (d) { return d.kind === "decision" && d.order === o.order; })[0];
+      if (!dec) return;
+      var sign = dec.side === "buy" ? 1 : -1;
+      held += sign * o.qty; cost += sign * o.qty * o.px4;
+    });
+    var long = D.side === "long", pos = long ? held : -held;
+    parts.push(h("span", null, held === 0 ? (c < D.entry_us ? "flat, before the trade" : "flat") : "holding " + pos + " " + D.symbol));
+    if (held !== 0 && qi >= 0) {
+      var mark = long ? M.quotes[qi][1] : M.quotes[qi][2];
+      var open = (long ? 1 : -1) * (held * mark - cost) / 10000;
+      parts.push(h("span", { "class": open > 0 ? "pos" : open < 0 ? "neg" : "" }, "open P&L before costs " + (open < 0 ? "-$" : "$") + Math.abs(open).toFixed(2) + " at the " + (long ? "bid" : "ask")));
+    }
+    readout.replaceChildren.apply(readout, parts);
+  }
+
+  function markUs() { return D.marks.map(function (m) { return m.us; }); }
+  function setCursor(us) {
+    var dom = domain();
+    st.cursor = Math.max(dom[0], Math.min(us, dom[1] + 1));
+    slider.value = String(Math.round((st.cursor - dom[0]) / (dom[1] - dom[0]) * 1000));
+    paint();
+  }
+  function paint() { drawChart(); drawReadout(); drawLife(); }
+  slider.addEventListener("input", function () {
+    stop();
+    var dom = domain();
+    st.cursor = Math.round(dom[0] + (dom[1] - dom[0]) * Number(slider.value) / 1000);
+    paint();
+  });
+  function stop() { if (st.timer) { clearInterval(st.timer); st.timer = null; play.textContent = "▶ Play"; } }
+  var play = h("button", { "class": "btn dark", type: "button" }, "▶ Play");
+  function go() {
+    if (st.timer) { stop(); return; }
+    var dom = domain();
+    if (st.cursor >= dom[1]) setCursor(dom[0]);
+    play.textContent = "❚❚ Pause";
+    st.timer = setInterval(function () {
+      var d = domain();
+      var next = st.cursor + st.speed * 50000;
+      if (next >= d[1]) { setCursor(d[1]); stop(); } else setCursor(next);
+    }, 50);
+  }
+  play.addEventListener("click", go);
+  function jump(dir) {
+    stop();
+    var ms = markUs().sort(function (a, b) { return a - b; }), i;
+    if (dir > 0) { for (i = 0; i < ms.length; i++) if (ms[i] > st.cursor) return setCursor(ms[i]); setCursor(domain()[1]); }
+    else { for (i = ms.length - 1; i >= 0; i--) if (ms[i] < st.cursor) return setCursor(ms[i]); setCursor(domain()[0]); }
+  }
+  function stepEvent(dir) {
+    stop();
+    var t = [];
+    if (M) { M.quotes.forEach(function (p) { t.push(p[0]); }); M.trades.forEach(function (p) { t.push(p[0]); }); }
+    D.orders.forEach(function (o) { t.push(o.us); });
+    t.sort(function (a, b) { return a - b; });
+    var i;
+    if (dir > 0) { for (i = 0; i < t.length; i++) if (t[i] > st.cursor) return setCursor(t[i]); }
+    else { for (i = t.length - 1; i >= 0; i--) if (t[i] < st.cursor) return setCursor(t[i]); }
+  }
+  function btn(label, fn, title) { var b = h("button", { "class": "btn", type: "button", title: title || label }, label); b.addEventListener("click", fn); return b; }
+  var zoomSel = h("select", { "aria-label": "Zoom" });
+  ZOOMS.forEach(function (z, i) { zoomSel.appendChild(h("option", { value: String(i) }, z[1])); });
+  zoomSel.addEventListener("change", function () { st.zoom = Number(zoomSel.value); setCursor(st.cursor); });
+  var speedSel = h("select", { "aria-label": "Speed" });
+  [1, 5, 20, 100].forEach(function (v) { var o = h("option", { value: String(v) }, v + "× real time"); if (v === 5) o.setAttribute("selected", "selected"); speedSel.appendChild(o); });
+  speedSel.addEventListener("change", function () { st.speed = Number(speedSel.value); });
+  var fromStart = btn("↺ Replay from the start", function () { stop(); setCursor(domain()[0]); go(); });
+
+  var legend = h("div", { "class": "legend" },
+    h("span", null, h("i", { style: "background:var(--bid)" }), "bid"), h("span", null, h("i", { style: "background:var(--ask)" }), "ask"), h("span", null, h("i", { style: "background:var(--trade)" }), "trade"));
+  ["decision", "fill", "exit_decision", "exit_fill", "end"].forEach(function (k) {
+    if (D.marks.some(function (m) { return m.kind === k; })) legend.appendChild(h("span", null, h("i", { style: "border-radius:50%;background:" + SWATCH[k] }), KIND[k]));
+  });
+  var chartCard = h("section", { "class": "card stack", style: "display:flex;flex-direction:column;gap:10px", "aria-label": "Price chart and replay" },
+    h("div", { "class": "row" }, h("h2", null, "The market around the trade"), h("span", { "class": "small mute" }, M ? "showing " + M.quotes.length + " of " + M.quotes_total + " quotes and " + M.trades.length + " of " + M.trades_total + " trades kept" : "")),
+    M ? chartBox : h("div", { "class": "mute" }, "There is no market data to chart for this trade."),
+    readout, slider,
+    h("div", { "class": "row" }, btn("« Previous marker", function () { jump(-1); }), btn("◀ Event", function () { stepEvent(-1); }, "Back to the event before"), play,
+      btn("Event ▶", function () { stepEvent(1); }, "On to the next event"), btn("Next marker »", function () { jump(1); }), fromStart, zoomSel, speedSel), legend);
+
+  // ---- the order lifecycle ------------------------------------------------------------------------
+  var lifeBody = h("tbody");
+  function drawLife() {
+    var rows = D.orders.map(function (o) {
+      var tr = h("tr", { "class": o.us > st.cursor ? "future" : "" });
+      var cells;
+      if (o.kind === "decision") {
+        var what = o.answer === "accepted" ? "accepted as order " + o.order : "refused: " + o.why;
+        cells = [clock(o.us), "decision", o.side + " " + o.qty + " (" + o.purpose + ") at most $" + o.limit_px + "; " + o.reason, what];
+      } else {
+        cells = [clock(o.us), "fill", "order " + o.order + ": " + o.qty + " at $" + o.px, o.latency_ms === null ? "" : o.latency_ms + " ms after the decision"];
+      }
+      cells.forEach(function (c) { tr.appendChild(h("td", null, c)); });
+      return tr;
+    });
+    lifeBody.replaceChildren.apply(lifeBody, rows);
+  }
+  var lifeCard = h("section", { "class": "card", style: "display:flex;flex-direction:column;gap:8px", "aria-label": "Order lifecycle" },
+    h("h2", null, "The orders"),
+    D.orders.length ? h("div", { "class": "scroll" }, h("table", null, h("thead", null, h("tr", null, h("th", null, "Time"), h("th", null, "What"), h("th", null, "Detail"), h("th", null, "Answer"))), lifeBody)) : h("div", { "class": "mute" }, "The orders of this trade are not in the log."),
+    D.open_at_end ? h("div", { "class": "small mute" }, "Still held when the day's data ended: the exit is the last trade price, with the fee a sale would pay, not an order.") : null);
+
+  // ---- the costs ----------------------------------------------------------------------------------
+  var m = D.money;
+  function kv(label, value, c) { return h("div", { "class": "kv" }, h("span", null, label), h("b", { "class": "mono " + (c || "") }, value)); }
+  var costs = h("section", { "class": "card", "aria-label": "Costs" }, h("h2", { style: "margin-bottom:6px" }, "What it made and what it cost"),
+    kv("Gross, exit less entry", usd4(m.gross), cls(m.gross)),
+    m.sec !== null ? kv("Section 31 fee on the sales", "-$" + m.sec) : null,
+    m.taf !== null ? kv("Trading Activity Fee on the sales", "-$" + m.taf) : null,
+    kv(m.sec !== null ? "Fees, together" : "Fees on the sales", "-$" + m.fees),
+    kv("Borrow", "-$" + m.borrow),
+    kv("Net", usd4(m.net) + "  (" + usd4(m.net_cents).replace(/^(-?\$)/, "$1") + ")", cls(m.net)),
+    kv("Net, in basis points of what it put in", m.bp + " bp", cls(m.bp)),
+    kv("Slippage against the price the strategy asked for", usd4(m.slippage) + " (" + m.slip_bp + " bp)", num(m.slippage) > 0 ? "neg" : ""),
+    kv("Return on the money at risk", m.r === null ? "not stated: the strategy holds its own stop" : m.r + " R"),
+    h("div", { "class": "small mute", style: "margin-top:6px" }, "Slippage is already in the prices above (positive: worse than asked); it is shown, not taken off again."));
+
+  // ---- why the strategy did it --------------------------------------------------------------------
+  var why = D.evidence.map(function (t) {
+    var body = [];
+    if (t.head.length) body.push(h("div", { "class": "row small mono" }, t.head.map(function (kvp) { return h("span", { "class": "chip", style: "background:var(--soft);border-radius:99px;padding:1px 8px" }, kvp[0] + " " + kvp[1]); })));
+    if (t.rows.length) {
+      var trs = [], prev = -1;
+      t.rows.forEach(function (r) {
+        if (prev >= 0 && r[0] > prev + 1) trs.push(h("tr", { "class": "gap" }, h("td", { colspan: String(t.columns.length) }, "… " + (r[0] - prev - 1) + " more rows …")));
+        var tr = h("tr", { "class": r[1] ? "hit" : "" });
+        r[2].forEach(function (c) { tr.appendChild(h("td", null, c)); });
+        trs.push(tr); prev = r[0];
+      });
+      if (prev < t.total - 1) trs.push(h("tr", { "class": "gap" }, h("td", { colspan: String(t.columns.length) }, "… " + (t.total - 1 - prev) + " more rows …")));
+      body.push(h("div", { "class": "scroll" }, h("table", null, h("thead", null, h("tr", null, t.columns.map(function (c) { return h("th", null, c); }))), h.apply(null, ["tbody", null].concat(trs)))));
+    }
+    return h("section", { "class": "card", style: "display:flex;flex-direction:column;gap:8px", "aria-label": "The strategy's account" },
+      h("h2", null, "Why: the strategy's " + t.kind + " at " + t.time), h.apply(null, ["div", { style: "display:flex;flex-direction:column;gap:8px" }].concat(body)),
+      t.total ? h("div", { "class": "small mute" }, t.total + " rows; the shaded row is " + D.symbol + ".") : null);
+  });
+
+  kids.push(h("div", { "class": "cols" }, h("div", { "class": "main" }, chartCard, lifeCard), h("div", { "class": "side" }, [costs].concat(why).reduce(function (a, c) { a.push(c); return a; }, []).reduce(function (box, c) { box.appendChild(c); return box; }, h("div", { style: "display:flex;flex-direction:column;gap:16px" })))));
+  app.replaceChildren.apply(app, kids);
+  setCursor(D.exit_us + 1);
+})();
+</script>
+</body>
+</html>

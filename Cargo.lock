@@ -377,6 +377,7 @@ dependencies = [
  "tf-backtest",
  "tf-bench",
  "tf-budget",
+ "tf-calendar",
  "tf-catalog",
  "tf-core",
  "tf-history",

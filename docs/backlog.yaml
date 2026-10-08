@@ -1526,6 +1526,16 @@ epics:
         ac:
           - A runbook covers start before 04:00 ET, the opening burst, end of day, capture rotation and what to do on a feed stall or reconnect
           - The machine's clock is disciplined and its offset logged; the run alerts a person when the feed is stalled, lag exceeds a bound or the disk for captures runs low
+      - id: E18-S13
+        jira: TIC-198
+        title: "tf live: certify a strategy set on a stored day, check the gateway, and run a live day from one config"
+        status: todo
+        deps: [E18-S12, E19-S31, E19-S41]
+        ac:
+          - "`tf live certify` replays each strategy of a strategy set over a stored day of the history store (streamed, not held in memory) and writes the certificates the host requires, refusing to write any if one strategy fails"
+          - "`tf live check` logs in to the gateway with the key from the environment and streams for a stated time without placing anything, and says the session, the instruments named and the records and gaps seen"
+          - "`tf live run` runs one trading day from one config file: the strategy set, the day's reference snapshot (as of a session before the day), the certificates (each for the strategy's current fingerprint), the file ledger that continues from day to day, the day's own directory with its capture, decision log and report, the close from the calendar, a stop file that ends the day cleanly, and a start time; it refuses to start on a missing snapshot or certificate, a closed market, or a day directory already used"
+          - "Run against the fake gateway end to end in a test: the day closes, the ledger and the report are written, the capture replays to the same decisions"
   - id: E19
     jira: TIC-154
     title: "Strategy library from research: system additions, history harness and the first strategy set"
@@ -2116,6 +2126,15 @@ epics:
         jira: TIC-185
         title: "Research command: definitions by name over a store, per-day snapshots, and a twelve-month run on real quotes"
         status: todo
+        progress: >-
+          ADR 0071. Done: the strategy set (one text file that research and the live day both read: balance, loss limits, gateway limits and
+          a line per variant naming a template, its parameters, a universe, priority and share; refused when read for what the host would
+          refuse), `tf research run` over a store (a StoreSource day source: dataset, schema, date range, optional symbol subset, each
+          day's snapshot from a directory, a day identified by its file, snapshot and subset, a snapshot not from before the day refused),
+          `tf research snapshots` (one snapshot per trading day from daily bars, as of the last session before it), `tf research show`;
+          tested end to end over three scripted days of a store, with a mutation run (survivors given tests; the equivalent ones left
+          are a zero not signed negative and a refused soft-equals-hard that the tree also refuses). Not done: the minute-history
+          columns per day, and the twelve-month run on real quotes with its pull, time and decision-log replay (needs the data).
         deps: [E19-S13, E19-S18]
         ac:
           - "`tf research run` takes strategy definitions by name and parameters (a registry the strategies add to), a store, a date range and a symbol subset (from the screening pass or a list), builds each day's reference snapshot as it was before that session (the E19-S04 columns up to the previous session), and runs tf_host::research::run into a results directory; `tf research show` prints the configuration and a per-variant summary of a directory and refuses one without its configuration"

@@ -1653,3 +1653,302 @@ mod trade_view {
         }
     }
 }
+
+// ---- a strategy set run over the days of a store (E19-S31) ----
+
+mod store_run {
+    use super::*;
+    use crate::replay_tests::scratch;
+    use crate::research::StoreSource;
+    use crate::set::StrategySet;
+
+    const DATES: [&str; 3] = ["2026-05-01", "2026-05-04", "2026-05-05"];
+
+    /// A store of three days as `TEST`'s `tcbbo`, with each day's snapshot (as of the day before) in `snaps`, and a strategy set
+    /// of one closing reversal over the universe file `u.txt`: `(store, snapshots, set file)`.
+    fn world(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let days = afternoons(&format!("{name}-days"), drifting);
+        let root = scratch(&format!("{name}-world"));
+        let (store, snaps) = (root.join("store"), root.join("snaps"));
+        std::fs::create_dir_all(store.join("TEST").join("tcbbo")).unwrap();
+        std::fs::create_dir_all(&snaps).unwrap();
+        let text = crate::tests::snapshot().render();
+        for (i, (date, files)) in days.days.iter().enumerate() {
+            std::fs::copy(
+                &files[0],
+                store
+                    .join("TEST")
+                    .join("tcbbo")
+                    .join(format!("{date}.dbn.zst")),
+            )
+            .unwrap();
+            let before = ["2026-04-30", "2026-05-01", "2026-05-04"][i];
+            let snap = text.replacen("2026-10-02", before, 1);
+            std::fs::write(snaps.join(format!("{date}.snapshot")), snap).unwrap();
+        }
+        tf_history::index(&store, "TEST", "tcbbo", "ALL_SYMBOLS").unwrap();
+        std::fs::write(
+            root.join("u.txt"),
+            "universe v1\nstatic adv_shares <= 600\n",
+        )
+        .unwrap();
+        let set = root.join("month.set");
+        std::fs::write(
+            &set,
+            "strategy set v1\nbalance 100000\nstrategy 1 rev t04 universe=u.txt names=3\n",
+        )
+        .unwrap();
+        (store, snaps, set)
+    }
+
+    #[test]
+    fn a_strategy_set_is_run_over_the_days_of_a_store_to_a_results_directory() {
+        let (store, snaps, set) = world("sr1");
+        let (set, defs) = StrategySet::load(&set).unwrap();
+        let mut src = StoreSource::open(&store, "TEST", "tcbbo", None, None, &snaps, None).unwrap();
+        assert_eq!(src.dates(), DATES);
+        let host = set.host_config(16).unwrap();
+        let cost = CostModel::published();
+        let out = scratch("sr1-out");
+        let rep = run(
+            &Setup {
+                host: &host,
+                cost: &cost,
+                defs: &defs,
+            },
+            &mut src,
+            &out,
+        )
+        .unwrap();
+        assert_eq!((rep.ran.len(), rep.trips), (3, 9));
+        // What the directory says it is: the set's strategy and budget, and a ledger and report for each day.
+        let r = Results::open(&out).unwrap();
+        let lines = r.definition_lines().unwrap();
+        assert_eq!((lines[0].id, lines[0].name.as_str()), (1, "rev"));
+        assert!(lines[0].params.contains("names=3"));
+        let b = r.budgets().unwrap().unwrap();
+        assert_eq!(b.balance, 100_000 * 1_000_000_000);
+        assert_eq!(b.ids.get(&1).map(String::as_str), Some("rev"));
+        for d in DATES {
+            assert!(
+                r.ledger(d).is_ok() && r.report(d).unwrap().contains("rev"),
+                "{d}"
+            );
+        }
+        // The summary says what the directory is and what each strategy did.
+        let text = crate::research::describe(&r).unwrap();
+        assert!(
+            text.contains("1 definitions over 3 days (2026-05-01 to 2026-05-05); 9 round trips"),
+            "{text}"
+        );
+        assert!(
+            text.contains("budgets: $100000.00 divided over 1 strategies"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ledgers: 3 of 3 days have theirs\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1 rev (variant ") && text.contains("names=3"),
+            "{text}"
+        );
+        assert!(text.contains("9 trades, net -$"), "{text}");
+        assert!(text.contains("costs: 50 ms to the broker"), "{text}");
+        std::fs::remove_dir_all(r.ledger_dir("2026-05-04")).unwrap();
+        let cut = crate::research::describe(&Results::open(&out).unwrap()).unwrap();
+        assert!(
+            cut.contains("ledgers: 2 of 3 days have theirs (run the rest again to have them)"),
+            "{cut}"
+        );
+        run(
+            &Setup {
+                host: &host,
+                cost: &cost,
+                defs: &defs,
+            },
+            &mut src,
+            &out,
+        )
+        .unwrap();
+        // A second run finds every day there and does nothing; with a changed snapshot, that day is made again.
+        let again = run(
+            &Setup {
+                host: &host,
+                cost: &cost,
+                defs: &defs,
+            },
+            &mut src,
+            &out,
+        )
+        .unwrap();
+        assert_eq!((again.ran.len(), again.skipped.len()), (0, 3));
+        let p = snaps.join("2026-05-04.snapshot");
+        let text = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(&p, text.replace("S05,20.00,600", "S05,20.00,500")).unwrap();
+        let mut src = StoreSource::open(&store, "TEST", "tcbbo", None, None, &snaps, None).unwrap();
+        let third = run(
+            &Setup {
+                host: &host,
+                cost: &cost,
+                defs: &defs,
+            },
+            &mut src,
+            &out,
+        )
+        .unwrap();
+        assert_eq!(third.ran, ["2026-05-04"]);
+    }
+
+    #[test]
+    fn a_stores_days_are_identified_by_their_file_and_snapshot_and_subset_and_checked() {
+        let (store, snaps, _) = world("sr2");
+        let open = |from: Option<&str>, to: Option<&str>, syms: Option<Vec<String>>| {
+            StoreSource::open(&store, "TEST", "tcbbo", from, to, &snaps, syms)
+        };
+        // The range is inclusive, either end open; nothing in it, or another schema, is refused.
+        assert_eq!(
+            open(Some("2026-05-04"), None, None).unwrap().dates(),
+            &DATES[1..]
+        );
+        assert_eq!(
+            open(None, Some("2026-05-04"), None).unwrap().dates(),
+            &DATES[..2]
+        );
+        assert_eq!(
+            open(Some("2026-05-04"), Some("2026-05-04"), None)
+                .unwrap()
+                .dates(),
+            [DATES[1]]
+        );
+        assert!(
+            open(Some("2026-06-01"), None, None)
+                .err()
+                .unwrap()
+                .contains("no days of TEST tcbbo")
+        );
+        assert!(
+            StoreSource::open(&store, "TEST", "trades", None, None, &snaps, None)
+                .err()
+                .unwrap()
+                .contains("no days of TEST trades")
+        );
+        assert!(
+            StoreSource::open(
+                &store.join("nope"),
+                "TEST",
+                "tcbbo",
+                None,
+                None,
+                &snaps,
+                None
+            )
+            .is_err()
+        );
+        // The id of a day is its file, its snapshot and the subset: any of them changed is another id.
+        let id = |s: &StoreSource, d: &str| s.data_id(d).unwrap();
+        let a = open(None, None, None).unwrap();
+        let b = open(None, None, None).unwrap();
+        let subset = open(None, None, Some(vec!["S00".into(), "S01".into()])).unwrap();
+        assert_eq!(id(&a, DATES[0]), id(&b, DATES[0]));
+        assert_ne!(id(&a, DATES[0]), id(&subset, DATES[0]));
+        assert_ne!(id(&a, DATES[0]), id(&a, DATES[1]));
+        // Each day's id starts with its own file's checksum, as the manifest lists it.
+        let manifest = tf_history::Store::read(&store).unwrap();
+        for date in DATES {
+            let sha = &manifest
+                .of("TEST", "tcbbo")
+                .find(|d| d.date == date)
+                .unwrap()
+                .sha256;
+            assert!(id(&a, date).starts_with(sha.as_str()), "{date}");
+        }
+        let p = snaps.join("2026-05-01.snapshot");
+        let text = std::fs::read_to_string(&p).unwrap();
+        let before = id(&a, DATES[0]);
+        std::fs::write(&p, text.replace("S00,20.00,100", "S00,20.00,101")).unwrap();
+        assert_ne!(before, id(&open(None, None, None).unwrap(), DATES[0]));
+        assert!(a.data_id("2026-05-02").is_err());
+        // A subset restricts the snapshot's rows to those names; none of them in it is refused.
+        let mut s = open(
+            None,
+            None,
+            Some(vec!["S00".into(), "S01".into(), "ZZZ".into()]),
+        )
+        .unwrap();
+        let d = s.load(DATES[0]).unwrap();
+        assert_eq!(
+            d.snapshot
+                .rows
+                .iter()
+                .map(|r| r.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["S00", "S01"]
+        );
+        assert_eq!(d.files.len(), 1);
+        let mut none = open(None, None, Some(vec!["ZZZ".into()])).unwrap();
+        assert!(
+            none.load(DATES[0])
+                .err()
+                .unwrap()
+                .contains("none of the symbols")
+        );
+        assert!(s.load("2026-05-02").is_err());
+        // A day's file that is not the size the manifest says is refused when it is loaded.
+        let file = store.join("TEST").join("tcbbo").join("2026-05-05.dbn.zst");
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes.pop();
+        std::fs::write(&file, bytes).unwrap();
+        let mut s = open(None, None, None).unwrap();
+        assert!(
+            s.load("2026-05-05")
+                .err()
+                .unwrap()
+                .contains("not the file that was stored")
+        );
+    }
+
+    #[test]
+    fn every_day_needs_its_snapshot_and_it_must_be_from_before_the_day() {
+        let (store, snaps, _) = world("sr3");
+        // A snapshot as of the day itself would give the strategy the day's close.
+        let p = snaps.join("2026-05-04.snapshot");
+        let text = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(&p, text.replace("2026-05-01", "2026-05-04")).unwrap();
+        let mut s = StoreSource::open(&store, "TEST", "tcbbo", None, None, &snaps, None).unwrap();
+        assert!(
+            s.load("2026-05-04")
+                .err()
+                .unwrap()
+                .contains("must be from before the day")
+        );
+        std::fs::write(&p, text.replace("2026-05-01", "2026-05-05")).unwrap();
+        let mut s = StoreSource::open(&store, "TEST", "tcbbo", None, None, &snaps, None).unwrap();
+        assert!(
+            s.load("2026-05-04")
+                .err()
+                .unwrap()
+                .contains("must be from before the day")
+        );
+        // The snapshot of the day before is fine, and so is any earlier one.
+        std::fs::write(&p, text.replace("2026-05-01", "2026-04-01")).unwrap();
+        let mut s = StoreSource::open(&store, "TEST", "tcbbo", None, None, &snaps, None).unwrap();
+        assert!(s.load("2026-05-04").is_ok());
+        // Days without a snapshot are named, all at once.
+        std::fs::remove_file(snaps.join("2026-05-01.snapshot")).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        let e = StoreSource::open(&store, "TEST", "tcbbo", None, None, &snaps, None)
+            .err()
+            .unwrap();
+        assert!(
+            e.contains("no reference snapshot for 2 of 3 days")
+                && e.contains("2026-05-01 2026-05-04"),
+            "{e}"
+        );
+        // One that does not read is refused when it is loaded.
+        std::fs::write(snaps.join("2026-05-01.snapshot"), "garbage").unwrap();
+        std::fs::write(&p, "garbage").unwrap();
+        let mut s = StoreSource::open(&store, "TEST", "tcbbo", None, None, &snaps, None).unwrap();
+        assert!(s.load("2026-05-01").is_err());
+    }
+}

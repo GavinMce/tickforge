@@ -4,6 +4,7 @@ mod explore;
 mod history_cmd;
 mod ledger_cmd;
 mod reference_cmd;
+mod research_cmd;
 mod rules_cmd;
 mod runs;
 mod serve_cmd;
@@ -166,6 +167,21 @@ USAGE:
     any that is missing, short, altered or not listed (and exits non-zero). `show` prints the symbols per day.
     `screen` is the first stage of a research run (E19-S13): from the one-minute bars (and, with --quotes, the quoted
     spread of a stored quote schema such as tcbbo) it lists the symbols that meet every limit given, without the engine.
+
+    tf research run --set FILE --store DIR --dataset NAME --schema NAME --snapshots DIR --out DIR
+                    [--from DATE] [--to DATE] [--symbols A,B,C | --symbols-file FILE] [--evidence]
+                    [--id-space N] [--latency-ms N]
+    tf research show DIR
+    tf research snapshots --bars FILE --symbology FILE --from DATE --to DATE --out DIR
+                          [--assets FILE] [--etf-list FILE] [--window N] [--min-days N]
+
+    A strategy set over the days of a history store (E19-S31). The set is a text file (`strategy set v1`: balance, loss
+    limits, gateway limits, and a `strategy NUMBER NAME TEMPLATE key=value ... universe=FILE` line for each variant;
+    templates t04 and t14, parameters not given are the template's defaults) that research and the live day both read.
+    `run` runs each stored day as a live day is run (one host, a file ledger, the daily report) into DIR, taking each day's
+    reference snapshot from SNAPSHOTS/<date>.snapshot (which must be as of a session before the day) and skipping days
+    already there for the same data. `snapshots` makes those files from daily bars, one for each trading day, as of the
+    last session before it. `show` says what a results directory holds. Look at one with `tf serve --research`.
 
     tf universe show SPEC [--snapshot FILE]
     tf universe members SPEC --snapshot FILE [--out FILE]
@@ -1039,6 +1055,7 @@ fn main() -> ExitCode {
         Some("universe") => universe_cmd::universe(&args[1..]),
         Some("reference") => reference_cmd::reference(&args[1..]),
         Some("history") => history_cmd::history(&args[1..]),
+        Some("research") => research_cmd::research(&args[1..]),
         Some("serve") => serve_cmd::serve_cmd(&args[1..]),
         Some("catalog") => catalog_cmd::catalog(&args[1..]),
         Some("ledger") => ledger_cmd::ledger(&args[1..]),

@@ -4223,3 +4223,63 @@ mod tier_parts {
         assert!(empty.get("around").arr().is_empty() && empty.get("start").arr().is_empty());
     }
 }
+
+#[test]
+fn what_a_summary_says_of_money_basis_points_and_a_variants_trades() {
+    use super::summary::{bp, money, tally};
+    assert_eq!(
+        (
+            money(-6_182_038_200).as_str(),
+            money(0).as_str(),
+            money(5_000_000).as_str(),
+            money(4_999_999).as_str(),
+            money(-4_999_999).as_str()
+        ),
+        ("-$6.18", "$0.00", "$0.01", "$0.00", "$0.00")
+    );
+    assert_eq!(money(123_456_789_000), "$123.46");
+    assert_eq!(
+        (
+            bp(-1029).as_str(),
+            bp(5).as_str(),
+            bp(0).as_str(),
+            bp(155).as_str(),
+            bp(-5).as_str(),
+            bp(100).as_str()
+        ),
+        ("-10.29", "0.05", "0.00", "1.55", "-0.05", "1.00")
+    );
+    let t = |net: i64, bps: i64| Trip {
+        day: "2026-05-04".into(),
+        strategy: 1,
+        name: "t".into(),
+        variant: 1,
+        symbol: "A".into(),
+        long: true,
+        qty: 1,
+        entry_ts: 1,
+        entry_px: 1,
+        exit_ts: 2,
+        exit_px: 1,
+        gross: 0,
+        fees: 0,
+        borrow: 0,
+        slippage: 0,
+        net,
+        net_bps_x100: bps,
+        slip_bps_x100: 0,
+        r_milli: None,
+        entry_reason: 0,
+        exit_reason: 0,
+        open_at_end: false,
+    };
+    let (a, b, c) = (t(100, 40), t(0, 0), t(-300, -80));
+    assert_eq!(
+        tally(&[&a, &b, &c]),
+        (-200, 1, -13),
+        "a break-even trade is not a win; -40 over three truncates to -13"
+    );
+    assert_eq!(tally(&[&a]), (100, 1, 40));
+    assert_eq!(tally(&[&b]), (0, 0, 0));
+    assert_eq!(tally(&[]), (0, 0, 0));
+}

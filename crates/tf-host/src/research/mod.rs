@@ -14,7 +14,7 @@ pub use cost::{CostError, CostModel};
 pub use keep::{EvEvent, Evidence, EvidenceWindow, gather_evidence, gather_evidence_with};
 pub use run::{
     BudgetView, CONFIG_FILE, DayFile, DayInput, DayOutcome, DaySource, DefLine, ResearchError,
-    Results, RunOptions, RunReport, Setup, read_config, run, run_day, run_with,
+    Results, RunOptions, RunReport, Setup, read_config, run, run_day, run_day_to, run_with,
 };
 pub use trips::{Assembler, COLUMNS, OPEN_AT_END, Trip, Who};
 

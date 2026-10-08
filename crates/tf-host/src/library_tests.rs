@@ -1951,4 +1951,97 @@ mod store_run {
         let mut s = StoreSource::open(&store, "TEST", "tcbbo", None, None, &snaps, None).unwrap();
         assert!(s.load("2026-05-01").is_err());
     }
+
+    #[test]
+    fn a_strategy_is_certified_on_a_stored_day_streamed_and_its_certificate_survives_a_file() {
+        use crate::{Certificate, Reference, certify, certify_files};
+        use tf_capture::CaptureReplay;
+        use tf_provider::{Poll, Provider};
+        let (store, snaps, set) = world("sr4");
+        let (set, defs) = StrategySet::load(&set).unwrap();
+        let files = tf_history::files(
+            &store,
+            "TEST",
+            "tcbbo",
+            Some("2026-05-04"),
+            Some("2026-05-04"),
+        )
+        .unwrap();
+        let mut cfg = set.host_config(16).unwrap();
+        cfg.day = Some(times(2026, 5, 4));
+        cfg.min_certified_events = 1;
+        let snap = tf_universe::Snapshot::parse(
+            &std::fs::read_to_string(snaps.join("2026-05-04.snapshot")).unwrap(),
+        )
+        .unwrap();
+        let cert = certify_files(&defs[0], &cfg, snap.clone(), &files, 7).unwrap();
+        // What the stream shows is what the same events held in memory show.
+        let mut events = Vec::new();
+        let mut source = CaptureReplay::from_files(files.clone());
+        let mut dedupe = tf_core::Dedupe::new();
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match source.poll(&mut buf, 4096) {
+                Poll::Events(_) => events.extend(buf.iter().copied().filter(|e| dedupe.admit(e))),
+                Poll::Idle => continue,
+                _ => break,
+            }
+        }
+        let reference = Reference {
+            symbols: crate::replay::learn_symbols(&files),
+            snapshot: snap.clone(),
+        };
+        assert_eq!(
+            cert,
+            certify(&defs[0], &cfg, &reference, &events, 7).unwrap()
+        );
+        assert_eq!(
+            (
+                cert.tape_id,
+                cert.events > 1_000,
+                cert.intents,
+                cert.accepted
+            ),
+            (7, true, 6, 6)
+        );
+        assert_eq!(cert.strategy_fp, defs[0].fingerprint());
+        // It is one word of text that reads back whole, and one that was touched does not read.
+        let text = cert.to_text();
+        assert!(!text.contains(char::is_whitespace));
+        assert_eq!(Certificate::from_text(&text).unwrap(), cert);
+        assert_eq!(
+            Certificate::from_text(&format!("  {text}\n")).unwrap(),
+            cert
+        );
+        let edit = |from: &str, to: &str| text.replacen(from, to, 1);
+        let events_hex = format!("{:x}", cert.events);
+        for bad in [
+            edit(&events_hex, "ffffffff"),
+            text.replace("cert1", "cert2"),
+            text[..text.len() - 1].to_owned(),
+            format!("{text}:0"),
+            text.replacen(':', ":zz", 1),
+            String::new(),
+        ] {
+            assert!(Certificate::from_text(&bad).is_err(), "{bad}");
+        }
+        // The host takes the certificate as it takes one made in memory.
+        assert!(Certificate::from_text(&text).unwrap().is_intact());
+        // A tape that is not there does not certify: its instruments are unknown, so the strategy cannot be set up. (A capture's
+        // torn last block reads as far as it goes, by design, so a cut file is not an error here; a store's files are checked
+        // against their manifest before they are ever given.)
+        let missing = certify_files(
+            &defs[0],
+            &cfg,
+            snap.clone(),
+            &[std::path::PathBuf::from("/no/such/day.dbn.zst")],
+            7,
+        );
+        assert!(missing.is_err(), "{missing:?}");
+        // Garbage is not a tape either.
+        let junk = files[0].with_file_name("junk.dbn.zst");
+        std::fs::write(&junk, b"not a dbn file at all").unwrap();
+        assert!(certify_files(&defs[0], &cfg, snap, &[junk], 7).is_err());
+    }
 }

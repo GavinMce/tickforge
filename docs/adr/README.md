@@ -88,3 +88,4 @@ How:
 | [0069](0069-the-workspace-reads-a-replayed-days-ledger-as-it-reads-a-live-one.md) | The workspace reads a replayed day's ledger as it reads a live one | Accepted |
 | [0070](0070-the-trade-page-shows-what-the-engine-did-with-tier-1-from-the-days-log.md) | The trade page shows what the engine did with Tier 1, from the day's log | Accepted |
 | [0071](0071-research-and-the-live-day-read-one-strategy-set-and-research-runs-a-store-day-by-day.md) | Research and the live day read one strategy set, and research runs a store day by day | Accepted |
+| [0072](0072-tf-live-certifies-checks-and-runs-a-day-from-one-config-and-refuses-before-it-touches-the-gateway.md) | `tf live` certifies, checks and runs a day from one config, and refuses before it touches the gateway | Accepted |

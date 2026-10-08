@@ -115,4 +115,41 @@ impl Certificate {
     pub fn is_intact(&self) -> bool {
         self.seal == self.compute_seal()
     }
+
+    /// The certificate as one word of text, to be kept in a file and read back by [`Certificate::from_text`].
+    pub fn to_text(&self) -> String {
+        format!(
+            "cert1:{:016x}:{:016x}:{:x}:{:x}:{:x}:{:016x}:{:016x}",
+            self.strategy_fp,
+            self.tape_id,
+            self.events,
+            self.intents,
+            self.accepted,
+            self.outcome_hash,
+            self.seal
+        )
+    }
+
+    /// A certificate from its text. One whose fields do not match its seal (edited, cut, or made by hand) is refused.
+    pub fn from_text(text: &str) -> Result<Certificate, String> {
+        let w: Vec<&str> = text.trim().split(':').collect();
+        if w.len() != 8 || w[0] != "cert1" {
+            return Err("not a certificate (cert1:...)".to_owned());
+        }
+        let hex =
+            |i: usize| u64::from_str_radix(w[i], 16).map_err(|_| format!("field {i} is not hex"));
+        let c = Certificate {
+            strategy_fp: hex(1)?,
+            tape_id: hex(2)?,
+            events: hex(3)?,
+            intents: hex(4)?,
+            accepted: hex(5)?,
+            outcome_hash: hex(6)?,
+            seal: hex(7)?,
+        };
+        if !c.is_intact() {
+            return Err("the seal does not match: the certificate was altered".to_owned());
+        }
+        Ok(c)
+    }
 }

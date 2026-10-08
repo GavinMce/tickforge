@@ -49,13 +49,7 @@ spec:
       containers:
         - name: workspace
           image: ghcr.io/gavinmce/tickforge:main
-          args:
-            - serve
-            - --token-file=/secrets/token
-            - --ledger=/data/live/run/ledger
-            - --kind=live
-            - --research=/data/history/research
-            - --addr=0.0.0.0:8787
+          args: ["serve", "--token-file", "/secrets/token", "--ledger", "/data/live/run/ledger", "--kind", "live", "--research", "/data/history/research", "--addr", "0.0.0.0:8787"]
           ports:
             - {name: http, containerPort: 8787}
           readinessProbe:

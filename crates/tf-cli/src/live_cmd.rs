@@ -1525,7 +1525,7 @@ mod tests {
         // The workspace reads the ledger the live job writes; the prepare script writes where the live job reads.
         let workspace = include_str!("../../../deploy/k8s/workspace.yaml");
         assert!(
-            workspace.contains(&format!("--ledger={}/ledger", cfg.dir.display())),
+            workspace.contains(&format!("\"--ledger\", \"{}/ledger\"", cfg.dir.display())),
             "the workspace reads another ledger"
         );
         let script = include_str!("../../../scripts/prepare-day.sh");
@@ -1544,6 +1544,9 @@ mod tests {
         );
         // The live job is told to start where the config is, five minutes before the premarket.
         let jobs = include_str!("../../../deploy/k8s/jobs.yaml");
-        assert!(jobs.contains("--config=/config/live.cfg") && jobs.contains("--start-at=03:55"));
+        assert!(
+            jobs.contains("\"--config\", \"/config/live.cfg\"")
+                && jobs.contains("\"--start-at\", \"03:55\"")
+        );
     }
 }

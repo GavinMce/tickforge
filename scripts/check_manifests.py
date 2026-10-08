@@ -81,6 +81,10 @@ for owner, spec, meta in pods:
             fail(f"{owner}/{c['name']}: image {img} is not ours")
         else:
             tags.add(img.split(":", 1)[1])
+        # `tf` takes `--flag value`, not `--flag=value`: the second form is refused as an unexpected argument.
+        for a in c.get("args", []) + c.get("command", []):
+            if isinstance(a, str) and a.startswith("--") and "=" in a:
+                fail(f"{owner}/{c['name']}: argument {a} is --flag=value; tf takes --flag value")
         s = c.get("securityContext", {})
         if s.get("allowPrivilegeEscalation") is not False or s.get("readOnlyRootFilesystem") is not True:
             fail(f"{owner}/{c['name']}: privilege escalation or a writable root file system")

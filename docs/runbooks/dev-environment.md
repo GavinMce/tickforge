@@ -59,7 +59,7 @@ A one-off command in the image (the key from the secret):
 
 ```sh
 $K run tf-check --rm -i --restart=Never --image=ghcr.io/gavinmce/tickforge:<tag> \
-   --overrides='{"spec":{"containers":[{"name":"tf-check","image":"ghcr.io/gavinmce/tickforge:<tag>","args":["live","check","--config=/config/live.cfg","--seconds=30"],"env":[{"name":"DATABENTO_API_KEY","valueFrom":{"secretKeyRef":{"name":"tickforge-databento","key":"api-key"}}}],"volumeMounts":[{"name":"config","mountPath":"/config"}]}],"volumes":[{"name":"config","configMap":{"name":"tickforge-config"}}]}}'
+   --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":10001},"containers":[{"name":"tf-check","image":"ghcr.io/gavinmce/tickforge:<tag>","args":["live","check","--config","/config/live.cfg","--seconds","30"],"env":[{"name":"DATABENTO_API_KEY","valueFrom":{"secretKeyRef":{"name":"tickforge-databento","key":"api-key"}}}],"volumeMounts":[{"name":"config","mountPath":"/config"}]}],"volumes":[{"name":"config","configMap":{"name":"tickforge-config"}}]}}'
 ```
 
 ## Upgrade, roll back, take down
@@ -74,3 +74,10 @@ $K run tf-check --rm -i --restart=Never --image=ghcr.io/gavinmce/tickforge:<tag>
 
 Not backed up. Not exposed beyond the LAN, and behind one shared token until an identity provider is chosen (E17-S17). No orders
 reach a broker. No alerts: a failed job shows in `kubectl get jobs` and `kubectl logs`, nothing more (E18-S09).
+
+## Checked on 2026-10-08
+
+Deployed from a pull request's image, opened through a port-forward and through Traefik, and a one-off `tf live check` pod reached the
+Databento gateway from inside the cluster and authenticated with the key from the secret. The gateway refused the session only because the
+account had no live data license for `EQUS.MINI` yet. The prepare and live jobs had not run.
+

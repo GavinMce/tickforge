@@ -2312,7 +2312,28 @@ epics:
       - id: E19-S38
         jira: TIC-192
         title: "Dev environment: the workspace and the backtest view deployed on the homelab Kubernetes cluster"
-        status: todo
+        status: done
+        evidence: >-
+          ADR 0073. Deployed to the homelab cluster on 2026-10-08 and opened through it. One namespace `tickforge` applied from
+          `deploy/k8s` by `scripts/deploy-dev.sh`; nothing else in the cluster changed. The image is built by CI (`image.yml`, 3 minutes)
+          and published to ghcr.io/gavinmce/tickforge (tagged with the commit, pullable without credentials: checked); a PR's branch is
+          tagged so it was deployed before it was merged. Running: the workspace (Deployment, Service, Ingress with the namespace's own
+          certificate, LAN only, behind a token), a prepare CronJob (02:30 ET) and a live CronJob (03:50 ET), both on New York time, never
+          twice at once, with deadlines, kept on the workspace's node by affinity; two Proxmox volumes (30 Gi and 60 Gi, both bound: the pool
+          had the room); the strategy set, live config and universe in a ConfigMap; the Databento key and the sign-in token as secrets made
+          by the script from files on this machine, never printed. Every pod unprivileged with a read-only root file system, no
+          capabilities, no service account token, requests and limits; `scripts/check_manifests.py` enforces this and more on the rendered
+          manifests in CI (it caught an init container with no limits and, when `--flag=value` arguments were refused by tf, was given
+          that rule too), as do stand-in tests of the deploy script (every call names `admin@homelab`; none changes the current context; the
+          cluster must have `talos-cp-1`; secrets that exist are left alone; the token is mode 600 and never printed or passed) and of the
+          prepare script (order of steps, certificates kept while the set is unchanged and made again when it or a universe changes, a
+          Monday certifies on the Friday, no tape is an error, a holiday stops quietly, a weekend does nothing). The smoke test signed in,
+          listed a stored scenario, opened its trades and a trade page with the policy that sends and loads nothing, and was refused a POST,
+          both through a port-forward and through Traefik with the certificate. A one-off `tf live check` pod inside the cluster reached the
+          Databento gateway, authenticated with the key from the secret, and was refused only for want of a live data license on the account.
+          The checks of the free metadata service found that EQUS.MINI has no tcbbo, cmbp-1 or status schema: the cluster config, examples
+          and runbook use tbbo. Not done: backups; exposure beyond the LAN (needs E17-S17); alerts (E18-S09); the prepare and live jobs have
+          not run (they need the live license, and the prepare job's pulls cost money until the plan's history is included).
         deps: [E19-S34, E19-S41, E17-S09]
         ac:
           - "A container image of the workspace service and viewer is built in CI; Kustomize manifests are in the repository; they deploy to one namespace of the homelab cluster (Talos, behind Traefik and cert-manager) with TLS, with results and evidence on a persistent volume or a MinIO bucket"

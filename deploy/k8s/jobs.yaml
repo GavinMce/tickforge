@@ -109,7 +109,7 @@ spec:
           containers:
             - name: live
               image: ghcr.io/gavinmce/tickforge:main
-              args: ["live", "run", "--config=/config/live.cfg", "--start-at=03:55"]
+              args: ["live", "run", "--config", "/config/live.cfg", "--start-at", "03:55"]
               env:
                 - name: DATABENTO_API_KEY
                   valueFrom: {secretKeyRef: {name: tickforge-databento, key: api-key}}

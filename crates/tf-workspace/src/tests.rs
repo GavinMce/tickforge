@@ -1951,3 +1951,26 @@ fn the_backtest_screens_read_only_what_the_view_sends_and_stay_get_only() {
     assert_eq!(app.matches("method:").count(), 2);
     assert!(app.contains("#/backtests"));
 }
+
+/// No Rust test runs the app's script, so a syntax error in it would show only in a browser: have node read it, if there is a node
+/// (CI has one; a machine without skips this).
+#[test]
+fn the_apps_script_is_valid_javascript() {
+    let dir = scratch("app-js");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("app.js");
+    std::fs::write(&file, include_str!("ui/app.js")).unwrap();
+    // No node on this machine: not checked here.
+    if let Ok(out) = std::process::Command::new("node")
+        .arg("--check")
+        .arg(&file)
+        .output()
+    {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -32,6 +32,7 @@ svg{display:block;width:100%;height:auto;background:var(--bg);border-radius:6px}
 .dot{fill:var(--trade)}
 .cursor{stroke:var(--ink);stroke-width:1;stroke-dasharray:3 3}
 .mk{stroke-width:1.5}
+.k-tier_up{stroke:#4A6B1E;fill:#4A6B1E}.k-tier_down{stroke:#7a7a7a;fill:#7a7a7a}
 .k-decision{stroke:#8A4FB0;fill:#8A4FB0}.k-fill{stroke:#0E7C6B;fill:#0E7C6B}.k-exit_decision{stroke:#B33A5B;fill:#B33A5B}.k-exit_fill{stroke:#B26A0B;fill:#B26A0B}.k-end{stroke:var(--mute);fill:var(--mute)}
 .kv{display:flex;justify-content:space-between;gap:12px;padding:3px 0;border-bottom:1px solid var(--soft)}.kv:last-child{border-bottom:0}
 .kv b{font-weight:600}
@@ -76,8 +77,8 @@ tr.gap td{text-align:center;color:var(--mute)}
     var s = Math.floor(t / 1000), m = t - s * 1000;
     return pad(Math.floor(s / 3600), 2) + ":" + pad(Math.floor(s % 3600 / 60), 2) + ":" + pad(s % 60, 2) + (ms === false ? "" : "." + pad(m, 3));
   }
-  var SWATCH = { decision: "#8A4FB0", fill: "#0E7C6B", exit_decision: "#B33A5B", exit_fill: "#B26A0B", end: "var(--mute)" };
-  var KIND = { decision: "Decision", fill: "Entry fill", exit_decision: "Exit decision", exit_fill: "Exit fill", end: "End of day" };
+  var SWATCH = { tier_up: "#4A6B1E", tier_down: "#7a7a7a", decision: "#8A4FB0", fill: "#0E7C6B", exit_decision: "#B33A5B", exit_fill: "#B26A0B", end: "var(--mute)" };
+  var KIND = { tier_up: "Promoted to Tier 1", tier_down: "Demoted from Tier 1", decision: "Decision", fill: "Entry fill", exit_decision: "Exit decision", exit_fill: "Exit fill", end: "End of day" };
 
   // ---- the header -----------------------------------------------------------------------------
   var head = h("header", { "class": "stack" },
@@ -154,7 +155,7 @@ tr.gap td{text-align:center;color:var(--mute)}
       var line = svg("line", { x1: X(m.us), y1: T, x2: X(m.us), y2: H - B, "class": "mk k-" + m.kind });
       var ttl = svg("title"); ttl.textContent = clock(m.us) + "  " + m.label; line.appendChild(ttl);
       s.appendChild(line);
-      s.appendChild(svg("circle", { cx: X(m.us), cy: T + 6 + (m.kind === "fill" || m.kind === "exit_fill" ? 14 : 0), r: 5, "class": "k-" + m.kind }));
+      s.appendChild(svg("circle", { cx: X(m.us), cy: T + 6 + (m.kind === "fill" || m.kind === "exit_fill" ? 14 : m.kind === "tier_up" || m.kind === "tier_down" ? 28 : 0), r: 5, "class": "k-" + m.kind }));
     });
     if (st.cursor >= x0 && st.cursor <= x1) s.appendChild(svg("line", { x1: X(st.cursor), y1: T, x2: X(st.cursor), y2: H - B, "class": "cursor" }));
     chartBox.replaceChildren(s);
@@ -182,7 +183,19 @@ tr.gap td{text-align:center;color:var(--mute)}
       var open = (long ? 1 : -1) * (held * mark - cost) / 10000;
       parts.push(h("span", { "class": open > 0 ? "pos" : open < 0 ? "neg" : "" }, "open P&L before costs " + (open < 0 ? "-$" : "$") + Math.abs(open).toFixed(2) + " at the " + (long ? "bid" : "ask")));
     }
+    var held = tierHeld(c);
+    parts.push(h("span", null, "Tier 1: " + (held.length ? held.length + " (" + held.slice(0, 5).join(", ") + (held.length > 5 ? ", …" : "") + ")" : "none")));
     readout.replaceChildren.apply(readout, parts);
+  }
+  // The names holding Tier 1 at an offset: those at the window's start, then each change up to it.
+  function tierHeld(us) {
+    var held = D.tiers.start.slice();
+    D.tiers.around.forEach(function (e) {
+      if (e.us > us) return;
+      var i = held.indexOf(e.symbol);
+      if (e.action === "promoted") { if (i < 0) held.push(e.symbol); } else if (i >= 0) held.splice(i, 1);
+    });
+    return held;
   }
 
   function markUs() { return D.marks.map(function (m) { return m.us; }); }
@@ -192,7 +205,7 @@ tr.gap td{text-align:center;color:var(--mute)}
     slider.value = String(Math.round((st.cursor - dom[0]) / (dom[1] - dom[0]) * 1000));
     paint();
   }
-  function paint() { drawChart(); drawReadout(); drawLife(); }
+  function paint() { drawChart(); drawReadout(); drawLife(); drawTiers(); }
   slider.addEventListener("input", function () {
     stop();
     var dom = domain();
@@ -240,7 +253,7 @@ tr.gap td{text-align:center;color:var(--mute)}
 
   var legend = h("div", { "class": "legend" },
     h("span", null, h("i", { style: "background:var(--bid)" }), "bid"), h("span", null, h("i", { style: "background:var(--ask)" }), "ask"), h("span", null, h("i", { style: "background:var(--trade)" }), "trade"));
-  ["decision", "fill", "exit_decision", "exit_fill", "end"].forEach(function (k) {
+  ["tier_up", "tier_down", "decision", "fill", "exit_decision", "exit_fill", "end"].forEach(function (k) {
     if (D.marks.some(function (m) { return m.kind === k; })) legend.appendChild(h("span", null, h("i", { style: "border-radius:50%;background:" + SWATCH[k] }), KIND[k]));
   });
   var chartCard = h("section", { "class": "card stack", style: "display:flex;flex-direction:column;gap:10px", "aria-label": "Price chart and replay" },
@@ -326,6 +339,32 @@ tr.gap td{text-align:center;color:var(--mute)}
   var stratCard = h("section", { "class": "card", style: "display:flex;flex-direction:column;gap:8px", "aria-label": "The strategy" },
     h("h2", null, "The strategy"), stratBody);
 
+  // ---- what the engine did with Tier 1 ---------------------------------------------------------------
+  var tierBody = h("tbody");
+  function drawTiers() {
+    var rows = D.tiers.around.map(function (e) {
+      var tr = h("tr", { "class": (e.mine ? "hit " : "") + (e.us > st.cursor ? "future" : "") });
+      [e.time, e.symbol, e.action, e.reason].forEach(function (c) { tr.appendChild(h("td", null, c)); });
+      return tr;
+    });
+    tierBody.replaceChildren.apply(tierBody, rows);
+  }
+  var T1 = D.tiers, tierLines = [];
+  if (T1.day_events === 0) {
+    tierLines.push(h("div", null, "The engine made no change to Tier 1 on this day: no name was promoted, so the strategies decided on Tier 0 (the day-wide figures) and what they took snapshots of."));
+  } else if (!T1.mine.length) {
+    tierLines.push(h("div", null, "The engine never promoted " + D.symbol + " to Tier 1 on this day, so the strategy decided on Tier 0 data for it. It made " + T1.day_events + " changes to Tier 1 in all."));
+  } else {
+    T1.mine.forEach(function (e) {
+      tierLines.push(h("div", null, h("b", null, e.action.charAt(0).toUpperCase() + e.action.slice(1)), " at " + e.time + ": " + e.reason + "."));
+    });
+  }
+  var tierCard = h("section", { "class": "card", style: "display:flex;flex-direction:column;gap:8px", "aria-label": "The engine's tiers" },
+    h("h2", null, "The engine's tiers"),
+    h.apply(null, ["div", { style: "display:flex;flex-direction:column;gap:4px" }].concat(tierLines)),
+    T1.around.length ? h("div", { "class": "scroll" }, h("table", null, h("thead", null, h("tr", null, h("th", null, "Time"), h("th", null, "Name"), h("th", null, "Change"), h("th", null, "Why"))), tierBody)) : null,
+    T1.around.length ? h("div", { "class": "small mute" }, (T1.around_total > T1.around.length ? "The first " + T1.around.length + " of " + T1.around_total : T1.around_total) + " changes to Tier 1 from ten minutes before the entry to two after the exit; " + D.symbol + " is shaded. Tier 1 held " + T1.start.length + " name" + (T1.start.length === 1 ? "" : "s") + " when the window began.") : null);
+
   // ---- why the strategy did it --------------------------------------------------------------------
   var why = D.evidence.map(function (t) {
     var body = [];
@@ -346,7 +385,7 @@ tr.gap td{text-align:center;color:var(--mute)}
       t.total ? h("div", { "class": "small mute" }, t.total + " rows; the shaded row is " + D.symbol + ".") : null);
   });
 
-  kids.push(h("div", { "class": "cols" }, h("div", { "class": "main" }, chartCard, lifeCard), h("div", { "class": "side" }, [costs, stratCard].concat(why).reduce(function (a, c) { a.push(c); return a; }, []).reduce(function (box, c) { box.appendChild(c); return box; }, h("div", { style: "display:flex;flex-direction:column;gap:16px" })))));
+  kids.push(h("div", { "class": "cols" }, h("div", { "class": "main" }, chartCard, lifeCard), h("div", { "class": "side" }, [costs, stratCard, tierCard].concat(why).reduce(function (a, c) { a.push(c); return a; }, []).reduce(function (box, c) { box.appendChild(c); return box; }, h("div", { style: "display:flex;flex-direction:column;gap:16px" })))));
   app.replaceChildren.apply(app, kids);
   setCursor(D.exit_us + 1);
 })();

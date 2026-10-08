@@ -8,6 +8,7 @@
 //! Times in the data are microseconds from the second the trade was entered in (`base_ns`), because event time in nanoseconds
 //! does not fit a number in the page's script; the page adds them to the New York time of that second.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use tf_core::Nanos;
@@ -441,6 +442,135 @@ pub(super) fn listed_in(own: &[&Trace], symbol: &str) -> Option<String> {
     None
 }
 
+/// A promotion to Tier 1 or a demotion from it, as the engine recorded it in the day's log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TierEv {
+    pub ts: Nanos,
+    pub instrument: u32,
+    pub promote: bool,
+    /// `tf_engine::reason`: 1 scanner hit, 2 cooled off, 3 a strategy asked, 4 evicted for a higher priority.
+    pub reason: u8,
+    /// The scanner's volume z-score times 1000 for a hit; what the sweep saw for a cool-off; else 0.
+    pub score: i64,
+}
+
+/// The tier changes in a day's log, in the order the engine made them.
+pub(super) fn tier_events(recs: &[Rec]) -> Vec<TierEv> {
+    recs.iter()
+        .filter_map(|r| match r {
+            Rec::Tier {
+                ts,
+                instrument,
+                promote,
+                reason,
+                score,
+                ..
+            } => Some(TierEv {
+                ts: *ts,
+                instrument: *instrument,
+                promote: *promote,
+                reason: *reason,
+                score: *score,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the engine recorded as the reason for a tier change, in words.
+pub(super) fn tier_reason(reason: u8, score: i64) -> String {
+    match reason {
+        1 => format!("scanner hit, volume z-score {}", milli(score)),
+        2 => "cooled off".to_owned(),
+        3 => "a strategy asked for it".to_owned(),
+        4 => "made room for a request of higher priority".to_owned(),
+        r => format!("reason {r}"),
+    }
+}
+
+/// The instruments holding Tier 1 just before `at`, in the order they were promoted.
+pub(super) fn held_before(events: &[TierEv], at: Nanos) -> Vec<u32> {
+    let mut held: Vec<u32> = Vec::new();
+    for e in events.iter().filter(|e| e.ts < at) {
+        if e.promote {
+            if !held.contains(&e.instrument) {
+                held.push(e.instrument);
+            }
+        } else {
+            held.retain(|i| *i != e.instrument);
+        }
+    }
+    held
+}
+
+/// The names of the day's instruments that the host recorded (every one the day decided on, filled or changed the tier of).
+pub(super) fn symbol_names(traces: &[(u16, Trace)]) -> BTreeMap<u32, String> {
+    let mut out = BTreeMap::new();
+    if let Some((_, t)) = traces
+        .iter()
+        .find(|(s, t)| *s == 0 && t.kind == INSTRUMENTS)
+    {
+        if let (Some(ids), Some(names)) = (t.column("instrument"), t.column("symbol")) {
+            for (i, n) in ids.into_iter().zip(names) {
+                if let Ok(i) = i.parse() {
+                    out.insert(i, n.to_owned());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The most tier changes the page lists around a trade.
+pub(super) const TIER_ROWS: usize = 300;
+
+/// What the engine did with Tier 1 around a trade as JSON: who held it when the window began, every change in the window (up to
+/// [`TIER_ROWS`]) with the traded symbol's marked, and all the traded symbol's changes of the day.
+pub(super) fn tiers_json(
+    events: &[TierEv],
+    names: &BTreeMap<u32, String>,
+    mine: Option<u32>,
+    from: Nanos,
+    to: Nanos,
+    us: &dyn Fn(Nanos) -> i64,
+) -> String {
+    let name = |i: u32| names.get(&i).cloned().unwrap_or_else(|| format!("#{i}"));
+    let row = |e: &TierEv| {
+        format!(
+            "{{\"us\":{},\"time\":{},\"symbol\":{},\"action\":{},\"reason\":{},\"score\":{},\"mine\":{}}}",
+            us(e.ts),
+            js(&et(e.ts)),
+            js(&name(e.instrument)),
+            js(if e.promote { "promoted" } else { "demoted" }),
+            js(&tier_reason(e.reason, e.score)),
+            e.score,
+            Some(e.instrument) == mine
+        )
+    };
+    let start: Vec<String> = held_before(events, from)
+        .into_iter()
+        .map(|i| js(&name(i)))
+        .collect();
+    let inside: Vec<&TierEv> = events
+        .iter()
+        .filter(|e| e.ts >= from && e.ts <= to)
+        .collect();
+    let around: Vec<String> = inside.iter().take(TIER_ROWS).map(|e| row(e)).collect();
+    let own: Vec<String> = events
+        .iter()
+        .filter(|e| Some(e.instrument) == mine)
+        .map(row)
+        .collect();
+    format!(
+        "{{\"day_events\":{},\"start\":[{}],\"around_total\":{},\"around\":[{}],\"mine\":[{}]}}",
+        events.len(),
+        start.join(","),
+        inside.len(),
+        around.join(","),
+        own.join(",")
+    )
+}
+
 pub(super) fn legs_json(legs: &[Leg], us: &dyn Fn(Nanos) -> i64) -> String {
     let rows: Vec<String> = legs
         .iter()
@@ -569,7 +699,36 @@ pub(super) fn trade_json(
     }
     life.sort_by_key(|o| o.us);
 
-    let marks = marks_of(&decisions, &fills, trip, &us);
+    let mut marks = marks_of(&decisions, &fills, trip, &us);
+    // What the engine did with Tier 1: the window is the one the market is kept for.
+    let window = super::keep::EvidenceWindow::default();
+    let (tier_from, tier_to) = (
+        trip.entry_ts.saturating_sub(window.before),
+        trip.exit_ts.saturating_add(window.after),
+    );
+    let tier_log = tier_events(&log.recs);
+    let names = symbol_names(&traces);
+    let tiers = tiers_json(&tier_log, &names, instrument, tier_from, tier_to, &us);
+    for e in tier_log
+        .iter()
+        .filter(|e| Some(e.instrument) == instrument && e.ts >= tier_from && e.ts <= tier_to)
+    {
+        marks.push((
+            us(e.ts),
+            if e.promote { "tier_up" } else { "tier_down" },
+            format!(
+                "{} {} Tier 1: {}",
+                trip.symbol,
+                if e.promote {
+                    "promoted to"
+                } else {
+                    "demoted from"
+                },
+                tier_reason(e.reason, e.score)
+            ),
+        ));
+    }
+    marks.sort_by_key(|m| m.0);
 
     // The costs. The fees split into their two kinds from the sale fills; if that does not add up to what the trip paid
     // (a leg the log does not show), only the total is given.
@@ -701,7 +860,7 @@ pub(super) fn trade_json(
     let notes_json: Vec<String> = notes.iter().map(|n| js(n)).collect();
     let life_json: Vec<&str> = life.iter().map(|o| o.text.as_str()).collect();
     Ok(format!(
-        "{{\"scenario\":{},\"day\":{},\"strategy\":{{\"id\":{},\"name\":{}}},\"n\":{n},\"of\":{},\"symbol\":{},\"side\":{},\"qty\":{},\"open_at_end\":{},\"base_s\":{base_s},\"entry_us\":{},\"exit_us\":{},\"entry\":{},\"exit\":{},\"entry_px\":{},\"exit_px\":{},\"entry_px4\":{},\"exit_px4\":{},\"exit_reason\":{},\"money\":{money},\"orders\":[{}],\"marks\":[{}],\"market\":{market},\"evidence\":[{}],\"notes\":[{}],\"def\":{def_json},\"legs\":{legs_json},\"listed\":{listed}}}",
+        "{{\"scenario\":{},\"day\":{},\"strategy\":{{\"id\":{},\"name\":{}}},\"n\":{n},\"of\":{},\"symbol\":{},\"side\":{},\"qty\":{},\"open_at_end\":{},\"base_s\":{base_s},\"entry_us\":{},\"exit_us\":{},\"entry\":{},\"exit\":{},\"entry_px\":{},\"exit_px\":{},\"entry_px4\":{},\"exit_px4\":{},\"exit_reason\":{},\"money\":{money},\"orders\":[{}],\"marks\":[{}],\"market\":{market},\"evidence\":[{}],\"notes\":[{}],\"def\":{def_json},\"legs\":{legs_json},\"listed\":{listed},\"tiers\":{tiers}}}",
         js(scenario),
         js(day),
         line.id,

@@ -1334,6 +1334,14 @@ mod trade_view {
             ),
             ("rank", "1", "6", "entered")
         );
+        // The engine promoted nobody on this day (T04 decides on Tier 0): the page says that, with no changes listed.
+        let tiers = j.get("tiers");
+        assert_eq!(tiers.get("day_events").s(), "0");
+        assert!(
+            tiers.get("around").a().is_empty()
+                && tiers.get("start").a().is_empty()
+                && tiers.get("mine").a().is_empty()
+        );
         // Why: the rank, with the symbol's row marked, the prices as dollars and the close as a time.
         let ev = &j.get("evidence").a()[0];
         assert_eq!(ev.get("kind").s(), "rank");
@@ -1475,5 +1483,173 @@ mod trade_view {
             trade_page(&root, "s", day, 1, 0),
             Err(ViewError::Refused(_))
         ));
+    }
+
+    #[test]
+    fn what_the_engine_did_with_tier_1_comes_from_the_days_log_and_marks_the_chart() {
+        use crate::equiv::Rec;
+        let root = root("tp5");
+        let day = "2026-05-04";
+        let r = Results::open(&root.join("s")).unwrap();
+        let trip = r.day(day).unwrap().trips[0].clone();
+        let mut traces = r.traces(day).unwrap();
+        let book = traces
+            .iter()
+            .position(|(s, t)| *s == 0 && t.kind == "instruments")
+            .unwrap();
+        let mine: u32 = {
+            let t = &traces[book].1;
+            let rows = t
+                .column("instrument")
+                .unwrap()
+                .into_iter()
+                .zip(t.column("symbol").unwrap());
+            rows.into_iter()
+                .find(|(_, s)| *s == trip.symbol)
+                .unwrap()
+                .0
+                .parse()
+                .unwrap()
+        };
+        // This name was promoted just outside the window the page covers (ten minutes before the entry to two after the exit) and
+        // again exactly at its start, on a scanner hit half a minute before the entry; a strategy asked for another's promotion;
+        // and the name was demoted ten seconds after the exit, exactly at the window's end, and just after it.
+        let sec = 1_000_000_000;
+        let mut log = r.log(day).unwrap();
+        let tier = |ts, instrument, promote, reason, score| Rec::Tier {
+            idx: 9_000_000 + ts / sec,
+            ts,
+            instrument,
+            promote,
+            reason,
+            score,
+        };
+        log.recs
+            .push(tier(trip.entry_ts - 601 * sec, mine, true, 1, 5_000));
+        log.recs
+            .push(tier(trip.entry_ts - 600 * sec, mine, true, 1, 6_000));
+        log.recs
+            .push(tier(trip.entry_ts - 30 * sec, mine, true, 1, 9_200));
+        log.recs
+            .push(tier(trip.entry_ts - 20 * sec, 77, true, 3, 0));
+        log.recs
+            .push(tier(trip.exit_ts + 10 * sec, mine, false, 2, 0));
+        log.recs
+            .push(tier(trip.exit_ts + 120 * sec, mine, false, 2, 1));
+        log.recs
+            .push(tier(trip.exit_ts + 121 * sec, mine, false, 2, 2));
+        traces[book].1.push_row(vec!["77".into(), "ZZZ".into()]);
+        let (cfg, outcome) = (r.fingerprint(), r.day(day).unwrap().outcome_hash);
+        let wrap = |kind: &str, body: &str| {
+            crate::research::keep_wrap_for_tests(kind, day, cfg, outcome, body)
+        };
+        std::fs::write(
+            root.join("s").join(format!("{day}.log")),
+            wrap("research log", &log.render()),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("s").join(format!("{day}.trace")),
+            wrap("research trace", &tf_strategy::trace::render_all(&traces)),
+        )
+        .unwrap();
+        let j = data(&root, day, 0);
+        let t = j.get("tiers");
+        assert_eq!(t.get("day_events").s(), "7");
+        // This name held Tier 1 when the window began (the promotion just before it); the window's changes are listed, this name's
+        // marked and the other by its name; both edges are in and the changes just outside are not.
+        assert_eq!(
+            t.get("start").a().iter().map(J::s).collect::<Vec<_>>(),
+            [trip.symbol.as_str()]
+        );
+        assert_eq!(t.get("around_total").s(), "5");
+        let around = t.get("around").a();
+        assert_eq!(
+            around
+                .iter()
+                .map(|a| (a.get("symbol").s(), a.get("action").s()))
+                .collect::<Vec<_>>(),
+            [
+                (trip.symbol.as_str(), "promoted"),
+                (trip.symbol.as_str(), "promoted"),
+                ("ZZZ", "promoted"),
+                (trip.symbol.as_str(), "demoted"),
+                (trip.symbol.as_str(), "demoted")
+            ]
+        );
+        assert_eq!(
+            around
+                .iter()
+                .filter(|a| a.get("mine") == &J::Bool(true))
+                .count(),
+            4
+        );
+        assert_eq!(
+            around[1].get("reason").s(),
+            "scanner hit, volume z-score 9.200"
+        );
+        assert_eq!(around[2].get("reason").s(), "a strategy asked for it");
+        assert_eq!(around[3].get("reason").s(), "cooled off");
+        assert_eq!(
+            t.get("mine").a().len(),
+            6,
+            "all of this name's changes of the day"
+        );
+        // This name's changes in the window are markers on the chart, among the others in order; the ones outside are not.
+        let marks: Vec<(&str, &str)> = j
+            .get("marks")
+            .a()
+            .iter()
+            .map(|m| (m.get("kind").s(), m.get("us").s()))
+            .collect();
+        let kinds: Vec<&str> = marks.iter().map(|m| m.0).collect();
+        assert_eq!(
+            kinds,
+            [
+                "tier_up",
+                "tier_up",
+                "decision",
+                "fill",
+                "exit_decision",
+                "exit_fill",
+                "tier_down",
+                "tier_down"
+            ]
+        );
+        assert!(
+            j.get("marks").a()[1]
+                .get("label")
+                .s()
+                .contains("promoted to Tier 1: scanner hit")
+        );
+        let times: Vec<i64> = marks.iter().map(|m| m.1.parse().unwrap()).collect();
+        assert!(times.windows(2).all(|w| w[0] <= w[1]), "{times:?}");
+        // The rest of the page is as it was.
+        assert_eq!(j.get("orders").a().len(), 4);
+    }
+
+    /// The page's script is not run by any Rust test, so a syntax error in it would show only in a browser: have node read it, if
+    /// there is a node (CI has one; a machine without skips this).
+    #[test]
+    fn the_pages_script_is_valid_javascript() {
+        let page = include_str!("../viewer/trade.html");
+        let from = page.find("<script>\n").unwrap() + "<script>\n".len();
+        let script = &page[from..from + page[from..].find("</script>").unwrap()];
+        let dir = crate::replay_tests::scratch("page-js");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("page.js");
+        std::fs::write(&file, script).unwrap();
+        // No node on this machine: not checked here.
+        if let Ok(out) = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&file)
+            .output()
+        {
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }

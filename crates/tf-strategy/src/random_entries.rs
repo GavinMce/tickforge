@@ -30,6 +30,7 @@ use crate::exits::{ExitBook, ExitPlan, ExitStats};
 use crate::intent::{IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif};
 use crate::lifecycle::OrderUpdate;
 use crate::strategy::{Ctx, Request, TimerId};
+use crate::trace::Trace;
 
 /// The `reason` code of this strategy's entries.
 pub const REASON_ENTRY: u16 = 1;
@@ -255,6 +256,16 @@ pub struct RandomEntries {
     picks: Vec<InstrumentId>,
     entries: BTreeMap<IntentId, Entry>,
     stats: RandomEntriesStats,
+    tracing: bool,
+    traces: Vec<Trace>,
+}
+
+/// What came of a drawn name's time, and what it was judged on.
+struct Judged {
+    result: &'static str,
+    bid: Option<i64>,
+    ask: Option<i64>,
+    qty: u32,
 }
 
 impl RandomEntries {
@@ -269,6 +280,8 @@ impl RandomEntries {
             picks: Vec::new(),
             entries: BTreeMap::new(),
             stats: RandomEntriesStats::default(),
+            tracing: false,
+            traces: Vec::new(),
         })
     }
 
@@ -309,6 +322,7 @@ impl RandomEntries {
         ids.truncate(k);
         let lo = u64::from(self.p.window_end_minutes) * 60;
         let span = u64::from(self.p.window_start_minutes) * 60 - lo + 1;
+        let mut draws: Vec<(InstrumentId, u64)> = Vec::new();
         for (i, id) in ids.into_iter().enumerate() {
             let secs = lo + rng.below(span as usize) as u64;
             ctx.set_timer(
@@ -317,38 +331,83 @@ impl RandomEntries {
             );
             self.picks.push(id);
             self.stats.drawn += 1;
+            draws.push((id, secs));
+        }
+        if self.tracing {
+            let mut t = Trace::new(ctx.now(), "draw")
+                .with("seed", self.p.seed)
+                .with("close", close)
+                .with("names", self.p.names)
+                .with("members", n)
+                .with("drawn", draws.len())
+                .with("window_start_minutes", self.p.window_start_minutes)
+                .with("window_end_minutes", self.p.window_end_minutes)
+                .with_columns(&["k", "instrument", "secs_before_close"]);
+            for (k, (id, secs)) in draws.iter().enumerate() {
+                t.push_row(vec![k.to_string(), id.to_string(), secs.to_string()]);
+            }
+            self.traces.push(t);
         }
     }
 
-    /// Buy the name drawn, if it can be bought now.
-    fn enter(&mut self, ctx: &mut Ctx<'_>, view: &MemberView<'_>, id: InstrumentId) {
+    fn skipped(
+        &mut self,
+        why: &'static str,
+        bid: Option<i64>,
+        ask: Option<i64>,
+        qty: u32,
+    ) -> Judged {
+        self.stats.skipped += 1;
+        Judged {
+            result: why,
+            bid,
+            ask,
+            qty,
+        }
+    }
+
+    /// Buy the name drawn, if it can be bought now: what came of it.
+    fn try_enter(&mut self, ctx: &mut Ctx<'_>, view: &MemberView<'_>, id: InstrumentId) -> Judged {
         // Not reachable: the names drawn are members. Kept so that a name the view does not know is a skip, not a panic.
         let Some(st) = view.state(id) else {
-            self.stats.skipped += 1;
-            return;
+            return self.skipped("unknown", None, None, 0);
         };
-        let quote = st.bid.zip(st.ask).map(|(b, a)| (b.0.raw(), a.0));
-        let Some((_, ask)) = quote.filter(|&(b, a)| !st.halted && !st.ssr && b > 0 && a.raw() >= b)
-        else {
-            self.stats.skipped += 1;
-            return;
+        let (bid, ask) = (st.bid.map(|l| l.0.raw()), st.ask.map(|l| l.0.raw()));
+        if st.halted {
+            return self.skipped("halted", bid, ask, 0);
+        }
+        if st.ssr {
+            return self.skipped("restricted", bid, ask, 0);
+        }
+        let (Some(b), Some(a)) = (bid, ask) else {
+            return self.skipped("no_quote", bid, ask, 0);
         };
-        let qty = u128::from(self.p.dollars) * 1_000_000_000 / ask.raw().max(1) as u128;
-        let stop = i128::from(ask.raw()) * i128::from(1_000 - self.p.stop_permille) / 1_000;
-        let (Ok(qty), Ok(stop)) = (u32::try_from(qty), i64::try_from(stop)) else {
-            self.stats.skipped += 1;
-            return;
+        if b <= 0 {
+            return self.skipped("no_quote", bid, ask, 0);
+        }
+        if a < b {
+            return self.skipped("crossed_quote", bid, ask, 0);
+        }
+        let qty = u128::from(self.p.dollars) * 1_000_000_000 / a.max(1) as u128;
+        let Ok(qty) = u32::try_from(qty) else {
+            return self.skipped("no_share", bid, ask, 0);
         };
-        if qty == 0 || stop <= 0 {
-            self.stats.skipped += 1;
-            return;
+        if qty == 0 {
+            return self.skipped("no_share", bid, ask, 0);
+        }
+        let stop = i128::from(a) * i128::from(1_000 - self.p.stop_permille) / 1_000;
+        let Ok(stop) = i64::try_from(stop) else {
+            return self.skipped("no_stop", bid, ask, qty);
+        };
+        if stop <= 0 {
+            return self.skipped("no_stop", bid, ask, qty);
         }
         let req = Request {
             side: Side::Buy,
             qty,
             purpose: Purpose::Open,
             pricing: Pricing::Collar {
-                reference: ask,
+                reference: Px::from_raw(a),
                 collar_permille: self.p.collar_permille,
             },
             protect: Some(Protective {
@@ -369,10 +428,36 @@ impl RandomEntries {
                         seen: 0,
                     },
                 );
+                Judged {
+                    result: "entered",
+                    bid,
+                    ask,
+                    qty,
+                }
             }
             // Not reachable with parameters that pass `validate`, as for the closing reversal; kept for the day the
             // framework's checks change.
-            Err(_) => self.stats.skipped += 1,
+            Err(_) => self.skipped("refused", bid, ask, qty),
+        }
+    }
+
+    /// The `k`th name drawn has its time: buy it if it can be, and say what came of it.
+    fn enter(&mut self, ctx: &mut Ctx<'_>, view: &MemberView<'_>, k: usize, id: InstrumentId) {
+        let j = self.try_enter(ctx, view, id);
+        if self.tracing {
+            let num = |v: Option<i64>| v.map_or(String::new(), |v| v.to_string());
+            let mut t = Trace::new(ctx.now(), "entry")
+                .with("close", self.close.unwrap_or(0))
+                .with_columns(&["k", "instrument", "result", "bid", "ask", "qty"]);
+            t.push_row(vec![
+                k.to_string(),
+                id.to_string(),
+                j.result.to_owned(),
+                num(j.bid),
+                num(j.ask),
+                j.qty.to_string(),
+            ]);
+            self.traces.push(t);
         }
     }
 }
@@ -412,13 +497,24 @@ impl CrossStrategy for RandomEntries {
         let drawn = timer
             .0
             .checked_sub(ENTRY_TIMERS)
-            .and_then(|k| self.picks.get(k as usize).copied());
+            .and_then(|k| self.picks.get(k as usize).map(|&id| (k as usize, id)));
         match drawn {
-            Some(id) => self.enter(ctx, view, id),
+            Some((k, id)) => self.enter(ctx, view, k, id),
             None => {
                 self.book.on_timer(ctx, timer);
             }
         }
+    }
+
+    fn set_tracing(&mut self, on: bool) {
+        self.tracing = on;
+        if !on {
+            self.traces.clear();
+        }
+    }
+
+    fn take_traces(&mut self) -> Vec<Trace> {
+        std::mem::take(&mut self.traces)
     }
 
     fn on_order_update(&mut self, ctx: &mut Ctx<'_>, update: &OrderUpdate) {

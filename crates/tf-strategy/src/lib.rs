@@ -16,6 +16,7 @@
 //! - [`broker`]: what a broker looks like to the system (placement outcomes, events), implemented by [`sim`] and the Alpaca adapter.
 //! - [`exits`]: stops, targets and time exits a strategy holds itself, for the extended hours and for simulation.
 //! - [`cross`]: strategies over many symbols (periodic review of a member view).
+//! - [`trace`]: why a cross strategy acted: the evidence of a decision, as text that reads back exactly (E19-S32).
 //! - [`strategy`]: the [`Strategy`] trait, its [`Ctx`] and the [`Host`] that drives it.
 
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
@@ -35,6 +36,7 @@ pub mod session_rules;
 pub mod sim;
 pub mod strategy;
 pub mod testing;
+pub mod trace;
 pub mod trend;
 
 pub use closing_reversal::{ClosingReversal, ClosingReversalParams, ClosingReversalStats};
@@ -59,6 +61,7 @@ pub use sim::{
 pub use strategy::{BarsError, Ctx, Host, MAX_TIMER_FIRES_PER_STEP, Request, Strategy, TimerId};
 pub use tf_engine::{MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe};
 pub use tf_params::{ParamStore, Proposal, Target};
+pub use trace::{Trace, TraceError};
 pub use trend::{TrendLong, TrendParams, TrendStats};
 
 #[cfg(test)]
@@ -87,5 +90,7 @@ mod sim_tests;
 mod strategy_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trace_tests;
 #[cfg(test)]
 mod trend_tests;

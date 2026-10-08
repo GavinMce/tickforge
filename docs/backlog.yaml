@@ -2123,7 +2123,28 @@ epics:
       - id: E19-S32
         jira: TIC-186
         title: "Strategies record why they acted: a trace hook on cross strategies, with traces for T04 and T14"
-        status: todo
+        status: done
+        evidence: >
+          ADR 0063. tf_strategy::Trace (a time, a kind, named values and a table of text: deterministic text with a checksum,
+          `traces v1`, that reads back exactly and refuses a damaged, cut or altered file) and two default methods on
+          CrossStrategy, set_tracing and take_traces, passed through the type-erased runner; Host::with_traces() asks every
+          strategy (now and added later) and collects what they record beside their intents, by strategy number, with the
+          `instrument` column turned into symbols; Host::take_traces(). The traces are not in the decision log, so the replay
+          check compares the same thing it always did. T04's `assess` is the one function that says whether a name may be bought
+          and why not, and both the decision and the trace call it, so the trace cannot say what the decision did not do; its
+          `rank` trace is the whole cross-section at the decision (the eligible ranked by return, then the rest by number:
+          prior close, the price at 15:00 and its source tier0, snapshot or none, return in ppm, bid, ask, and a status entered,
+          not_chosen, skipped:no_share, skipped:no_stop or skipped: halted, restricted, no_prior, no_price, no_quote,
+          crossed_quote, not_extreme, wide_spread); T14's `draw` (names and seconds before the close, the seed) and an `entry` per
+          name with its result and what it was judged on. Tests: the format (round trip, awkward characters, 18 kinds of damage,
+          a trailer cut off a value that says end, symbol resolution), T04's table row by row on a nine-name afternoon covering
+          every status, the price source, the filters, the names the money does not buy, a prior close of exactly nothing, T14's
+          draw and every reason an entry was not made, and a day traced and untraced deciding identically at three levels
+          (the strategy, the intents and exits and counts, and through the host the decision log and the fills). Mutation run,
+          140 mutants of the trace module, both strategies and the host's switch: 5 survivors on the first run, 4 given a test (a
+          default that was never set, a prior of exactly zero, a trailer cut off a value that says end); 1 remains, unreachable:
+          the count of entries the framework's own checks refuse. Not here: keeping traces with the results and a view of
+          them (E19-S33 to E19-S35).
         deps: [E19-S13, E19-S18, E19-S28]
         ac:
           - "A cross strategy can hand back traces (default none) that the host collects beside the decision log; recording changes no decision (a test runs a day traced and untraced and compares the logs, as ADR 0025 does for the entry trace)"
@@ -2146,7 +2167,7 @@ epics:
         ac:
           - "The run catalog lists a research scenario (its strategies, days, budget tree and cost model) beside the backtests, paper and live runs, kept apart from them; the workspace's backtests view lists scenarios, then days, then strategies"
           - "A trade table for a strategy and day: symbol, entry and exit times, side, size, prices, net in basis points and dollars, R where it means something, exit reason; sortable and filterable by symbol, side and result; a count of trades the strategy was refused (gateway, broker) beside it"
-          - "Read-only like the rest of the workspace: no route from a request to an order, a budget change or a file write"
+          - "The backtest routes are GET-only and behind the workspace's sign-in: nothing in them writes a file, places an order or changes a budget (the workspace's budget routes are separate and stay as they are)"
       - id: E19-S35
         jira: TIC-189
         title: "Backtest view: replay one trade"

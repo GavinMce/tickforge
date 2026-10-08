@@ -2275,7 +2275,7 @@ epics:
         jira: TIC-192
         title: "Dev environment: the workspace and the backtest view deployed on the homelab Kubernetes cluster"
         status: todo
-        deps: [E19-S34, E17-S09]
+        deps: [E19-S34, E19-S41, E17-S09]
         ac:
           - "A container image of the workspace service and viewer is built in CI; Kustomize manifests are in the repository; they deploy to one namespace of the homelab cluster (Talos, behind Traefik and cert-manager) with TLS, with results and evidence on a persistent volume or a MinIO bucket"
           - "The deployment tooling names the cluster and refuses any other kubectl context, and never changes the operator's current context (a work cluster is configured on the same machine)"
@@ -2315,3 +2315,47 @@ epics:
           - "Each day keeps, with its other companions, the host's trace of its executions: the strategy, symbol, time, side, purpose, reason, shares, price, the reference price and the stop trigger of its protective orders; a day kept before this says so on the page and shows the rest"
           - "The trade page has a strategy panel: name and parameters, the universe filter as written, where the strategy's own account names the symbol, and for each execution the reference price, the fill, what it cost against the reference, the protective stop and its distance from the fill, and for an exit why it exited"
           - "It does not claim the symbol passed the universe filter (the features are not kept with the results); the panel is checked in a browser"
+      - id: E19-S41
+        jira: TIC-195
+        title: "Replay day is a live day: a research day runs the host over a file ledger and writes the daily report"
+        status: done
+        evidence: >-
+          ADR 0068. A research day now runs the host (Tier 0, the promoter and Tier 1, the strategies, the gateway, the simulated broker)
+          over a file ledger in the day's own directory, `<date>.ledger/` (`run_day_to`; `replay_host_on` is generic over the store, so
+          the live and the replayed host are built by the same code), and writes the host's own daily report beside it
+          (`<date>.report.txt`, the same `DailyReport`, with its Tier 1 line and "not measured" for what only a live day measures). The
+          ledger is made durable when the day ends (`FileStore::open_buffered`; the bytes equal the synced store's, tested), not at every
+          record. The report carries the ledger's checksum: a ledger that is missing, cut, altered or taken from another day is refused
+          (`Results::ledger`) and the day is made again, never appended to. Tests: each day has the ledger and the report; the ledger read
+          as a live one is read (the catalog's sessions) gives, for every strategy and day, the trips' trade count and their gross profit,
+          and an entry and an exit fill each; two runs leave byte-identical ledgers and reports; a day made again leaves the same bytes;
+          a ledger swapped from another day, cut, gone, or a missing report are each refused and made again to the same files; the
+          buffered store conforms to the same suite as the synced one. Run for real over a T04 scenario: `tf ledger verify` replays a
+          replayed day's ledger and reproduces every recorded decision (110 records, 6 orders, the budgets in force). Full workspace 1,189
+          passed; clippy and fmt clean. Mutation run on the new code (run, store and replay): 2 survivors on the first run (which sync mode
+          a store opens in was not observable), given an accessor and a test, killed on the rerun. Not measured: a ledger's size and the
+          time of a whole-market day with a file ledger. Days stay independent (ADR 0068): an end-of-session rebalance is not wired into the
+          host, so nothing carries between days yet; revisit when it is.
+        deps: [E19-S35, E18-S12]
+        ac:
+          - "A research day is run as a live day is: the same host (Tier 0, the promoter and Tier 1, the strategies, the gateway, the simulated broker) over a file ledger written in the day's own directory, with the decision log and the daily report, the data coming from stored history instead of the gateway"
+          - "The ledger of a replayed day is the record of what happened: replaying it (tf ledger verify, the catalog's session reading) gives the same positions and the same profit as the trips the research harness keeps, and two runs of a day leave a byte-identical ledger"
+          - "A day made again does not append to an earlier ledger; the ledger of a replayed day does not fsync every record (a day is rerun if it did not finish)"
+      - id: E19-S42
+        jira: TIC-196
+        title: "Workspace shows replayed days from their ledgers beside live and paper sessions"
+        status: todo
+        deps: [E19-S41, E17-S09, E17-S11]
+        ac:
+          - "tf serve reads the ledgers of replayed days as backtest sessions: the run catalog lists them (kind backtest, kept apart from paper and live), and the run view and the overview (budgets, use, day P&L, strategy state, refusals) open for a replayed day as they do for a live one"
+          - "Days made before the ledgers existed are listed without them and say so; a damaged ledger is refused with its reason and does not hide the others"
+          - "Read only, as the rest of the workspace; the page is checked in a browser"
+      - id: E19-S43
+        jira: TIC-197
+        title: "Trade replay shows the engine's tiers: scanner hit, promotion, demotion and the names in Tier 1"
+        status: todo
+        deps: [E19-S41, E19-S35]
+        ac:
+          - "The trade page shows what the engine did with the symbol and the names around it: when the scanner promoted it (with the score and reason the engine recorded), when it was demoted, and which names held Tier 1 at the cursor, from the day's decision log"
+          - "A trade of a strategy that never asked for Tier 1 says so; a day with no tier records says so"
+          - "Checked in a browser"

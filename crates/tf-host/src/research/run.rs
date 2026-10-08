@@ -5,7 +5,8 @@
 //! latency. What the strategies did is turned into round trips ([`super::trips`]) and the day's file is written. Nothing
 //! is run per strategy: twenty definitions cost one read of the day's data.
 //!
-//! **A day is one unit.** Days are independent: a fresh host, an empty ledger and the day's own reference snapshot (the
+//! **A day is one unit.** Days are independent: a fresh host, an empty ledger (a file ledger in the day's own directory,
+//! `<date>.ledger`, written as a live day's is, with the daily report beside it) and the day's own reference snapshot (the
 //! caller gives it per day: what was known before that session, see E19-S04). Positions are not carried overnight; a
 //! trip open when the day's events end is closed at the last trade and flagged. A day's events are one file or several
 //! (a store's day), read in a first pass for the names of the instruments and again for the run, exactly as the host's
@@ -41,7 +42,8 @@ use super::trips::{Assembler, COLUMNS, Trip, Who};
 use crate::def::{StrategyDef, fnv};
 use crate::equiv::{Log, Rec};
 use crate::host::{FillNote, HostConfig, HostError, Reference};
-use crate::replay::{learn_symbols, replay_host};
+use crate::replay::{learn_symbols, replay_host_on};
+use tf_ledger::{FileStore, LedgerStore, MemStore};
 
 pub const CONFIG_FILE: &str = "research.cfg";
 const CONFIG_HEADER: &str = "research config v1";
@@ -50,6 +52,10 @@ const EXT: &str = ".trips";
 const LOG_EXT: &str = ".log";
 const TRACE_EXT: &str = ".trace";
 const EVIDENCE_EXT: &str = ".evidence.zst";
+/// A day's ledger: a directory holding the file ledger the day's host wrote, as a live day's does.
+const LEDGER_EXT: &str = ".ledger";
+/// A day's report, the one the live host writes at the end of a day.
+const REPORT_EXT: &str = ".report.txt";
 
 #[derive(Debug)]
 pub enum ResearchError {
@@ -137,6 +143,8 @@ pub struct DayOutcome {
     pub traces: Vec<(u16, Trace)>,
     /// The names of the day's instruments, as the run numbered them.
     pub symbols: tf_core::SymbolTable,
+    /// The daily report the host writes at the end of a live day (what each strategy did, refusals, Tier 1 use).
+    pub report: String,
 }
 
 /// What a run did.
@@ -522,6 +530,24 @@ impl Results {
                 &render_all(&out.traces),
             ),
         )?;
+        // The report, and with it the checksum of the day's ledger, so that a ledger of another day or run is not taken for this one.
+        let ledger = self.ledger_path(date);
+        let bytes = fs::read(&ledger).map_err(|e| io(&ledger, e))?;
+        write_whole(
+            &self.companion(date, REPORT_EXT),
+            &keep::wrap(
+                "research report",
+                date,
+                fp,
+                outcome,
+                &format!(
+                    "{}ledger {:016x} {}\n",
+                    out.report,
+                    fnv(&[&bytes]),
+                    bytes.len()
+                ),
+            ),
+        )?;
         let path = self.companion(date, EVIDENCE_EXT);
         match evidence {
             Some(e) => {
@@ -545,6 +571,51 @@ impl Results {
         keep::unwrap(kind, &text, date, self.fingerprint, outcome)
             .map(str::to_owned)
             .map_err(|m| ResearchError::Results(format!("{}: {m}", path.display())))
+    }
+
+    /// The directory of a day's file ledger (it holds `ledger.log`, as a live ledger does).
+    pub fn ledger_dir(&self, date: &str) -> PathBuf {
+        self.companion(date, LEDGER_EXT)
+    }
+
+    fn ledger_path(&self, date: &str) -> PathBuf {
+        self.ledger_dir(date).join("ledger.log")
+    }
+
+    /// The report text and the checksum line the report was kept with.
+    fn report_and_seal(&self, date: &str) -> Result<(String, String), ResearchError> {
+        let body = self.read_companion(date, REPORT_EXT, "research report")?;
+        let path = self.companion(date, REPORT_EXT);
+        match body.trim_end_matches('\n').rsplit_once('\n') {
+            Some((report, seal)) if seal.starts_with("ledger ") => {
+                Ok((format!("{report}\n"), seal.to_owned()))
+            }
+            _ => Err(ResearchError::Results(format!(
+                "{}: no ledger line",
+                path.display()
+            ))),
+        }
+    }
+
+    /// The day's report, as the host wrote it at the end of the day, checked to be that day's.
+    pub fn report(&self, date: &str) -> Result<String, ResearchError> {
+        Ok(self.report_and_seal(date)?.0)
+    }
+
+    /// The directory of a day's file ledger, checked to be the one the day's report says it made: a ledger that is missing,
+    /// cut, altered, or of another day or run is refused.
+    pub fn ledger(&self, date: &str) -> Result<PathBuf, ResearchError> {
+        let (_, seal) = self.report_and_seal(date)?;
+        let path = self.ledger_path(date);
+        let bytes = fs::read(&path).map_err(|e| io(&path, e))?;
+        let now = format!("ledger {:016x} {}", fnv(&[&bytes]), bytes.len());
+        if now != seal {
+            return Err(ResearchError::Results(format!(
+                "{}: the ledger is not the one the day's report was made with",
+                path.display()
+            )));
+        }
+        Ok(self.ledger_dir(date))
     }
 
     /// The host's decision log of a day, checked to be that day's, under this configuration, with that outcome.
@@ -579,6 +650,7 @@ impl Results {
     fn companions_ok(&self, date: &str, with_evidence: bool) -> bool {
         self.log(date).is_ok()
             && self.traces(date).is_ok()
+            && self.ledger(date).is_ok()
             && (!with_evidence || self.evidence(date).is_ok())
     }
 }
@@ -740,11 +812,37 @@ pub(crate) fn refusals(st: &crate::host::StrategyStats) -> u64 {
     st.refused_by_broker + st.rate_limited
 }
 
-/// One day through one host: the definitions, the events of `input`, the round trips.
+/// One day through one host: the definitions, the events of `input`, the round trips. The ledger is in memory.
 pub fn run_day(
     date: &str,
     input: &DayInput,
     setup: &Setup<'_>,
+) -> Result<DayOutcome, ResearchError> {
+    run_day_on(date, input, setup, MemStore::from_records(vec![]))
+}
+
+/// [`run_day`] over a file ledger in `ledger_dir`, which is made afresh: what an earlier run left there is removed first, so
+/// a day made again never adds to an old ledger. The ledger is made durable when the day ends, not at every record: a
+/// day that did not finish is run again.
+pub fn run_day_to(
+    date: &str,
+    input: &DayInput,
+    setup: &Setup<'_>,
+    ledger_dir: &Path,
+) -> Result<DayOutcome, ResearchError> {
+    if ledger_dir.exists() {
+        fs::remove_dir_all(ledger_dir).map_err(|e| io(ledger_dir, e))?;
+    }
+    let store = FileStore::open_buffered(ledger_dir)
+        .map_err(|e| ResearchError::Io(format!("{}: {e:?}", ledger_dir.display())))?;
+    run_day_on(date, input, setup, store)
+}
+
+fn run_day_on<S: LedgerStore>(
+    date: &str,
+    input: &DayInput,
+    setup: &Setup<'_>,
+    store: S,
 ) -> Result<DayOutcome, ResearchError> {
     let fail = |why: String| ResearchError::Day {
         date: date.to_owned(),
@@ -776,7 +874,7 @@ pub fn run_day(
         snapshot: input.snapshot.clone(),
     };
     let cfg = day_config(setup.host, setup.cost, times);
-    let mut host = replay_host(&cfg, &reference)
+    let mut host = replay_host_on(&cfg, &reference, store)
         .map_err(ResearchError::Host)?
         .with_fill_log()
         .with_traces();
@@ -891,6 +989,18 @@ pub fn run_day(
         ]);
     }
     traces.push((0, legs));
+    // The report the live host writes at the end of a day, from the same host.
+    let report = crate::DailyReport::build(
+        &host,
+        &format!("replay {date}"),
+        crate::SystemInputs {
+            ingest: None,
+            engine_lag: None,
+            capture: None,
+        },
+        None,
+    )
+    .render();
     Ok(DayOutcome {
         trips,
         events: host.events(),
@@ -913,6 +1023,7 @@ pub fn run_day(
         notes,
         traces,
         symbols: reference.symbols.clone(),
+        report,
     })
 }
 
@@ -926,7 +1037,7 @@ pub fn run(
     run_with(setup, source, dir, &RunOptions::default())
 }
 
-/// [`run`] with options. A day is there when its trips, its decision log and its traces are (and its evidence, if asked for):
+/// [`run`] with options. A day is there when its trips, its decision log, its traces, its report and its ledger are (and its evidence, if asked for):
 /// a day made without them is made again.
 pub fn run_with(
     setup: &Setup<'_>,
@@ -949,7 +1060,7 @@ pub fn run_with(
             }
         }
         let input = source.load(&date).map_err(day_err)?;
-        let out = run_day(&date, &input, setup)?;
+        let out = run_day_to(&date, &input, setup, &results.ledger_dir(&date))?;
         report.events += out.events;
         report.trips += out.trips.len() as u64;
         let evidence = match opts.evidence {

@@ -186,6 +186,8 @@ pub struct FileStore {
     lock: PathBuf,
     file: Option<File>,
     last: Option<u64>,
+    /// Whether each append is made durable before it returns (a live day); a replayed day syncs when the store goes.
+    sync_each: bool,
 }
 
 fn io(path: &Path, e: std::io::Error) -> StoreError {
@@ -268,8 +270,19 @@ impl LedgerStore for ReadOnlyStore {
 }
 
 impl FileStore {
-    /// Open (creating if needed) the ledger in `dir`, taking its lock.
+    /// Open (creating if needed) the ledger in `dir`, taking its lock. Every append is synced before it returns.
     pub fn open(dir: impl AsRef<Path>) -> Result<FileStore, StoreError> {
+        FileStore::open_with(dir, true)
+    }
+
+    /// [`FileStore::open`] for a ledger that can be made again if it is lost: records are written as they come but made
+    /// durable only when the store is dropped, so a day replayed from history does not wait on the disk for every record.
+    /// A crash can lose the tail of what was written; the day is run again, as it would be if it had not finished.
+    pub fn open_buffered(dir: impl AsRef<Path>) -> Result<FileStore, StoreError> {
+        FileStore::open_with(dir, false)
+    }
+
+    fn open_with(dir: impl AsRef<Path>, sync_each: bool) -> Result<FileStore, StoreError> {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
         let lock = dir.join("ledger.lock");
@@ -287,7 +300,13 @@ impl FileStore {
             lock,
             file: None,
             last: None,
+            sync_each,
         })
+    }
+
+    /// Whether each append is made durable before it returns (`open`), or only when the store is dropped (`open_buffered`).
+    pub fn syncs_each_append(&self) -> bool {
+        self.sync_each
     }
 
     pub fn log_path(&self) -> &Path {
@@ -297,6 +316,9 @@ impl FileStore {
 
 impl Drop for FileStore {
     fn drop(&mut self) {
+        if let Some(f) = &self.file {
+            let _ = f.sync_all();
+        }
         let _ = std::fs::remove_file(&self.lock);
     }
 }
@@ -338,7 +360,9 @@ impl LedgerStore for FileStore {
         let line = frame(seq, payload);
         file.write_all(line.as_bytes())
             .map_err(|e| io(&self.log, e))?;
-        file.sync_data().map_err(|e| io(&self.log, e))?;
+        if self.sync_each {
+            file.sync_data().map_err(|e| io(&self.log, e))?;
+        }
         self.last = Some(seq);
         Ok(())
     }

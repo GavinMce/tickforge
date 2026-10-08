@@ -950,17 +950,23 @@ fn setup<'a>(host: &'a HostConfig, cost: &'a CostModel, defs: &'a [StrategyDef])
     Setup { host, cost, defs }
 }
 
+/// Every file of a results directory by its path under it, a day's ledger directory included.
 fn read_all(dir: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut v: Vec<(String, Vec<u8>)> = fs::read_dir(dir)
-        .unwrap()
-        .map(|e| {
+    fn walk(root: &Path, at: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in fs::read_dir(at).unwrap() {
             let p = e.unwrap().path();
-            (
-                p.file_name().unwrap().to_string_lossy().into_owned(),
-                fs::read(&p).unwrap(),
-            )
-        })
-        .collect();
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else {
+                out.push((
+                    p.strip_prefix(root).unwrap().to_string_lossy().into_owned(),
+                    fs::read(&p).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut v = Vec::new();
+    walk(dir, dir, &mut v);
     v.sort();
     v
 }
@@ -1024,8 +1030,8 @@ fn two_runs_of_the_same_days_and_definitions_leave_identical_files() {
     run(&setup(&host, &cost, &defs), &mut days, &a).unwrap();
     run(&setup(&host, &cost, &defs), &mut days, &b).unwrap();
     assert_eq!(read_all(&a), read_all(&b));
-    // The configuration, and for each of the three days its trips, its decision log and its traces.
-    assert_eq!(read_all(&a).len(), 10);
+    // The configuration, and for each of the three days its trips, its decision log, its traces, its report and its ledger.
+    assert_eq!(read_all(&a).len(), 16);
 }
 
 #[test]
@@ -3765,5 +3771,139 @@ mod trade_parts {
         assert_eq!(z.arr()[0].get("slip_bp").s(), "0.00");
         assert_eq!(z.arr()[0].get("slip").s(), "20.0100");
         assert_eq!(json(&legs_json(&[], &|_| 0)), J::Arr(vec![]));
+    }
+}
+
+// ---- a replayed day is a live day (E19-S41) ----
+
+mod live_day {
+    use super::*;
+    use tf_catalog::Kind;
+    use tf_ledger::ReadOnlyStore;
+
+    fn made(name: &str) -> (PathBuf, Results) {
+        let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+        let mut days = Days::new(&format!("{name}-days"), 3);
+        let dir = out_dir(&format!("{name}-out"));
+        run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+        let r = Results::open(&dir).unwrap();
+        (dir, r)
+    }
+
+    #[test]
+    fn each_day_has_the_file_ledger_and_the_daily_report_a_live_day_has() {
+        let (dir, r) = made("ld1");
+        for date in r.dates().unwrap() {
+            // The ledger is in the day's own directory, with the file a live ledger is, and no lock left behind.
+            let ledger = r.ledger(&date).unwrap();
+            assert_eq!(ledger, dir.join(format!("{date}.ledger")));
+            assert!(ledger.join("ledger.log").is_file() && !ledger.join("ledger.lock").exists());
+            // The report is the host's end-of-day report: what each strategy did, then the system.
+            let report = r.report(&date).unwrap();
+            assert!(report.contains("replay "), "{report}");
+            assert!(
+                report.contains("round1") && report.contains("round2"),
+                "{report}"
+            );
+            assert!(
+                !report.contains("ledger "),
+                "the seal is not part of the report"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ledger_and_the_trips_tell_the_same_story() {
+        let (_, r) = made("ld2");
+        for date in r.dates().unwrap() {
+            let trips = r.day(&date).unwrap().trips;
+            // Read as a live ledger is read: one session per strategy, with its trades and its profit.
+            let sessions = tf_catalog::sessions_detailed(
+                ReadOnlyStore::open(r.ledger(&date).unwrap()),
+                "replay",
+                Kind::Backtest,
+            )
+            .unwrap();
+            assert_eq!(sessions.len(), 2, "{date}");
+            for (run, detail) in &sessions {
+                let id: u16 = run.strategy.trim_start_matches('s').parse().unwrap();
+                let mine: Vec<&Trip> = trips.iter().filter(|t| t.strategy == id).collect();
+                assert_eq!(
+                    run.trades,
+                    Some(mine.len() as u64),
+                    "{date} {}",
+                    run.strategy
+                );
+                // The gateway's profit is before the regulatory fees and borrow: the trips' gross.
+                let gross: i128 = mine.iter().map(|t| i128::from(t.gross)).sum();
+                assert_eq!(run.net_pnl, Some(gross), "{date} {}", run.strategy);
+                assert_eq!(
+                    detail.fills.len(),
+                    mine.len() * 2,
+                    "an entry and an exit each"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_runs_leave_the_same_ledger_and_a_day_made_again_does_not_add_to_its_old_one() {
+        let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+        let mut days = Days::new("ld3-days", 3);
+        let (a, b) = (out_dir("ld3-a"), out_dir("ld3-b"));
+        run(&setup(&host, &cost, &defs), &mut days, &a).unwrap();
+        run(&setup(&host, &cost, &defs), &mut days, &b).unwrap();
+        let log = |d: &Path| fs::read(d.join("2026-05-04.ledger").join("ledger.log")).unwrap();
+        assert_eq!(log(&a), log(&b));
+        assert!(!log(&a).is_empty());
+        // Take the day's trips away: it is run again, over a ledger that is made afresh, to the same bytes.
+        let before = read_all(&a);
+        fs::remove_file(a.join("2026-05-04.trips")).unwrap();
+        let rep = run(&setup(&host, &cost, &defs), &mut days, &a).unwrap();
+        assert_eq!(rep.ran, ["2026-05-04"]);
+        assert_eq!(read_all(&a), before);
+    }
+
+    #[test]
+    fn a_day_without_its_ledger_or_with_another_one_is_refused_and_made_again() {
+        let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+        let mut days = Days::new("ld4-days", 3);
+        let dir = out_dir("ld4-out");
+        run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+        let before = read_all(&dir);
+        let r = Results::open(&dir).unwrap();
+        // The ledger of another day in its place is not this day's.
+        fs::copy(
+            dir.join("2026-05-01.ledger").join("ledger.log"),
+            dir.join("2026-05-04.ledger").join("ledger.log"),
+        )
+        .unwrap();
+        let err = r.ledger("2026-05-04").unwrap_err().to_string();
+        assert!(
+            err.contains("not the one the day's report was made with"),
+            "{err}"
+        );
+        let rep = run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+        assert_eq!(rep.ran, ["2026-05-04"]);
+        assert_eq!(read_all(&dir), before);
+        // Cut, gone, or a day made before there were ledgers: each is made again.
+        for damage in 0..3 {
+            let log = dir.join("2026-05-05.ledger").join("ledger.log");
+            match damage {
+                0 => {
+                    let b = fs::read(&log).unwrap();
+                    fs::write(&log, &b[..b.len() - 7]).unwrap();
+                }
+                1 => fs::remove_dir_all(dir.join("2026-05-05.ledger")).unwrap(),
+                _ => fs::remove_file(dir.join("2026-05-05.report.txt")).unwrap(),
+            }
+            assert!(
+                Results::open(&dir).unwrap().ledger("2026-05-05").is_err(),
+                "{damage}"
+            );
+            let rep = run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+            assert_eq!(rep.ran, ["2026-05-05"], "{damage}");
+            assert_eq!(read_all(&dir), before, "{damage}");
+        }
     }
 }

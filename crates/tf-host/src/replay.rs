@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tf_capture::CaptureReplay;
 use tf_core::{Event, Nanos, SymbolTable};
-use tf_ledger::MemStore;
+use tf_ledger::{LedgerStore, MemStore};
 use tf_provider::{Poll, Provider};
 use tf_strategy::sim::SimBroker;
 use tf_universe::Snapshot;
@@ -331,13 +331,18 @@ pub(crate) fn replay_host(
     cfg: &HostConfig,
     reference: &Reference,
 ) -> Result<Host<MemStore>, HostError> {
-    Ok(Host::new(
-        cfg.clone(),
-        reference.clone(),
-        MemStore::from_records(vec![]),
-    )?
-    .with_paper(Box::new(SimBroker::new(cfg.sim, cfg.id_space)))
-    .record())
+    replay_host_on(cfg, reference, MemStore::from_records(vec![]))
+}
+
+/// [`replay_host`] over the ledger store given: a replayed day written to disk is built like any other.
+pub(crate) fn replay_host_on<S: LedgerStore>(
+    cfg: &HostConfig,
+    reference: &Reference,
+    store: S,
+) -> Result<Host<S>, HostError> {
+    Ok(Host::new(cfg.clone(), reference.clone(), store)?
+        .with_paper(Box::new(SimBroker::new(cfg.sim, cfg.id_space)))
+        .record())
 }
 
 /// [`replay_capture`] over zstd-compressed DBN files in the order given: the segments of a capture, or the days of a

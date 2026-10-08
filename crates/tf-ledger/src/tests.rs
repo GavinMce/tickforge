@@ -474,6 +474,75 @@ fn the_file_store_conforms() {
     let _ = std::fs::remove_dir_all(&h.dir);
 }
 
+struct BufferedHarness {
+    dir: PathBuf,
+}
+
+impl Harness for BufferedHarness {
+    type Store = FileStore;
+    fn fresh(&mut self) -> FileStore {
+        let _ = std::fs::remove_dir_all(&self.dir);
+        FileStore::open_buffered(&self.dir).unwrap()
+    }
+    fn reopen(&mut self) -> FileStore {
+        FileStore::open_buffered(&self.dir).unwrap()
+    }
+    fn tear_tail(&mut self) -> bool {
+        let log = self.dir.join("ledger.log");
+        let bytes = std::fs::read(&log).unwrap();
+        std::fs::write(&log, &bytes[..bytes.len() - 5]).unwrap();
+        true
+    }
+}
+
+#[test]
+fn the_buffered_file_store_conforms_and_writes_the_same_bytes_as_the_synced_one() {
+    let mut h = BufferedHarness {
+        dir: scratch("conform-buffered"),
+    };
+    conformance(&mut h);
+    let _ = std::fs::remove_dir_all(&h.dir);
+    // The same records, the same file.
+    let (a, b) = (scratch("same-a"), scratch("same-b"));
+    let mut synced = FileStore::open(&a).unwrap();
+    let mut buffered = FileStore::open_buffered(&b).unwrap();
+    synced.load().unwrap();
+    buffered.load().unwrap();
+    for (i, r) in ["alpha", "beta 1 2 3", "gamma"].iter().enumerate() {
+        synced.append(i as u64 + 1, r).unwrap();
+        buffered.append(i as u64 + 1, r).unwrap();
+    }
+    // Written before it is dropped (a reader sees it), and complete after.
+    assert_eq!(
+        std::fs::read(a.join("ledger.log")).unwrap(),
+        std::fs::read(b.join("ledger.log")).unwrap()
+    );
+    drop((synced, buffered));
+    assert_eq!(
+        std::fs::read(a.join("ledger.log")).unwrap(),
+        std::fs::read(b.join("ledger.log")).unwrap()
+    );
+    assert!(
+        !b.join("ledger.lock").exists(),
+        "the lock goes with the store"
+    );
+    let mut again = FileStore::open_buffered(&b).unwrap();
+    assert_eq!(
+        again.load().unwrap().records,
+        ["alpha", "beta 1 2 3", "gamma"]
+    );
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+#[test]
+fn a_live_ledger_syncs_every_append_and_a_replayed_one_does_not() {
+    let d = scratch("sync-kind");
+    assert!(FileStore::open(&d).unwrap().syncs_each_append());
+    assert!(!FileStore::open_buffered(&d).unwrap().syncs_each_append());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 fn file_with(dir: &PathBuf, n: u64) -> FileStore {
     let _ = std::fs::remove_dir_all(dir);
     let mut s = FileStore::open(dir).unwrap();

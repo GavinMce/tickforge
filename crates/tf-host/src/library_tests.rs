@@ -900,7 +900,7 @@ fn a_t04_day_keeps_its_ranked_cross_section_and_the_market_around_its_trades() {
     for date in results.dates().unwrap() {
         // The day's one decision, with symbols: the three the strategy bought and the others ranked.
         let traces = results.traces(&date).unwrap();
-        assert_eq!(traces.len(), 3);
+        assert_eq!(traces.len(), 4);
         // The strategy's rank trace, the host's count of what it tried (three buys and three sells, all accepted) and the instruments.
         assert_eq!((traces[2].0, traces[2].1.kind.as_str()), (0, "instruments"));
         let mut names: Vec<&str> = traces[2].1.column("symbol").unwrap();
@@ -1282,6 +1282,58 @@ mod trade_view {
             mk.get("to_us").s().parse::<i64>().unwrap()
                 > j.get("exit_us").s().parse::<i64>().unwrap()
         );
+        // The strategy as configured, and what it asked for at each execution.
+        let def = j.get("def");
+        assert_eq!(def.get("name").s(), "t04");
+        assert!(
+            def.get("params").s().contains("stop_permille=100")
+                && def.get("params").s().contains("names=3")
+        );
+        assert!(def.get("universe").s().contains("adv_shares <= 600"));
+        let legs = j.get("legs").a();
+        assert_eq!(legs.len(), 2);
+        let (e, x) = (&legs[0], &legs[1]);
+        assert_eq!(
+            (
+                e.get("purpose").s(),
+                e.get("side").s(),
+                e.get("qty").s(),
+                e.get("time").s()
+            ),
+            ("open", "buy", "99", "15:30:00.050")
+        );
+        assert_eq!(
+            (e.get("reference").s(), e.get("px").s(), e.get("slip").s()),
+            ("20.0100", "20.0100", "0.0000")
+        );
+        assert_eq!(
+            (e.get("stop").s(), e.get("stop_pct").s()),
+            ("18.0090", "10.0")
+        );
+        assert_eq!(
+            (x.get("purpose").s(), x.get("side").s(), x.get("reason").s()),
+            ("close", "sell", "time exit")
+        );
+        assert_eq!(
+            (
+                x.get("reference").s(),
+                x.get("px").s(),
+                x.get("slip").s(),
+                x.get("slip_bp").s()
+            ),
+            ("19.4200", "19.4000", "0.0200", "10.29")
+        );
+        assert_eq!(x.get("stop"), &J::Null);
+        let listed = j.get("listed");
+        assert_eq!(
+            (
+                listed.get("kind").s(),
+                listed.get("row").s(),
+                listed.get("of").s(),
+                listed.get("status").s()
+            ),
+            ("rank", "1", "6", "entered")
+        );
         // Why: the rank, with the symbol's row marked, the prices as dollars and the close as a time.
         let ev = &j.get("evidence").a()[0];
         assert_eq!(ev.get("kind").s(), "rank");
@@ -1385,6 +1437,14 @@ mod trade_view {
                 .a()
                 .iter()
                 .any(|n| n.s().contains("kept before the host recorded"))
+        );
+        // Neither were the fills recorded: no legs, and the note says so.
+        assert_eq!(j.get("legs"), &J::Null);
+        assert!(
+            j.get("notes")
+                .a()
+                .iter()
+                .any(|n| n.s().contains("what each fill was for"))
         );
         assert_eq!(
             j.get("evidence").a().len(),

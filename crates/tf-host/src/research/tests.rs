@@ -1901,7 +1901,8 @@ fn a_run_keeps_each_days_log_and_traces_beside_its_trips_and_reads_them_back() {
                 (2, "buy"),
                 (1, "stats"),
                 (2, "stats"),
-                (0, "instruments")
+                (0, "instruments"),
+                (0, "fills")
             ]
         );
         // What each strategy was allowed to do and refused, from the host's counts: a buy and a sell each, accepted.
@@ -3133,7 +3134,8 @@ fn the_two_fees_of_a_sale_are_its_total() {
 
 mod trade_parts {
     use super::super::trade::{
-        Dec, fee_parts, instrument_of, marks_of, previous_exit, thin, trade_recs,
+        Dec, Leg, fee_parts, instrument_of, legs_json, legs_of, listed_in, marks_of, previous_exit,
+        tenths_pct, thin, trade_recs,
     };
     use super::*;
     use crate::equiv::{Answer, Rec};
@@ -3532,5 +3534,236 @@ mod trade_parts {
         let j = json(&trace_json(&t, "S"));
         let cells = j.get("rows").arr()[0].arr()[2].arr().to_vec();
         assert_eq!((cells[0].s(), cells[1].s()), ("20.0100", "20010000000"));
+    }
+
+    fn fills_trace(rows: &[[&str; 10]]) -> Trace {
+        let mut t = Trace::new(0, "fills").with_columns(&[
+            "strategy",
+            "symbol",
+            "ts",
+            "side",
+            "purpose",
+            "reason",
+            "qty",
+            "px",
+            "reference",
+            "stop",
+        ]);
+        for r in rows {
+            t.push_row(r.iter().map(|c| (*c).to_owned()).collect());
+        }
+        t
+    }
+
+    #[test]
+    fn the_legs_of_a_trade_are_the_strategys_fills_in_the_symbol_within_it_with_what_they_were_for()
+    {
+        let t = fills_trace(&[
+            [
+                "1",
+                "A",
+                "100",
+                "Buy",
+                "Open",
+                "1",
+                "10",
+                "20010000000",
+                "20000000000",
+                "18000000000",
+            ],
+            [
+                "1",
+                "A",
+                "200",
+                "Sell",
+                "Close",
+                "58627",
+                "10",
+                "19900000000",
+                "20000000000",
+                "-",
+            ],
+            ["2", "A", "150", "Buy", "Open", "1", "5", "1", "1", "-"],
+            ["1", "B", "150", "Buy", "Open", "1", "5", "1", "1", "-"],
+            ["1", "A", "300", "Buy", "Open", "1", "5", "1", "1", "-"],
+            ["1", "A", "bad", "Buy", "Open", "1", "5", "1", "1", "-"],
+        ]);
+        let traces = vec![(0, t)];
+        let legs = legs_of(&traces, 1, "A", 100, 200).unwrap();
+        assert_eq!(
+            legs.len(),
+            2,
+            "another strategy's, another symbol's, after the trade and unreadable rows are not here"
+        );
+        assert_eq!(
+            legs[0],
+            Leg {
+                ts: 100,
+                side: "Buy".into(),
+                purpose: "Open".into(),
+                reason: 1,
+                qty: 10,
+                px: 20_010_000_000,
+                reference: 20_000_000_000,
+                stop: Some(18_000_000_000)
+            }
+        );
+        assert_eq!(
+            (legs[1].ts, legs[1].stop, legs[1].reason),
+            (200, None, 58627)
+        );
+        // Both edges are inclusive.
+        assert_eq!(legs_of(&traces, 1, "A", 101, 200).unwrap().len(), 1);
+        assert_eq!(legs_of(&traces, 1, "A", 100, 199).unwrap().len(), 1);
+        // A day without the trace, or with another trace's columns, has none.
+        assert_eq!(legs_of(&[], 1, "A", 0, 1000), None);
+        assert_eq!(
+            legs_of(&[(1, fills_trace(&[]))], 1, "A", 0, 1000),
+            None,
+            "a strategy's trace is not the host's"
+        );
+        assert_eq!(
+            legs_of(&[(0, Trace::new(0, "fills"))], 1, "A", 0, 1000),
+            None
+        );
+        assert_eq!(
+            legs_of(&[(0, fills_trace(&[]))], 1, "A", 0, 1000),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn what_a_fill_cost_against_its_reference_is_positive_when_worse_for_a_buy_and_a_sale() {
+        let leg = |side: &str, px: i64, reference: i64| Leg {
+            ts: 0,
+            side: side.into(),
+            purpose: "Open".into(),
+            reason: 0,
+            qty: 1,
+            px,
+            reference,
+            stop: None,
+        };
+        assert_eq!(leg("Buy", 101, 100).slippage(), 1);
+        assert_eq!(leg("Buy", 99, 100).slippage(), -1);
+        assert_eq!(leg("Sell", 99, 100).slippage(), 1);
+        assert_eq!(leg("Sell", 101, 100).slippage(), -1);
+        assert_eq!(leg("SellShort", 99, 100).slippage(), 1);
+        assert_eq!(leg("Buy", 100, 100).slippage(), 0);
+    }
+
+    #[test]
+    fn the_distance_to_a_stop_is_in_tenths_of_a_percent_rounded() {
+        assert_eq!(tenths_pct(20_010_000_000, 18_009_000_000), "10.0");
+        assert_eq!(
+            tenths_pct(20_000_000_000, 22_000_000_000),
+            "10.0",
+            "a stop above a short's entry"
+        );
+        assert_eq!(tenths_pct(20_000_000_000, 19_990_000_000), "0.1");
+        assert_eq!(tenths_pct(20_000_000_000, 19_999_000_000), "0.0");
+        assert_eq!(tenths_pct(20_000_000_000, 19_999_900_000), "0.0");
+        assert_eq!(tenths_pct(1_000, 995), "0.5");
+        assert_eq!(tenths_pct(1_000, 994), "0.6");
+        assert_eq!(tenths_pct(0, 5), "0.0");
+        assert_eq!(tenths_pct(-5, 5), "0.0");
+        assert_eq!(tenths_pct(100, 0), "100.0");
+    }
+
+    #[test]
+    fn a_symbol_is_listed_where_the_strategys_own_trace_names_it_first() {
+        let mut a = Trace::new(1_777_924_800_000_000_000, "rank")
+            .with_columns(&["rank", "symbol", "status"]);
+        for (i, (s, st)) in [
+            ("X", "entered"),
+            ("Y", "skipped:halted"),
+            ("Z", "not_chosen"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            a.push_row(vec![(i + 1).to_string(), s.into(), st.into()]);
+        }
+        let mut b = Trace::new(0, "draw").with_columns(&["symbol"]);
+        b.push_row(vec!["Y".into()]);
+        let c = Trace::new(0, "x");
+        let own = [&c, &a, &b];
+        let j = json(&listed_in(&own, "Y").unwrap());
+        assert_eq!(
+            (
+                j.get("kind").s(),
+                j.get("row").s(),
+                j.get("of").s(),
+                j.get("status").s()
+            ),
+            ("rank", "2", "3", "skipped:halted")
+        );
+        assert!(j.get("time").s().ends_with(".000"));
+        assert_eq!(
+            json(&listed_in(&[&b], "Y").unwrap()).get("status"),
+            &J::Null,
+            "no status column"
+        );
+        assert_eq!(listed_in(&own, "Q"), None);
+        assert_eq!(listed_in(&[], "Y"), None);
+        // A symbol only in a later trace is found there.
+        let only_b = json(&listed_in(&[&a, &b], "Y").unwrap());
+        assert_eq!(only_b.get("kind").s(), "rank");
+        let mut d = Trace::new(0, "entry").with_columns(&["symbol"]);
+        d.push_row(vec!["W".into()]);
+        assert_eq!(
+            json(&listed_in(&[&a, &d], "W").unwrap()).get("kind").s(),
+            "entry"
+        );
+    }
+
+    #[test]
+    fn a_leg_is_written_with_its_slippage_in_dollars_and_basis_points_and_a_zero_reference_does_not_divide()
+     {
+        let leg = |px, reference| Leg {
+            ts: 1_500_000,
+            side: "Buy".into(),
+            purpose: "Open".into(),
+            reason: 0xE503,
+            qty: 7,
+            px,
+            reference,
+            stop: Some(18_000_000_000),
+        };
+        let j = json(&legs_json(&[leg(20_010_000_000, 20_000_000_000)], &|ts| {
+            (ts / 1000) as i64
+        }));
+        let l = &j.arr()[0];
+        assert_eq!(
+            (
+                l.get("us").s(),
+                l.get("side").s(),
+                l.get("purpose").s(),
+                l.get("qty").s()
+            ),
+            ("1500", "buy", "open", "7")
+        );
+        assert_eq!(
+            (
+                l.get("slip").s(),
+                l.get("slip_bp").s(),
+                l.get("reference").s(),
+                l.get("px").s()
+            ),
+            ("0.0100", "5.00", "20.0000", "20.0100")
+        );
+        assert_eq!(
+            (
+                l.get("stop").s(),
+                l.get("stop_pct").s(),
+                l.get("reason").s()
+            ),
+            ("18.0000", "10.0", "time exit")
+        );
+        // A price the strategy measured against nothing is not divided by.
+        let z = json(&legs_json(&[leg(20_010_000_000, 0)], &|_| 0));
+        assert_eq!(z.arr()[0].get("slip_bp").s(), "0.00");
+        assert_eq!(z.arr()[0].get("slip").s(), "20.0100");
+        assert_eq!(json(&legs_json(&[], &|_| 0)), J::Arr(vec![]));
     }
 }

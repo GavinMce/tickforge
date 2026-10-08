@@ -731,6 +731,10 @@ pub(crate) fn easy_to_borrow(reference: &Reference) -> BTreeSet<u32> {
 /// The kind of the host's trace of the instruments a day traded, by number and symbol (strategy 0 in a day's traces).
 pub const INSTRUMENTS: &str = "instruments";
 
+/// The kind of the host's trace of the day's executions (strategy 0 in a day's traces): what each was for, the price asked
+/// for and the stop.
+pub const FILLS: &str = "fills";
+
 /// What a strategy's orders met that was not the gateway's limits: the broker's refusals and the rate limit.
 pub(crate) fn refusals(st: &crate::host::StrategyStats) -> u64 {
     st.refused_by_broker + st.rate_limited
@@ -858,6 +862,35 @@ pub fn run_day(
         book.push_row(vec![i.to_string(), symbol(i)]);
     }
     traces.push((0, book));
+    // What each execution was for: the host's own (strategy 0) trace of the fills with the price the intent asked for and the
+    // stop its protective orders carried, which the round trip keeps only in total.
+    let mut legs = Trace::new(last, FILLS).with_columns(&[
+        "strategy",
+        "symbol",
+        "ts",
+        "side",
+        "purpose",
+        "reason",
+        "qty",
+        "px",
+        "reference",
+        "stop",
+    ]);
+    for n in &notes {
+        legs.push_row(vec![
+            n.strategy.to_string(),
+            symbol(n.instrument),
+            n.ts.to_string(),
+            format!("{:?}", n.side),
+            format!("{:?}", n.purpose),
+            n.reason.to_string(),
+            n.qty.to_string(),
+            n.px.to_string(),
+            n.reference.to_string(),
+            n.stop.map_or("-".to_owned(), |v| v.to_string()),
+        ]);
+    }
+    traces.push((0, legs));
     Ok(DayOutcome {
         trips,
         events: host.events(),

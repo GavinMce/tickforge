@@ -83,3 +83,4 @@ How:
 | [0064](0064-a-day-keeps-its-log-its-traces-and-the-market-around-its-trades-beside-its-trips.md) | A day keeps its log, its traces and the market around its trades beside its trips | Accepted |
 | [0065](0065-the-backtest-view-reads-a-results-directory-through-the-program-that-hosts-the-service-and-only-reads.md) | The backtest view reads a results directory through the program that hosts the service, and only reads | Accepted |
 | [0066](0066-a-trade-is-replayed-from-its-days-files-in-one-page-that-draws-only-what-has-happened-by-the-cursor.md) | A trade is replayed from its day's files in one page that draws only what has happened by the cursor | Accepted |
+| [0067](0067-the-replay-page-shows-the-strategy-as-configured-and-what-each-fill-was-asked-for.md) | The replay page shows the strategy as configured and what each fill was asked for | Accepted |

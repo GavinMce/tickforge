@@ -81,6 +81,16 @@ struct Rig {
 impl Rig {
     /// `n` members; the day is `day` (none: the host has not told Tier 0).
     fn new(p: RandomEntriesParams, n: u32, day: Option<SessionTimes>) -> Rig {
+        Rig::with_tracing(p, n, day, false)
+    }
+
+    /// As [`Rig::new`], asking for traces from the start: the day is drawn while the rig warms up.
+    fn with_tracing(
+        p: RandomEntriesParams,
+        n: u32,
+        day: Option<SessionTimes>,
+        tracing: bool,
+    ) -> Rig {
         let mut tier0 = Tier0::new(n as usize + 1);
         let close = day.map_or(20 * 3600 * SEC, |d| d.close);
         if let Some(d) = day {
@@ -94,6 +104,9 @@ impl Rig {
             n,
             clock: n,
         };
+        if tracing {
+            rig.runner.set_tracing(true);
+        }
         // The first event arms the minute's review, the next one after it holds it: the strategy draws its day.
         rig.tick(4 * 3600);
         rig.tick(4 * 3600 - 61);
@@ -655,4 +668,132 @@ fn the_null_of_a_closing_reversal_is_its_own_names_dollars_collar_stop_entry_and
     // Its own filters have no null of their own; and the result is a valid null.
     assert_eq!((n.exit_stop_permille, n.target_permille), (0, 0));
     assert_eq!(n.validate(), Ok(()));
+}
+
+// ---- the traces (E19-S32) ----
+
+#[test]
+fn the_draw_and_each_entry_are_traced_and_a_strategy_not_asked_records_nothing() {
+    let params = RandomEntriesParams {
+        window_start_minutes: 31,
+        window_end_minutes: 30,
+        ..p(5, 3)
+    };
+    let mut rig = Rig::with_tracing(params, 10, Some(regular()), true);
+    let out = rig.draw();
+    let traces = rig.runner.drain_traces();
+    // The draw, first, then an entry for each name.
+    assert_eq!(
+        traces.iter().map(|t| t.kind.as_str()).collect::<Vec<_>>(),
+        ["draw", "entry", "entry", "entry"]
+    );
+    let d = &traces[0];
+    for (k, v) in [
+        ("seed", "5"),
+        ("names", "3"),
+        ("members", "10"),
+        ("drawn", "3"),
+        ("window_start_minutes", "31"),
+        ("window_end_minutes", "30"),
+    ] {
+        assert_eq!(d.value(k), Some(v), "{k}");
+    }
+    assert_eq!(d.value("close"), Some(rig.close.to_string().as_str()));
+    assert_eq!(d.columns, ["k", "instrument", "secs_before_close"]);
+    assert_eq!(d.column("k").unwrap(), ["0", "1", "2"]);
+    // What was drawn is what was bought, at the times drawn (the entries went out in the order of their times).
+    let mut drawn: Vec<(u32, u64)> = d
+        .column("instrument")
+        .unwrap()
+        .iter()
+        .zip(d.column("secs_before_close").unwrap())
+        .map(|(i, s)| (i.parse().unwrap(), s.parse().unwrap()))
+        .collect();
+    drawn.sort_by_key(|&(i, s)| (std::cmp::Reverse(s), i));
+    let bought: Vec<(u32, u64)> = out
+        .iter()
+        .map(|i| (i.instrument, (rig.close - i.ts) / SEC))
+        .collect();
+    assert_eq!(bought, drawn);
+    // Each entry: what it was and what it was judged on.
+    for t in &traces[1..] {
+        assert_eq!(
+            t.columns,
+            ["k", "instrument", "result", "bid", "ask", "qty"]
+        );
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(
+            t.rows[0][2..],
+            ["entered", "19990000000", "20010000000", "99"]
+        );
+    }
+    // Not asked, nothing recorded; and the same day decides the same.
+    let mut quiet = Rig::new(params, 10, Some(regular()));
+    let out2 = quiet.draw();
+    assert!(quiet.runner.drain_traces().is_empty());
+    assert_eq!(format!("{out:?}"), format!("{out2:?}"));
+    assert_eq!(
+        rig.runner.strategy().stats(),
+        quiet.runner.strategy().stats()
+    );
+}
+
+#[test]
+fn an_entry_that_was_not_made_says_why() {
+    let mut rig = Rig::with_tracing(p(1, 6), 6, Some(regular()), true);
+    // 0 halted, 1 restricted, 2 never quoted, 3 crossed, 4 a bid of nothing, 5 fine.
+    rig.feed(status(0, rig.t(6000), StatusKind::TradingHalt));
+    rig.feed(status(1, rig.t(6000), StatusKind::ShortSaleRestriction));
+    for (i, bid, ask) in [
+        (0u32, 1999, 2001),
+        (1, 1999, 2001),
+        (3, 2001, 1999),
+        (4, 0, 2001),
+        (5, 1999, 2001),
+    ] {
+        rig.feed(quote(i, rig.t(5000) + u64::from(i), cents(bid), cents(ask)));
+    }
+    rig.tick(100);
+    let traces = rig.runner.drain_traces();
+    let mut by_instrument = std::collections::BTreeMap::new();
+    for t in traces.iter().filter(|t| t.kind == "entry") {
+        by_instrument.insert(t.rows[0][1].clone(), t.rows[0][2].clone());
+    }
+    let want: Vec<(String, String)> = [
+        ("0", "halted"),
+        ("1", "restricted"),
+        ("2", "no_quote"),
+        ("3", "crossed_quote"),
+        ("4", "no_quote"),
+        ("5", "entered"),
+    ]
+    .iter()
+    .map(|&(a, b)| (a.to_owned(), b.to_owned()))
+    .collect();
+    assert_eq!(by_instrument.into_iter().collect::<Vec<_>>(), want);
+    // The size and the stop.
+    let big = RandomEntriesParams {
+        dollars: u32::MAX,
+        ..p(1, 1)
+    };
+    let mut rig = Rig::with_tracing(big, 1, Some(regular()), true);
+    rig.feed(quote(0, rig.t(5000), 1, 1));
+    rig.tick(100);
+    let t = rig.runner.drain_traces();
+    assert_eq!(t[1].rows[0][2], "no_share");
+    let one = RandomEntriesParams {
+        dollars: 1,
+        ..p(1, 1)
+    };
+    let mut rig = Rig::with_tracing(one, 1, Some(regular()), true);
+    rig.feed(quote(0, rig.t(5000), 1, 1));
+    rig.tick(100);
+    let t = rig.runner.drain_traces();
+    assert_eq!(
+        (t[1].rows[0][2].as_str(), t[1].rows[0][5].as_str()),
+        ("no_stop", "1000000000")
+    );
+    // Turning tracing off drops what was kept.
+    rig.runner.set_tracing(false);
+    assert!(rig.runner.drain_traces().is_empty());
 }

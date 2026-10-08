@@ -772,3 +772,101 @@ fn the_spread_of_the_seeds_is_the_sample_standard_deviation_and_one_seed_has_non
     assert_eq!((one.seeds, one.traded, one.sd_of_means_bp), (1, 1, None));
     assert_eq!(one.mean_of_means_bp, one.means_bp[0]);
 }
+
+// ---- the traces through the host (E19-S32) ----
+
+#[test]
+fn a_day_traced_through_the_host_has_the_same_log_and_the_trace_names_the_symbols() {
+    use tf_strategy::trace::{parse_all, render_all};
+    let day = times(2026, 5, 1);
+    let cfg = cfg_for(day);
+    let (plain, plain_notes, evs) = play(day, 3, [1830, 1890, 1930]);
+    let mut h = host(&cfg).record().with_fill_log().with_traces();
+    h.install_for_test(&def(3));
+    for e in &evs {
+        h.on_event(e).unwrap();
+    }
+    h.end_of_day(evs.last().unwrap().ts_recv()).unwrap();
+    // The same decisions and fills.
+    assert_eq!(h.take_fill_notes(), plain_notes);
+    let (a, b) = (plain.log().unwrap(), h.log().unwrap());
+    assert_eq!(
+        compare(a, b, &reference().symbols),
+        Verdict::Equal {
+            records: a.recs.len()
+        }
+    );
+    // One trace of strategy 1: the six members, ranked, with symbols and not numbers.
+    let traces = h.take_traces();
+    assert_eq!(traces.len(), 1);
+    let (strategy, t) = &traces[0];
+    assert_eq!((*strategy, t.kind.as_str()), (1, "rank"));
+    assert_eq!(t.columns[1], "symbol");
+    // Returns of -10%, -5%, -4%, -2%, 0 and +2% against a prior close of 20.00: S00, S01 and S04 are the three bought.
+    assert_eq!(
+        t.column("symbol").unwrap(),
+        ["S00", "S01", "S04", "S02", "S05", "S03"]
+    );
+    assert_eq!(
+        t.column("status").unwrap(),
+        [
+            "entered",
+            "entered",
+            "entered",
+            "not_chosen",
+            "not_chosen",
+            "not_chosen"
+        ]
+    );
+    assert_eq!(
+        t.rows[0][2..6],
+        ["20000000000", "18000000000", "tier0", "-100000"]
+    );
+    assert_eq!(t.ts, day.close - 1800 * SEC);
+    // The text of the day's traces reads back, and is taken once.
+    assert_eq!(parse_all(&render_all(&traces)).unwrap(), traces);
+    assert!(h.take_traces().is_empty());
+    // A host not asked has none, and one asked after the strategy was added has them too.
+    assert!(plain.log().is_some());
+    let mut late = host(&cfg).record();
+    late.install_for_test(&def(3));
+    let mut late = late.with_traces();
+    for e in &evs {
+        late.on_event(e).unwrap();
+    }
+    assert_eq!(late.take_traces().len(), 1);
+    let mut quiet = host(&cfg).record();
+    quiet.install_for_test(&def(3));
+    for e in &evs {
+        quiet.on_event(e).unwrap();
+    }
+    assert!(quiet.take_traces().is_empty());
+}
+
+#[test]
+fn the_null_strategys_draw_and_entries_are_traced_through_the_host_with_symbols() {
+    let day = times(2026, 5, 1);
+    let cfg = cfg_for(day);
+    let null = null_defs(1, "null", &Spec::parse(LOW).unwrap(), null_base(), &[9]).unwrap();
+    let evs = events(&steady(day.close, |_, _| 2000));
+    let mut h = host(&cfg).record().with_traces();
+    h.install_for_test(&null[0]);
+    for e in &evs {
+        h.on_event(e).unwrap();
+    }
+    let traces = h.take_traces();
+    let kinds: Vec<&str> = traces.iter().map(|t| t.1.kind.as_str()).collect();
+    assert_eq!(kinds, ["draw", "entry", "entry", "entry"]);
+    let draw = &traces[0].1;
+    assert_eq!(draw.columns[1], "symbol");
+    for s in draw.column("symbol").unwrap() {
+        assert!(
+            ["S00", "S01", "S02", "S03", "S04", "S05"].contains(&s),
+            "{s}"
+        );
+    }
+    for (_, t) in &traces[1..] {
+        assert_eq!(t.columns[1], "symbol");
+        assert_eq!(t.rows[0][2], "entered");
+    }
+}

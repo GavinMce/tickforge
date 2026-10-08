@@ -23,6 +23,7 @@ use tf_universe::{Change, LiveFeature, LiveView, RefInfo, Selection, Tier0View};
 use crate::intent::{Intent, StrategyId};
 use crate::lifecycle::OrderUpdate;
 use crate::strategy::{Ctx, CtxState, MAX_TIMER_FIRES_PER_STEP, TimerId};
+use crate::trace::Trace;
 
 /// A set of instrument ids as a bitset: a test is one load and a mask.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -267,6 +268,15 @@ pub trait CrossStrategy: Send {
     /// The strategy's interest in `id` (a `request_tier1` that was granted) was lost: the symbol was
     /// evicted for a strategy of higher priority or demoted. Its holds are never lost this way.
     fn on_tier1_revoked(&mut self, _ctx: &mut Ctx<'_>, _view: &MemberView<'_>, _id: InstrumentId) {}
+
+    /// Whether to record [`Trace`]s of the decisions (the host asks before the day starts, and for a day that is to be viewed).
+    /// A strategy that traces must decide the same whether it does or not.
+    fn set_tracing(&mut self, _on: bool) {}
+
+    /// The traces recorded since the last call; none unless tracing was asked for.
+    fn take_traces(&mut self) -> Vec<Trace> {
+        Vec::new()
+    }
 }
 
 /// Drives one [`CrossStrategy`] from events the engine has already applied to the shared Tier 0.
@@ -513,6 +523,16 @@ impl<S: CrossStrategy> CrossRunner<S> {
 
     pub fn drain_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.state.out)
+    }
+
+    /// Ask the strategy to record traces, or to stop.
+    pub fn set_tracing(&mut self, on: bool) {
+        self.strategy.set_tracing(on);
+    }
+
+    /// The traces the strategy has recorded since the last call.
+    pub fn drain_traces(&mut self) -> Vec<Trace> {
+        self.strategy.take_traces()
     }
 
     pub fn strategy(&self) -> &S {

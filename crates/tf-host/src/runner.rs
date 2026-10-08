@@ -3,7 +3,7 @@
 use tf_core::{Event, InstrumentId, Nanos, TierChange};
 use tf_engine::{Promoter, SharedBars, Tier0};
 use tf_strategy::lifecycle::OrderUpdate;
-use tf_strategy::{CrossRunner, CrossStrategy, Intent, Market, Members};
+use tf_strategy::{CrossRunner, CrossStrategy, Intent, Market, Members, Trace};
 
 pub trait DynRunner: Send {
     fn on_event(
@@ -36,6 +36,10 @@ pub trait DynRunner: Send {
     );
     fn drain_intents(&mut self) -> Vec<Intent>;
     fn drain_tier_events(&mut self) -> Vec<TierChange>;
+    /// Ask the strategy to record traces of its decisions, or to stop.
+    fn set_tracing(&mut self, on: bool);
+    /// The traces recorded since the last call.
+    fn drain_traces(&mut self) -> Vec<Trace>;
     fn members(&self) -> &Members;
     fn members_mut(&mut self) -> &mut Members;
     fn reviews(&self) -> u64;
@@ -89,6 +93,14 @@ impl<S: CrossStrategy> DynRunner for CrossRunner<S> {
 
     fn drain_tier_events(&mut self) -> Vec<TierChange> {
         CrossRunner::drain_tier_events(self)
+    }
+
+    fn set_tracing(&mut self, on: bool) {
+        CrossRunner::set_tracing(self, on);
+    }
+
+    fn drain_traces(&mut self) -> Vec<Trace> {
+        CrossRunner::drain_traces(self)
     }
 
     fn members(&self) -> &Members {

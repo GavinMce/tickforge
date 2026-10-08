@@ -9,7 +9,7 @@ use tf_strategy::broker::{Broker, BrokerEvent, CancelOutcome, Kind, Submission};
 use tf_strategy::intent::{Intent, IntentId, Pricing, Purpose, Side, StrategyId, Tif};
 use tf_strategy::lifecycle::{Decision, OrderId, OrderState, OrderUpdate};
 use tf_strategy::sim::{Borrow, SimBroker, SimConfig};
-use tf_strategy::{Market, Members};
+use tf_strategy::{Market, Members, Trace};
 use tf_universe::{RefInfo, Selection, Selector, Snapshot, StaticFeature, Tier0View, select};
 
 use crate::def::{Certificate, Route, StrategyDef};
@@ -231,6 +231,9 @@ pub struct Host<S: LedgerStore> {
     first_ts: Option<Nanos>,
     gaps: Vec<GapNote>,
     fill_log: Option<FillLog>,
+    /// Whether strategies are asked to trace their decisions, and what they have traced so far, by strategy number.
+    trace_on: bool,
+    traces: Vec<(u16, Trace)>,
 }
 
 /// One execution and what the order it belongs to was for (E19-S13): what a research run needs to turn fills into
@@ -355,6 +358,8 @@ impl<S: LedgerStore> Host<S> {
             first_ts: None,
             gaps: Vec::new(),
             fill_log: None,
+            trace_on: false,
+            traces: Vec::new(),
             reference,
             cfg,
         })
@@ -365,6 +370,22 @@ impl<S: LedgerStore> Host<S> {
     pub fn record(mut self) -> Self {
         self.log = Some(Log::new(self.cfg.id_space, &self.reference.symbols));
         self
+    }
+
+    /// Ask every strategy that can to record why it acted ([`Trace`]), now and for those added later. Call before the first
+    /// event. Recording changes no decision: a day traced and untraced has the same log.
+    pub fn with_traces(mut self) -> Self {
+        self.trace_on = true;
+        for slot in &mut self.slots {
+            slot.runner.set_tracing(true);
+        }
+        self
+    }
+
+    /// The traces recorded since the last call, by the number of the strategy, in the order they were recorded. The
+    /// instrument numbers of a trace are symbols by now.
+    pub fn take_traces(&mut self) -> Vec<(u16, Trace)> {
+        std::mem::take(&mut self.traces)
     }
 
     /// Keep a note of every execution with what its order was for ([`FillNote`]). Call before the first event.
@@ -478,6 +499,7 @@ impl<S: LedgerStore> Host<S> {
         }
         candidates.sort_unstable();
         let mut runner = (def.build)();
+        runner.set_tracing(self.trace_on);
         let selector = Selector::new(&def.universe);
         if selector.is_none() {
             *runner.members_mut() = Members::from_ids(candidates.iter().copied());
@@ -616,6 +638,17 @@ impl<S: LedgerStore> Host<S> {
             if slot.alive() {
                 batch.extend(slot.runner.drain_intents());
                 self.tier_tape.extend(slot.runner.drain_tier_events());
+                if self.trace_on {
+                    for mut t in slot.runner.drain_traces() {
+                        let symbols = &self.reference.symbols;
+                        t.resolve_symbols(|id| {
+                            symbols
+                                .name(id)
+                                .map_or_else(|| format!("#{id}"), str::to_owned)
+                        });
+                        self.traces.push((slot.id, t));
+                    }
+                }
             }
         }
         self.log_tiers(tier_before);

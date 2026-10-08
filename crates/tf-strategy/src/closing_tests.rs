@@ -832,3 +832,294 @@ fn it_reviews_once_a_minute_and_leaves_a_name_whose_stop_would_be_nothing_to_the
     let s = rig.runner.strategy().stats();
     assert_eq!((s.decisions, s.entries, s.entries_refused), (1, 0, 0));
 }
+
+// ---- the trace of the decision (E19-S32) ----
+
+fn status_of(t: &crate::trace::Trace, instrument: u32) -> String {
+    let ids = t.column("instrument").expect("an instrument column");
+    let st = t.column("status").expect("a status column");
+    let i = ids
+        .iter()
+        .position(|&x| x == instrument.to_string())
+        .unwrap_or_else(|| panic!("no row for {instrument}"));
+    st[i].to_owned()
+}
+
+#[test]
+fn the_trace_of_a_decision_is_the_whole_cross_section_with_the_reason_for_each_name() {
+    // Nine members, a prior close of $10 but for name 6 (none). Name 0 halted, 2 restricted, 4 a crossed quote, 7 no quote,
+    // 8 never traded; 1, 3 and 5 can be bought, and two names are bought.
+    let mut p = priors(9);
+    p[6] = 0;
+    let mut rig = Rig::new(names(2), &p, Some(regular()));
+    rig.runner.set_tracing(true);
+    rig.feed(status(0, rig.t(3800), StatusKind::TradingHalt));
+    rig.feed(status(2, rig.t(3800) + 1, StatusKind::ShortSaleRestriction));
+    rig.tick(3850);
+    for (i, px) in [
+        (0u32, 900),
+        (1, 950),
+        (2, 960),
+        (3, 970),
+        (4, 980),
+        (5, 990),
+        (6, 1000),
+        (7, 1010),
+    ] {
+        rig.feed(trade(i, rig.t(3700) + u64::from(i), cents(px)));
+    }
+    rig.tick(3590);
+    for (i, px) in [
+        (0u32, 900),
+        (1, 950),
+        (2, 960),
+        (3, 970),
+        (5, 990),
+        (6, 1000),
+    ] {
+        rig.feed(quote(
+            i,
+            rig.t(1900) + u64::from(i),
+            cents(px - 1),
+            cents(px + 1),
+        ));
+    }
+    rig.feed(quote(4, rig.t(1900) + 4, cents(981), cents(979)));
+    rig.tick(1790);
+    assert_eq!(picked(&rig.out()), [1, 3]);
+    let traces = rig.runner.drain_traces();
+    assert_eq!(traces.len(), 1);
+    let t = &traces[0];
+    assert_eq!((t.kind.as_str(), t.ts), ("rank", rig.t(1800)));
+    for (k, v) in [
+        ("close", rig.close.to_string()),
+        ("ref_minutes", "60".into()),
+        ("entry_minutes", "30".into()),
+        ("names", "2".into()),
+        ("extreme_bp", "0".into()),
+        ("spread_cap_bp", "0".into()),
+        ("members", "9".into()),
+        ("eligible", "3".into()),
+        ("entered", "2".into()),
+    ] {
+        assert_eq!(t.value(k), Some(v.as_str()), "{k}");
+    }
+    assert_eq!(
+        t.columns,
+        [
+            "rank",
+            "instrument",
+            "prior_close",
+            "ref_px",
+            "ref_src",
+            "ret_ppm",
+            "bid",
+            "ask",
+            "status"
+        ]
+    );
+    // Those that may be bought, most negative first; then the rest by number.
+    assert_eq!(
+        t.column("instrument").unwrap(),
+        ["1", "3", "5", "0", "2", "4", "6", "7", "8"]
+    );
+    assert_eq!(
+        t.column("rank").unwrap(),
+        ["1", "2", "3", "", "", "", "", "", ""]
+    );
+    assert_eq!(
+        t.column("status").unwrap(),
+        [
+            "entered",
+            "entered",
+            "not_chosen",
+            "skipped:halted",
+            "skipped:restricted",
+            "skipped:crossed_quote",
+            "skipped:no_prior",
+            "skipped:no_quote",
+            "skipped:no_price",
+        ]
+    );
+    // The first row in full: the numbers the decision was made on, raw.
+    assert_eq!(
+        t.rows[0],
+        [
+            "1",
+            "1",
+            "10000000000",
+            "9500000000",
+            "tier0",
+            "-50000",
+            "9490000000",
+            "9510000000",
+            "entered"
+        ]
+    );
+    // A name without a prior close has no return but has its price; one that never traded has no price; one never quoted has
+    // no quote.
+    assert_eq!(t.rows[6][2..6], ["", "10000000000", "tier0", ""]);
+    assert_eq!(
+        t.rows[6][6..],
+        ["9990000000", "10010000000", "skipped:no_prior"]
+    );
+    assert_eq!(
+        t.rows[8][2..],
+        ["10000000000", "", "none", "", "", "", "skipped:no_price"]
+    );
+    assert_eq!(
+        t.rows[7][2..7],
+        ["10000000000", "10100000000", "tier0", "10000", ""]
+    );
+    // The traces are taken once.
+    assert!(rig.runner.drain_traces().is_empty());
+}
+
+#[test]
+fn the_trace_says_where_the_price_came_from() {
+    let mut rig = Rig::new(names(1), &priors(2), Some(regular()));
+    rig.runner.set_tracing(true);
+    rig.feed(trade(0, rig.t(3950), cents(900)));
+    rig.feed(trade(1, rig.t(3950) + 1, cents(990)));
+    rig.tick(3850);
+    rig.feed(trade(1, rig.t(3700) + 1, cents(990)));
+    // The first event after 15:00 is name 0's own later trade: its price is the snapshot's.
+    rig.feed(trade(0, rig.t(3590), cents(1200)));
+    for i in 0..2u32 {
+        rig.feed(quote(i, rig.t(1900) + u64::from(i), cents(899), cents(901)));
+    }
+    rig.tick(1790);
+    let t = rig.runner.drain_traces().remove(0);
+    let src = t.column("ref_src").unwrap();
+    let ids = t.column("instrument").unwrap();
+    let of = |id: &str| src[ids.iter().position(|&x| x == id).unwrap()];
+    assert_eq!((of("0"), of("1")), ("snapshot", "tier0"));
+}
+
+#[test]
+fn the_filters_and_the_names_the_money_does_not_buy_are_in_the_trace_with_their_reasons() {
+    // The extreme floor: -3%, so the names above it say so.
+    let p = ClosingReversalParams {
+        extreme_bp: 300,
+        ..names(6)
+    };
+    let mut rig = Rig::new(p, &priors(6), Some(regular()));
+    rig.runner.set_tracing(true);
+    let out = rig.play(&SIX);
+    assert_eq!(picked(&out), [0, 1, 4]);
+    let t = rig.runner.drain_traces().remove(0);
+    assert_eq!(t.value("eligible"), Some("3"));
+    for (id, want) in [
+        (0, "entered"),
+        (1, "entered"),
+        (4, "entered"),
+        (2, "skipped:not_extreme"),
+        (3, "skipped:not_extreme"),
+        (5, "skipped:not_extreme"),
+    ] {
+        assert_eq!(status_of(&t, id), want, "name {id}");
+    }
+    // The spread cap: a mid of $20 and a cent is 5.0 basis points (kept); a bit more is not.
+    let p = ClosingReversalParams {
+        spread_cap_bp: 5,
+        ..names(10)
+    };
+    let mut rig = Rig::new(p, &priors(2), Some(regular()));
+    rig.runner.set_tracing(true);
+    rig.tick(3850);
+    rig.feed(trade(0, rig.t(3700), cents(900)));
+    rig.feed(trade(1, rig.t(3700) + 1, cents(901)));
+    rig.tick(3590);
+    rig.feed(quote(0, rig.t(1900), 19_995_000_000, 20_005_000_000));
+    rig.feed(quote(1, rig.t(1900) + 1, 19_995_000_000, 20_005_100_000));
+    rig.tick(1790);
+    let t = rig.runner.drain_traces().remove(0);
+    assert_eq!(
+        (status_of(&t, 0).as_str(), status_of(&t, 1).as_str()),
+        ("entered", "skipped:wide_spread")
+    );
+    // Names chosen that the dollars do not buy, or whose stop would be nothing: chosen and not entered.
+    let p = ClosingReversalParams {
+        dollars: 1,
+        ..names(2)
+    };
+    let mut rig = Rig::new(p, &priors(3), Some(regular()));
+    rig.runner.set_tracing(true);
+    rig.tick(3850);
+    for i in 0..3u32 {
+        rig.feed(trade(
+            i,
+            rig.t(3700) + u64::from(i),
+            cents(900 + i64::from(i)),
+        ));
+    }
+    rig.tick(3590);
+    rig.feed(quote(0, rig.t(1900), cents(2000), cents(2002)));
+    rig.feed(quote(1, rig.t(1900) + 1, 1, 1));
+    rig.feed(quote(2, rig.t(1900) + 2, cents(2000), cents(2002)));
+    rig.tick(1790);
+    assert!(rig.out().is_empty());
+    let t = rig.runner.drain_traces().remove(0);
+    assert_eq!(status_of(&t, 0), "skipped:no_share");
+    assert_eq!(status_of(&t, 1), "skipped:no_stop");
+    assert_eq!(status_of(&t, 2), "not_chosen");
+    assert_eq!(
+        (t.value("entered"), t.value("eligible")),
+        (Some("0"), Some("3"))
+    );
+}
+
+#[test]
+fn a_day_traced_decides_exactly_as_a_day_untraced_and_a_strategy_not_asked_records_nothing() {
+    let run = |traced: bool| {
+        let mut rig = Rig::new(names(3), &priors(6), Some(regular()));
+        rig.runner.set_tracing(traced);
+        let out = rig.play(&SIX);
+        let fills = [100u32, 80, 60];
+        for (i, f) in out.iter().zip(fills) {
+            rig.update(OrderUpdate {
+                intent: i.id,
+                order: None,
+                state: OrderState::Filled,
+                filled_qty: f.min(i.qty),
+                avg_px: Some(Px::from_raw(cents(901))),
+                reject: None,
+                ts: rig.t(1799),
+            });
+        }
+        rig.tick(30);
+        let exits = rig.out();
+        (
+            format!("{out:?}"),
+            format!("{exits:?}"),
+            rig.runner.strategy().stats(),
+            rig.runner.drain_traces().len(),
+        )
+    };
+    let (a, b) = (run(false), run(true));
+    assert_eq!((&a.0, &a.1, a.2), (&b.0, &b.1, b.2));
+    assert_eq!((a.3, b.3), (0, 1));
+    // Turning tracing off drops what was kept.
+    let mut rig = Rig::new(names(3), &priors(6), Some(regular()));
+    rig.runner.set_tracing(true);
+    rig.play(&SIX);
+    rig.runner.set_tracing(false);
+    assert!(rig.runner.drain_traces().is_empty());
+}
+
+#[test]
+fn a_strategy_never_asked_to_trace_records_nothing_and_a_prior_close_of_nothing_is_no_prior() {
+    let mut rig = Rig::new(names(3), &priors(6), Some(regular()));
+    rig.play(&SIX);
+    assert!(rig.runner.drain_traces().is_empty());
+    // A prior close of exactly nothing (not unknown) is no prior close, whatever the price: and a negative one too.
+    let mut rig = Rig::new(names(6), &priors(3), Some(regular()));
+    rig.runner.set_tracing(true);
+    rig.refs[0].price = Some(0);
+    rig.refs[1].price = Some(-5);
+    rig.play(&[900, 950, 980]);
+    let t = rig.runner.drain_traces().remove(0);
+    assert_eq!(status_of(&t, 0), "skipped:no_prior");
+    assert_eq!(status_of(&t, 1), "skipped:no_prior");
+    assert_eq!(status_of(&t, 2), "entered");
+}

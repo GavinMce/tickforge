@@ -41,6 +41,7 @@ use crate::exits::{ExitBook, ExitPlan, ExitStats};
 use crate::intent::{IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif};
 use crate::lifecycle::OrderUpdate;
 use crate::strategy::{Ctx, Request, TimerId};
+use crate::trace::Trace;
 
 /// The `reason` code of this strategy's entries.
 pub const REASON_ENTRY: u16 = 1;
@@ -255,8 +256,44 @@ pub struct ClosingReversal {
     /// By instrument number, raw: the last price at the snapshot, and at the reference time; 0 for none.
     snapshot: Vec<i64>,
     reference: Vec<i64>,
+    /// Where each price at the reference time came from: [`SRC_NONE`], [`SRC_TIER0`] or [`SRC_SNAPSHOT`].
+    ref_src: Vec<u8>,
     entries: BTreeMap<IntentId, Entry>,
     stats: ClosingReversalStats,
+    tracing: bool,
+    traces: Vec<Trace>,
+}
+
+const SRC_NONE: u8 = 0;
+const SRC_TIER0: u8 = 1;
+const SRC_SNAPSHOT: u8 = 2;
+
+/// Why a name is not bought, in the words of the trace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Skip {
+    Halted,
+    Restricted,
+    NoPrior,
+    NoPrice,
+    NoQuote,
+    CrossedQuote,
+    NotExtreme,
+    WideSpread,
+}
+
+impl Skip {
+    fn name(self) -> &'static str {
+        match self {
+            Skip::Halted => "halted",
+            Skip::Restricted => "restricted",
+            Skip::NoPrior => "no_prior",
+            Skip::NoPrice => "no_price",
+            Skip::NoQuote => "no_quote",
+            Skip::CrossedQuote => "crossed_quote",
+            Skip::NotExtreme => "not_extreme",
+            Skip::WideSpread => "wide_spread",
+        }
+    }
 }
 
 impl ClosingReversal {
@@ -270,8 +307,11 @@ impl ClosingReversal {
             close: None,
             snapshot: Vec::new(),
             reference: Vec::new(),
+            ref_src: Vec::new(),
             entries: BTreeMap::new(),
             stats: ClosingReversalStats::default(),
+            tracing: false,
+            traces: Vec::new(),
         })
     }
 
@@ -299,6 +339,7 @@ impl ClosingReversal {
         self.close = Some(close);
         self.snapshot.clear();
         self.reference.clear();
+        self.ref_src.clear();
         let minutes = u64::from(self.p.ref_minutes + SNAPSHOT_MINUTES_BEFORE);
         ctx.set_timer(SNAPSHOT, Self::before_close(close, minutes * 60));
         ctx.set_timer(REFERENCE, self.ref_at(close));
@@ -332,95 +373,246 @@ impl ClosingReversal {
                 .filter(|s| s.last_ts <= at)
                 .and_then(|s| s.last_px)
                 .map(|p| p.raw());
+            let snapshot = self.snapshot.get(id as usize).copied().unwrap_or(0);
             // 0 is no price: `return_ppm` refuses it.
-            let px = from_tier0
-                .or_else(|| self.snapshot.get(id as usize).copied())
-                .unwrap_or(0);
+            let (px, src) = match from_tier0 {
+                Some(px) => (px, SRC_TIER0),
+                None if snapshot > 0 => (snapshot, SRC_SNAPSHOT),
+                None => (0, SRC_NONE),
+            };
             *Self::slot(&mut self.reference, id) = px;
+            let at = id as usize;
+            if self.ref_src.len() <= at {
+                self.ref_src.resize(at + 1, SRC_NONE);
+            }
+            self.ref_src[at] = src;
         }
+    }
+
+    /// The return in parts per million to the price at the reference time for a name that may be bought, or why it may not.
+    fn assess(
+        &self,
+        view: &MemberView<'_>,
+        id: InstrumentId,
+        st: &SymbolState,
+    ) -> Result<i64, Skip> {
+        let p = &self.p;
+        if st.halted {
+            return Err(Skip::Halted);
+        }
+        if st.ssr {
+            return Err(Skip::Restricted);
+        }
+        let prior = view
+            .reference(id)
+            .and_then(|r| r.price)
+            .ok_or(Skip::NoPrior)?;
+        let px = self.reference.get(id as usize).copied().unwrap_or(0);
+        let ret = return_ppm(prior, px).ok_or(if prior <= 0 {
+            Skip::NoPrior
+        } else {
+            Skip::NoPrice
+        })?;
+        let floor_ppm = i64::from(p.extreme_bp) * 100;
+        if floor_ppm > 0 && ret > -floor_ppm {
+            return Err(Skip::NotExtreme);
+        }
+        let (Some(bid), Some(ask)) = (st.bid, st.ask) else {
+            return Err(Skip::NoQuote);
+        };
+        let (bid, ask) = (bid.0.raw(), ask.0.raw());
+        if bid <= 0 {
+            return Err(Skip::NoQuote);
+        }
+        if ask < bid {
+            return Err(Skip::CrossedQuote);
+        }
+        if p.spread_cap_bp > 0 {
+            let mid2 = i128::from(bid) + i128::from(ask);
+            if i128::from(ask - bid) * 20_000 > i128::from(p.spread_cap_bp) * mid2 {
+                return Err(Skip::WideSpread);
+            }
+        }
+        Ok(ret)
     }
 
     /// The names to buy now, most negative first: the return to the reference price, for names that may be bought.
     fn picks(&self, view: &MemberView<'_>) -> Vec<(i64, InstrumentId)> {
-        let p = &self.p;
-        let floor_ppm = i64::from(p.extreme_bp) * 100;
-        let key = |id: InstrumentId, st: &SymbolState| -> Option<i64> {
-            if st.halted || st.ssr {
-                return None;
-            }
-            let prior = view.reference(id)?.price?;
-            let px = self.reference.get(id as usize).copied()?;
-            let ret = return_ppm(prior, px)?;
-            if floor_ppm > 0 && ret > -floor_ppm {
-                return None;
-            }
-            let (bid, ask) = (st.bid?.0.raw(), st.ask?.0.raw());
-            if bid <= 0 || ask < bid {
-                return None;
-            }
-            if p.spread_cap_bp > 0 {
-                let mid2 = i128::from(bid) + i128::from(ask);
-                if i128::from(ask - bid) * 20_000 > i128::from(p.spread_cap_bp) * mid2 {
-                    return None;
-                }
-            }
-            Some(ret)
+        view.top_k(self.p.names as usize, false, |id, st| {
+            self.assess(view, id, st).ok()
+        })
+    }
+
+    /// Buy `id` at its ask if its dollars buy a share and a stop is above nothing; what came of it.
+    fn enter(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        view: &MemberView<'_>,
+        id: InstrumentId,
+    ) -> &'static str {
+        let Some(ask) = view.state(id).and_then(|s| s.ask).map(|l| l.0) else {
+            return "skipped:no_quote";
         };
-        view.top_k(p.names as usize, false, key)
+        let qty = u128::from(self.p.dollars) * 1_000_000_000 / ask.raw().max(1) as u128;
+        let Ok(qty) = u32::try_from(qty) else {
+            return "skipped:no_share";
+        };
+        if qty == 0 {
+            return "skipped:no_share";
+        }
+        let stop = i128::from(ask.raw()) * i128::from(1_000 - self.p.stop_permille) / 1_000;
+        let Ok(stop) = i64::try_from(stop) else {
+            return "skipped:no_stop";
+        };
+        if stop <= 0 {
+            return "skipped:no_stop";
+        }
+        let req = Request {
+            side: Side::Buy,
+            qty,
+            purpose: Purpose::Open,
+            pricing: Pricing::Collar {
+                reference: ask,
+                collar_permille: self.p.collar_permille,
+            },
+            protect: Some(Protective {
+                stop_trigger: Px::from_raw(stop),
+                stop_limit: None,
+                take_profit: None,
+            }),
+            tif: Tif::Day,
+            reason: REASON_ENTRY,
+        };
+        match ctx.submit(id, req) {
+            Ok(intent) => {
+                self.stats.entries += 1;
+                self.entries.insert(
+                    intent,
+                    Entry {
+                        instrument: id,
+                        seen: 0,
+                    },
+                );
+                "entered"
+            }
+            // Not reachable with parameters that pass `validate`: an entry the framework's checks accept is the only kind
+            // this builds (a price and a stop above nothing, a size above nothing). Kept for the day the checks change.
+            Err(_) => {
+                self.stats.entries_refused += 1;
+                "skipped:refused"
+            }
+        }
     }
 
     fn decide(&mut self, ctx: &mut Ctx<'_>, view: &MemberView<'_>) {
         self.stats.decisions += 1;
-        for (_, id) in self.picks(view) {
-            let Some(ask) = view.state(id).and_then(|s| s.ask).map(|l| l.0) else {
-                continue;
-            };
-            let qty = u128::from(self.p.dollars) * 1_000_000_000 / ask.raw().max(1) as u128;
-            let Ok(qty) = u32::try_from(qty) else {
-                continue;
-            };
-            if qty == 0 {
-                continue;
-            }
-            let stop = i128::from(ask.raw()) * i128::from(1_000 - self.p.stop_permille) / 1_000;
-            let Ok(stop) = i64::try_from(stop) else {
-                continue;
-            };
-            if stop <= 0 {
-                continue;
-            }
-            let req = Request {
-                side: Side::Buy,
-                qty,
-                purpose: Purpose::Open,
-                pricing: Pricing::Collar {
-                    reference: ask,
-                    collar_permille: self.p.collar_permille,
-                },
-                protect: Some(Protective {
-                    stop_trigger: Px::from_raw(stop),
-                    stop_limit: None,
-                    take_profit: None,
-                }),
-                tif: Tif::Day,
-                reason: REASON_ENTRY,
-            };
-            match ctx.submit(id, req) {
-                Ok(intent) => {
-                    self.stats.entries += 1;
-                    self.entries.insert(
-                        intent,
-                        Entry {
-                            instrument: id,
-                            seen: 0,
-                        },
-                    );
-                }
-                // Not reachable with parameters that pass `validate`: an entry the framework's checks accept is the only kind
-                // this builds (a price and a stop above nothing, a size above nothing). Kept for the day the checks change.
-                Err(_) => self.stats.entries_refused += 1,
-            }
+        let picks = self.picks(view);
+        let mut outcome: BTreeMap<InstrumentId, &'static str> = BTreeMap::new();
+        for &(_, id) in &picks {
+            let o = self.enter(ctx, view, id);
+            outcome.insert(id, o);
         }
+        if self.tracing {
+            let t = self.rank_trace(ctx.now(), view, &outcome);
+            self.traces.push(t);
+        }
+    }
+
+    /// The whole cross-section at the decision: every member, the eligible ranked by return (the `names` first are the ones
+    /// chosen, each with what came of it) and the rest with the reason they were not.
+    fn rank_trace(
+        &self,
+        ts: Nanos,
+        view: &MemberView<'_>,
+        outcome: &BTreeMap<InstrumentId, &'static str>,
+    ) -> Trace {
+        struct Row {
+            id: InstrumentId,
+            prior: Option<i64>,
+            px: i64,
+            src: u8,
+            ret: Option<i64>,
+            bid: Option<i64>,
+            ask: Option<i64>,
+            verdict: Result<i64, Skip>,
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        for id in view.ids() {
+            let Some(st) = view.state(id) else { continue };
+            let prior = view.reference(id).and_then(|r| r.price);
+            let px = self.reference.get(id as usize).copied().unwrap_or(0);
+            rows.push(Row {
+                id,
+                prior,
+                px,
+                src: self.ref_src.get(id as usize).copied().unwrap_or(SRC_NONE),
+                ret: prior.and_then(|p| return_ppm(p, px)),
+                bid: st.bid.map(|l| l.0.raw()),
+                ask: st.ask.map(|l| l.0.raw()),
+                verdict: self.assess(view, id, st),
+            });
+        }
+        // Those that may be bought, most negative first (ties to the lower number), then the rest by number.
+        rows.sort_by_key(|r| match r.verdict {
+            Ok(ret) => (0, ret, r.id),
+            Err(_) => (1, 0, r.id),
+        });
+        let eligible = rows.iter().filter(|r| r.verdict.is_ok()).count();
+        let entered = outcome.values().filter(|&&o| o == "entered").count();
+        let mut t = Trace::new(ts, "rank")
+            .with("close", self.close.unwrap_or(0))
+            .with("ref_minutes", self.p.ref_minutes)
+            .with("entry_minutes", self.p.entry_minutes)
+            .with("names", self.p.names)
+            .with("extreme_bp", self.p.extreme_bp)
+            .with("spread_cap_bp", self.p.spread_cap_bp)
+            .with("members", rows.len())
+            .with("eligible", eligible)
+            .with("entered", entered)
+            .with_columns(&[
+                "rank",
+                "instrument",
+                "prior_close",
+                "ref_px",
+                "ref_src",
+                "ret_ppm",
+                "bid",
+                "ask",
+                "status",
+            ]);
+        let num = |v: Option<i64>| v.map_or(String::new(), |v| v.to_string());
+        let mut rank = 0usize;
+        for r in &rows {
+            let (rank_cell, status) = match r.verdict {
+                Ok(_) => {
+                    rank += 1;
+                    let status = outcome.get(&r.id).copied().unwrap_or("not_chosen");
+                    (rank.to_string(), status.to_owned())
+                }
+                Err(skip) => (String::new(), format!("skipped:{}", skip.name())),
+            };
+            t.push_row(vec![
+                rank_cell,
+                r.id.to_string(),
+                num(r.prior),
+                if r.px > 0 {
+                    r.px.to_string()
+                } else {
+                    String::new()
+                },
+                match r.src {
+                    SRC_TIER0 => "tier0",
+                    SRC_SNAPSHOT => "snapshot",
+                    _ => "none",
+                }
+                .to_owned(),
+                num(r.ret),
+                num(r.bid),
+                num(r.ask),
+                status,
+            ]);
+        }
+        t
     }
 }
 
@@ -456,6 +648,17 @@ impl CrossStrategy for ClosingReversal {
                 self.book.on_timer(ctx, t);
             }
         }
+    }
+
+    fn set_tracing(&mut self, on: bool) {
+        self.tracing = on;
+        if !on {
+            self.traces.clear();
+        }
+    }
+
+    fn take_traces(&mut self) -> Vec<Trace> {
+        std::mem::take(&mut self.traces)
     }
 
     fn on_order_update(&mut self, ctx: &mut Ctx<'_>, update: &OrderUpdate) {

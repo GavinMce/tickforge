@@ -2870,34 +2870,112 @@ fn what_the_gateway_turned_away_is_counted_with_its_reasons() {
 }
 
 #[test]
-fn the_strategies_of_a_scenario_are_runs_of_the_catalog() {
-    use super::view::catalog_runs;
+fn each_strategys_day_of_a_scenario_is_a_backtest_run_read_from_the_days_ledger() {
+    use super::view::{ViewError, catalog_runs, replay_ledger, scenarios_json};
     use tf_catalog::{Kind, Source};
     let root = view_root("cat", "alpha");
+    let results = Results::open(&root.join("alpha")).unwrap();
     let runs = catalog_runs(&root).unwrap();
-    assert_eq!(runs.len(), 2);
-    for (r, name) in runs.iter().zip(["round1", "round2"]) {
-        assert_eq!(
-            (r.strategy.as_str(), r.kind, r.trades),
-            (name, Kind::Backtest, Some(3))
+    // Three days of two strategies, one trade each, named as a live ledger names them: by the budget tree.
+    assert_eq!(runs.len(), 6);
+    for r in &runs {
+        assert_eq!((r.kind, r.trades), (Kind::Backtest, Some(1)));
+        assert!(
+            ["s1", "s2"].contains(&r.strategy.as_str()),
+            "{}",
+            r.strategy
         );
-        assert_eq!(
-            (r.net_pnl, r.budget),
-            (Some(-6_182_038_200), Some(50_000 * 1_000_000_000))
-        );
-        // From the day the scenario's data begins: 9:30 New York on 1 May 2026.
-        assert_eq!(r.started, OPENS[0].1 * SEC);
-        assert!(r.researchable() && !r.explorable());
-        let Source::Research { scenario, variant } = &r.source else {
-            panic!("not a research run")
+        assert_eq!(r.budget, Some(50_000 * 1_000_000_000));
+        assert!(r.replayed() && !r.explorable());
+        let Source::Replay { scenario, day } = &r.source else {
+            panic!("not a replayed day")
         };
-        assert_eq!((scenario.as_str(), variant.len()), ("alpha", 16));
+        assert_eq!(scenario, "alpha");
+        // The ledger's profit is the trip's gross.
+        let n: u16 = r.strategy[1..].parse().unwrap();
+        let trips = results.day(day).unwrap().trips;
+        let mine: Vec<&Trip> = trips.iter().filter(|t| t.strategy == n).collect();
+        assert_eq!(
+            r.net_pnl,
+            Some(mine.iter().map(|t| i128::from(t.gross)).sum())
+        );
     }
-    assert_ne!(runs[0].source, runs[1].source);
+    let mut days: Vec<String> = runs
+        .iter()
+        .map(|r| match &r.source {
+            Source::Replay { day, .. } => day.clone(),
+            _ => unreachable!(),
+        })
+        .collect();
+    days.sort();
+    days.dedup();
+    assert_eq!(days, ["2026-05-01", "2026-05-04", "2026-05-05"]);
+    // Both strategies of a day share its source: a day is one source, whichever strategy.
+    assert!(runs.chunks(2).all(|pair| pair.len() == 2
+        && pair[0].source == pair[1].source
+        && pair[0].strategy != pair[1].strategy));
     // A scenario that does not read is left out of the catalog, not a failure of it.
     fs::create_dir_all(root.join("broken")).unwrap();
     fs::write(root.join("broken").join(CONFIG_FILE), "garbage").unwrap();
+    assert_eq!(catalog_runs(&root).unwrap().len(), 6);
+    // A day whose ledger is damaged is left out and says why; a day made before ledgers were kept says that instead.
+    let log = root
+        .join("alpha")
+        .join("2026-05-04.ledger")
+        .join("ledger.log");
+    let bytes = fs::read(&log).unwrap();
+    fs::write(&log, &bytes[..bytes.len() - 9]).unwrap();
+    fs::remove_dir_all(root.join("alpha").join("2026-05-05.ledger")).unwrap();
     assert_eq!(catalog_runs(&root).unwrap().len(), 2);
+    let j = json(&scenarios_json(&root).unwrap());
+    let alpha = &j.get("scenarios").arr()[0];
+    let ledgers = alpha.get("ledgers").arr();
+    assert_eq!(
+        ledgers
+            .iter()
+            .map(|l| (l.get("day").s(), l.get("ok")))
+            .collect::<Vec<_>>(),
+        [
+            ("2026-05-01", &J::Bool(true)),
+            ("2026-05-04", &J::Bool(false)),
+            ("2026-05-05", &J::Bool(false))
+        ]
+    );
+    assert!(
+        ledgers[1]
+            .get("error")
+            .s()
+            .contains("not the one the day's report was made with"),
+        "{:?}",
+        ledgers[1]
+    );
+    assert!(
+        ledgers[2]
+            .get("error")
+            .s()
+            .contains("made before ledgers were kept"),
+        "{:?}",
+        ledgers[2]
+    );
+    // Asked for, a good day's ledger is its directory; the others are refused with those reasons.
+    assert_eq!(
+        replay_ledger(&root, "alpha", "2026-05-01").unwrap(),
+        root.join("alpha").join("2026-05-01.ledger")
+    );
+    assert!(
+        matches!(replay_ledger(&root, "alpha", "2026-05-04"), Err(ViewError::Refused(m)) if m.contains("report was made with"))
+    );
+    assert!(
+        matches!(replay_ledger(&root, "alpha", "2026-05-05"), Err(ViewError::NotFound(m)) if m.contains("before ledgers were kept"))
+    );
+    assert!(matches!(
+        replay_ledger(&root, "alpha", "2026-05-02"),
+        Err(ViewError::NotFound(_))
+    ));
+    assert!(matches!(
+        replay_ledger(&root, "..", "2026-05-01"),
+        Err(ViewError::NotFound(_))
+    ));
 }
 
 #[test]
@@ -2965,9 +3043,17 @@ fn strategies_of_different_sizes_keep_their_own_trades_and_scenario_directories_
         (st[0].get("trades").s(), st[1].get("trades").s()),
         ("3", "3")
     );
+    // The days' ledgers: each strategy's session has its own size's profit (a hundred shares lose $2 a day, three hundred $6).
     let runs = catalog_runs(&root).unwrap();
-    assert_eq!(runs[0].net_pnl, Some(-6_182_038_200));
-    assert_ne!(runs[1].net_pnl, runs[0].net_pnl);
+    assert_eq!(runs.len(), 6);
+    for r in &runs {
+        let want = if r.strategy == "s1" {
+            -2_000_000_000
+        } else {
+            -6_000_000_000
+        };
+        assert_eq!(r.net_pnl, Some(want), "{}", r.strategy);
+    }
     // Each strategy's day is its own size.
     let (a, b) = (
         json(&trades_json(&root, "sz", "2026-05-01", 1).unwrap()),

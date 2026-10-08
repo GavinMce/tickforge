@@ -107,6 +107,10 @@ impl ResearchView for ResultsDir {
         tf_host::research::view::trades_json(&self.0, scenario, day, strategy).map_err(view_error)
     }
 
+    fn replay_ledger(&self, scenario: &str, day: &str) -> Result<PathBuf, ResearchError> {
+        tf_host::research::view::replay_ledger(&self.0, scenario, day).map_err(view_error)
+    }
+
     fn trade_page(
         &self,
         scenario: &str,

@@ -1560,19 +1560,35 @@ fn trip_loss(j: &mut Journal<FileStore>) {
 
 // ---- the backtest view (E19-S34, E19-S35) ----
 
-struct FakeResearch;
+/// Research results with one replayed day, `alpha` on 2026-05-04, whose ledger is `ledger` (if any): what the program that hosts
+/// the service reads from its results directory.
+struct FakeResearch {
+    ledger: Option<PathBuf>,
+}
 
 impl crate::ResearchView for FakeResearch {
     fn runs(&self) -> Result<Vec<tf_catalog::Run>, String> {
-        Ok(vec![tf_catalog::research_run(
-            "alpha",
-            "00ff00ff00ff00ff",
-            "t04",
-            5 * SEC,
-            -2 * i128::from(P),
-            3,
-            Some(50_000 * P as u128),
-        )])
+        let Some(dir) = &self.ledger else {
+            return Ok(vec![]);
+        };
+        Ok(tf_catalog::sessions(
+            tf_ledger::ReadOnlyStore::open(dir),
+            "alpha/2026-05-04",
+            Kind::Backtest,
+        )
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|r| tf_catalog::as_replay(r, "alpha", "2026-05-04"))
+        .collect())
+    }
+
+    fn replay_ledger(&self, scenario: &str, day: &str) -> Result<PathBuf, crate::ResearchError> {
+        use crate::ResearchError::{NotFound, Refused};
+        match (scenario, day, &self.ledger) {
+            ("alpha", "2026-05-04", Some(dir)) => Ok(dir.clone()),
+            ("damaged", _, _) => Err(Refused("the ledger is <b>cut</b> & damaged".into())),
+            _ => Err(NotFound("no such day".into())),
+        }
     }
 
     fn scenarios(&self) -> Result<String, String> {
@@ -1611,7 +1627,18 @@ impl crate::ResearchView for FakeResearch {
 
 fn with_research() -> Source {
     Source {
-        research: Some(crate::Research::new(FakeResearch)),
+        research: Some(crate::Research::new(FakeResearch { ledger: None })),
+        ..Source::default()
+    }
+}
+
+/// Research results whose replayed day has the ledger `account` makes in `dir` (the writer closed, as a finished day's is).
+fn with_replayed_day(dir: &Path) -> Source {
+    drop(account(dir, true));
+    Source {
+        research: Some(crate::Research::new(FakeResearch {
+            ledger: Some(dir.to_owned()),
+        })),
         ..Source::default()
     }
 }
@@ -1723,29 +1750,136 @@ fn a_trade_page_is_the_explorers_kind_of_page_and_says_why_it_is_not_given_as_te
 }
 
 #[test]
-fn a_research_strategy_is_in_the_runs_with_a_pointer_to_the_backtests() {
-    let s = with_research();
-    let runs = crate::runs(&s, Some("t04")).unwrap();
+fn a_replayed_day_is_in_the_runs_and_opens_as_a_live_session_does() {
+    let dir = scratch("replayed-runs");
+    let s = with_replayed_day(&dir);
+    // Each strategy that acted is a run of the day, a backtest kept apart by its source, naming its scenario and day.
+    let runs = crate::runs(&s, Some("beta")).unwrap();
     assert!(
-        runs.contains("\"researchable\":true") && runs.contains("\"explorable\":false"),
+        runs.contains("\"kind\":\"backtest\"") && runs.contains("\"source\":\"replay\""),
         "{runs}"
     );
     assert!(
-        runs.contains("\"source\":\"research\"")
-            && runs.contains("research:alpha:00ff00ff00ff00ff"),
+        runs.contains("\"replayed\":true") && runs.contains("\"explorable\":false"),
         "{runs}"
     );
-    let d = crate::run_detail(&s, "t04", "research:alpha:00ff00ff00ff00ff")
+    assert!(
+        runs.contains("\"scenario\":\"alpha\",\"day\":\"2026-05-04\""),
+        "{runs}"
+    );
+    assert!(
+        runs.contains("\"id\":\"replay:alpha:2026-05-04\""),
+        "{runs}"
+    );
+    assert_eq!(
+        crate::runs(&s, None)
+            .unwrap()
+            .matches("\"replayed\":true")
+            .count(),
+        2
+    );
+    // Opened, it has what the same session of a live ledger has: the fills, the profit after each, the refusals.
+    let d = crate::run_detail(&s, "beta", "replay:alpha:2026-05-04")
         .unwrap()
         .unwrap();
+    let live = crate::run_detail(&src(&dir), "beta", "session-1")
+        .unwrap()
+        .unwrap();
+    let body = |t: &str| t[t.find("\"trades\":[").unwrap()..].to_owned();
+    assert_eq!(body(&d), body(&live), "the same trades, curve and refusals");
     assert!(
-        d.contains("\"trades\":null") && d.contains("scenario alpha") && d.contains("Backtests"),
+        d.contains("\"curve\":[\"-0.00\"") || d.contains("-100.00"),
         "{d}"
     );
-    assert!(!d.contains("A stored backtest"), "{d}");
-    // A run of another kind is not researchable.
-    let none = crate::runs(&Source::default(), None).unwrap();
-    assert!(!none.contains("\"researchable\":true"));
+    // A run that is not there, and a live session's id, are not found.
+    assert_eq!(
+        crate::run_detail(&s, "beta", "replay:alpha:2026-05-05").unwrap(),
+        None
+    );
+    assert_eq!(crate::run_detail(&s, "beta", "session-1").unwrap(), None);
+    // Without a replayed day, or without results at all, nothing is added, and no run says it is a replay.
+    assert!(
+        !crate::runs(&with_research(), None)
+            .unwrap()
+            .contains("replayed\":true")
+    );
+    assert!(
+        !crate::runs(&Source::default(), None)
+            .unwrap()
+            .contains("replayed\":true")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_replayed_days_overview_is_the_overview_of_its_ledger_and_is_refused_with_the_reason() {
+    let dir = scratch("replayed-overview");
+    let s = with_replayed_day(&dir);
+    let get_ov = |q: &str| {
+        handle(
+            &s,
+            TOKEN,
+            &Request {
+                query: q.into(),
+                ..signed("/api/overview")
+            },
+        )
+    };
+    let ok = get_ov("scenario=alpha&day=2026-05-04");
+    assert_eq!(ok.status, 200);
+    assert!(
+        ok.body.contains("\"kind\":\"backtest\"") && ok.body.contains("\"budgets\":true"),
+        "{}",
+        ok.body
+    );
+    // The same figures a live view of that ledger shows, as to the groups and strategies.
+    let live = overview(&src(&dir)).unwrap();
+    for part in [
+        "\"balance\":\"30000.00\"",
+        "\"name\":\"alpha\"",
+        "\"name\":\"beta\"",
+        "\"day_pnl\":\"-100.00\"",
+    ] {
+        assert!(
+            ok.body.contains(part) && live.contains(part),
+            "{part} in {}",
+            ok.body
+        );
+    }
+    // Each strategy's latest run is the replayed day.
+    assert!(
+        ok.body.contains("\"latest_run\":{") && ok.body.contains("\"source\":\"replay\""),
+        "{}",
+        ok.body
+    );
+    // Not found, refused (its reason as text, not markup), and asked for badly.
+    assert_eq!(get_ov("scenario=alpha&day=2026-05-05").status, 404);
+    let bad = get_ov("scenario=damaged&day=2026-05-04");
+    assert_eq!(bad.status, 422);
+    assert!(bad.body.contains("cut"), "{}", bad.body);
+    assert_eq!(get_ov("scenario=alpha").status, 400);
+    // Signed in only, and GET only.
+    let unsigned = Request {
+        query: "scenario=alpha&day=2026-05-04".into(),
+        ..get("/api/overview")
+    };
+    assert_eq!(handle(&s, TOKEN, &unsigned).status, 401);
+    // Without results, nothing to show; and without those parameters it is the ledger's own overview, as before.
+    let none = handle(
+        &Source::default(),
+        TOKEN,
+        &Request {
+            query: "scenario=alpha&day=2026-05-04".into(),
+            ..signed("/api/overview")
+        },
+    );
+    assert_eq!(none.status, 404);
+    assert!(
+        handle(&s, TOKEN, &signed("/api/overview"))
+            .body
+            .contains("\"account\":null")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1795,7 +1929,10 @@ fn the_backtest_screens_read_only_what_the_view_sends_and_stay_get_only() {
         "bp",
         "exit_reason",
         "open_at_end",
-        "researchable",
+        "replayed",
+        "ledgers",
+        "ok",
+        "number",
     ] {
         assert!(
             app.contains(&format!(".{key}")),

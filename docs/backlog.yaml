@@ -2344,7 +2344,27 @@ epics:
       - id: E19-S42
         jira: TIC-196
         title: "Workspace shows replayed days from their ledgers beside live and paper sessions"
-        status: todo
+        status: done
+        evidence: >-
+          ADR 0069. A replayed day's sessions are catalog runs read from its ledger exactly as a live ledger's are (one run per strategy
+          that acted that day, `Kind::Backtest`, source `Replay {scenario, day}`; it replaces the per-strategy research source), named by
+          the budget tree as live strategies are. The hosting program says where a day's ledger is (`ResearchView::replay_ledger`,
+          checked against the day's report); a run's detail (fills, the profit after each, refusals) is the one function for live and
+          replayed ledgers, and a test requires the same trades, curve and refusals from a replayed session and from the same ledger
+          served as live. `/api/overview?scenario=&day=` is the overview of one replayed day (404 for a day that does not exist or was
+          made before ledgers were kept, with that reason; 422 for a ledger that does not match its report, its reason as text; 400
+          without both parameters; sign-in and GET only). The scenario list says for each day whether its ledger is usable and why not, and
+          the catalog leaves such days out. Screens: each day of a scenario links to its overview; the day overview draws the live
+          overview's own pieces (totals, split, group cards, strategies, loss limits) from that day's ledger and links each strategy to its
+          run and to its trades and replay; the run view of a replayed day says what it is and links back; the trades screen links to the
+          day. Checked in a browser at 1280 and 390 px on a served three-day T04 scenario: no console errors, no horizontal scroll; the
+          overview shows balance $100,000.00, day P&L -$93.06, the strategy active with its loss limits; the run view lists the three days
+          newest first with the profit curve and the six fills. Tests: the catalog source, replayed runs read from ledgers (trades, gross
+          profit equal to the trips', budget, one source per day), a damaged ledger and a day made before ledgers left out with their
+          reasons, the checked ledger lookup (refused, not found, path names), the runs and run detail through the workspace, the overview
+          route (figures equal to the live view of that ledger, 404, 422 as text, 400, 401), and the screens' keys. Full workspace 1,190
+          passed; clippy and fmt clean. Mutation run on the new code: 6 mutants, all killed. Not here: times in these views are UTC and
+          instruments numbers, as for a live ledger (the replay page shows New York time and symbols); meters over the day are E19-S36.
         deps: [E19-S41, E17-S09, E17-S11]
         ac:
           - "tf serve reads the ledgers of replayed days as backtest sessions: the run catalog lists them (kind backtest, kept apart from paper and live), and the run view and the overview (budgets, use, day P&L, strategy state, refusals) open for a replayed day as they do for a live one"

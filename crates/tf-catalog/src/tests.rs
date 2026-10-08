@@ -468,30 +468,37 @@ fn a_strategy_that_only_passed_has_no_fills_and_says_why() {
 }
 
 #[test]
-fn a_research_strategy_is_a_backtest_run_the_backtest_view_opens_and_scenarios_stay_apart() {
-    let a = research_run(
-        "alpha",
-        "00ff",
-        "t04",
-        5 * SEC,
-        -2 * i128::from(P),
-        7,
-        Some(50_000 * P as u128),
-    );
+fn a_session_of_a_replayed_day_is_a_backtest_run_the_backtest_view_opens_and_days_and_scenarios_stay_apart()
+ {
+    let mut j = journal();
+    j.set_budgets(Some(budgets()), SEC).unwrap();
+    open(&mut j, 1, 10);
+    close(&mut j, 1, 20, 6);
+    let live = read(&j, Kind::Paper);
+    assert_eq!(live.len(), 1);
+    let a = as_replay(live[0].clone(), "alpha", "2026-05-04");
+    // What it holds is the session's own: the trades and the profit, from the ledger.
     assert_eq!(
-        (a.kind, a.trades, a.net_pnl, a.rules.as_deref()),
-        (Kind::Backtest, Some(7), Some(-2 * i128::from(P)), None)
+        (a.kind, a.trades, a.net_pnl, a.strategy.as_str()),
+        (Kind::Backtest, live[0].trades, live[0].net_pnl, "alpha")
     );
-    assert_eq!(a.budget, Some(50_000 * P as u128));
-    assert!(a.researchable() && !a.explorable());
-    // A stored backtest and a ledger session are not researchable.
-    assert!(!run("t04", Kind::Backtest, SEC, "abc").researchable());
-    // The same strategy in two scenarios, or the same scenario and two variants, are different runs in a fixed order.
-    let b = research_run("beta", "00ff", "t04", 5 * SEC, 0, 0, None);
-    let c = research_run("alpha", "0100", "t04", 5 * SEC, 0, 0, None);
+    assert_eq!(a.budget, live[0].budget);
+    assert!(a.replayed() && !a.explorable());
+    assert_eq!(
+        a.source,
+        Source::Replay {
+            scenario: "alpha".into(),
+            day: "2026-05-04".into()
+        }
+    );
+    // A session of a live ledger and a stored backtest are not replayed days.
+    assert!(!live[0].replayed());
+    assert!(!run("t04", Kind::Backtest, SEC, "abc").replayed());
+    // The same strategy on two days, or in two scenarios, are different runs in a fixed order.
+    let b = as_replay(live[0].clone(), "beta", "2026-05-04");
+    let c = as_replay(live[0].clone(), "alpha", "2026-05-05");
     let one = Catalog::new(vec![b.clone(), a.clone(), c.clone()]);
-    let two = Catalog::new(vec![c.clone(), a.clone(), b.clone()]);
+    let two = Catalog::new(vec![c, a, b]);
     assert_eq!(one, two);
-    assert_eq!(one.of("t04").count(), 3);
-    assert_eq!(b.budget, None);
+    assert_eq!(one.of("alpha").count(), 3);
 }

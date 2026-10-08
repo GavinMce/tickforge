@@ -11,7 +11,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tf_budget::{Change, Tree, diff};
 use tf_catalog::{Catalog, Kind, Run, Source as RunSource, when};
@@ -77,6 +77,9 @@ pub trait ResearchView: Send + Sync {
     fn scenarios(&self) -> Result<String, String>;
     /// One strategy's trades on a day, as JSON.
     fn trades(&self, scenario: &str, day: &str, strategy: u16) -> Result<String, ResearchError>;
+    /// The directory of a replayed day's ledger (checked to be the one the day was made with), which the service reads as it reads a
+    /// live ledger: for the day's runs, overview and run view (E19-S42).
+    fn replay_ledger(&self, scenario: &str, day: &str) -> Result<PathBuf, ResearchError>;
     /// The page that replays trade `n` (counting a strategy's trades of the day from 0): the whole page, its data embedded.
     fn trade_page(
         &self,
@@ -161,7 +164,7 @@ pub fn run_id(r: &Run) -> String {
     match &r.source {
         RunSource::Stored { hash } => hash.clone(),
         RunSource::Ledger { session, .. } => format!("session-{session}"),
-        RunSource::Research { scenario, variant } => format!("research:{scenario}:{variant}"),
+        RunSource::Replay { scenario, day } => format!("replay:{scenario}:{day}"),
     }
 }
 
@@ -170,11 +173,11 @@ pub fn run_json(r: &Run) -> String {
     let kind_src = match &r.source {
         RunSource::Stored { .. } => "stored",
         RunSource::Ledger { .. } => "ledger",
-        RunSource::Research { .. } => "research",
+        RunSource::Replay { .. } => "replay",
     };
     let id = run_id(r);
     format!(
-        "{{\"strategy\":{},\"kind\":{},\"started_ns\":{},\"started\":{},\"net_pnl\":{},\"trades\":{},\"rules\":{},\"budget\":{},\"source\":{},\"id\":{},\"explorable\":{},\"researchable\":{}}}",
+        "{{\"strategy\":{},\"kind\":{},\"started_ns\":{},\"started\":{},\"net_pnl\":{},\"trades\":{},\"rules\":{},\"budget\":{},\"source\":{},\"id\":{},\"explorable\":{},\"replayed\":{},\"scenario\":{},\"day\":{}}}",
         js(&r.strategy),
         js(r.kind.name()),
         js(&r.started.to_string()),
@@ -186,7 +189,15 @@ pub fn run_json(r: &Run) -> String {
         js(kind_src),
         js(&id),
         r.explorable(),
-        r.researchable()
+        r.replayed(),
+        opt(match &r.source {
+            RunSource::Replay { scenario, .. } => Some(scenario.clone()),
+            _ => None,
+        }),
+        opt(match &r.source {
+            RunSource::Replay { day, .. } => Some(day.clone()),
+            _ => None,
+        })
     )
 }
 
@@ -237,33 +248,45 @@ pub fn run_detail(src: &Source, strategy: &str, id: &str) -> Result<Option<Strin
     let Some(run) = cat.of(strategy).find(|r| run_id(r) == id) else {
         return Ok(None);
     };
-    if let RunSource::Research { scenario, .. } = &run.source {
-        return Ok(Some(format!(
-            "{{\"run\":{},\"trades\":null,\"curve\":null,\"refused\":[],\"note\":{}}}",
-            run_json(run),
-            js(&format!(
-                "A research backtest of the scenario {scenario}. Its days and trades are under Backtests."
-            ))
-        )));
-    }
-    let RunSource::Ledger { session, .. } = &run.source else {
-        return Ok(Some(format!(
-            "{{\"run\":{},\"trades\":null,\"curve\":null,\"refused\":[],\"note\":{}}}",
-            run_json(run),
-            js(
-                "A stored backtest. Its trades, the scanner hit and why the strategy decided as it did are in the trade explorer."
+    // Where the run's ledger is, which session of it, and what to call it: a live or paper ledger of this service, or the
+    // ledger of a replayed day (one session per strategy).
+    let (dir, kind, name, session) = match &run.source {
+        RunSource::Ledger { session, .. } => {
+            let (dir, kind) = src.ledger.as_ref().ok_or("no ledger")?;
+            (
+                dir.clone(),
+                *kind,
+                dir.display().to_string(),
+                Some(*session),
             )
-        )));
+        }
+        RunSource::Replay { scenario, day } => {
+            let r = src.research.as_ref().ok_or("no research results")?;
+            let dir = r
+                .view()
+                .replay_ledger(scenario, day)
+                .map_err(|e| research_text(&e))?;
+            (dir, Kind::Backtest, format!("{scenario}/{day}"), None)
+        }
+        RunSource::Stored { .. } => {
+            return Ok(Some(format!(
+                "{{\"run\":{},\"trades\":null,\"curve\":null,\"refused\":[],\"note\":{}}}",
+                run_json(run),
+                js(
+                    "A stored backtest. Its trades, the scanner hit and why the strategy decided as it did are in the trade explorer."
+                )
+            )));
+        }
     };
-    let (dir, kind) = src.ledger.as_ref().ok_or("no ledger")?;
-    let name = dir.display().to_string();
-    let all = tf_catalog::sessions_detailed(ReadOnlyStore::open(dir), &name, *kind)
+    let all = tf_catalog::sessions_detailed(ReadOnlyStore::open(&dir), &name, kind)
         .map_err(|e| e.to_string())?;
     let detail = all
         .into_iter()
         .find(|(r, _)| {
             r.strategy == strategy
-                && matches!(&r.source, RunSource::Ledger { session: s, .. } if s == session)
+                && session.is_none_or(
+                    |n| matches!(&r.source, RunSource::Ledger { session: s, .. } if *s == n),
+                )
         })
         .map(|(_, d)| d)
         .ok_or("the run disappeared from the ledger")?;
@@ -392,6 +415,40 @@ pub fn overview(src: &Source) -> Result<String, String> {
     let Some((dir, kind)) = &src.ledger else {
         return Ok("{\"account\":null,\"groups\":[],\"strategies\":[]}".to_owned());
     };
+    overview_of(&cat, dir, *kind)
+}
+
+/// What a research error says, as text.
+fn research_text(e: &ResearchError) -> String {
+    match e {
+        ResearchError::NotFound(m) | ResearchError::Refused(m) => m.clone(),
+    }
+}
+
+/// [`overview`] of one replayed day: the budgets, their use, the day's profit and each strategy's state as its ledger left them,
+/// shown as the overview of a live ledger is (E19-S42).
+pub fn replay_overview(src: &Source, scenario: &str, day: &str) -> Result<String, ResearchError> {
+    let r = src
+        .research
+        .as_ref()
+        .ok_or_else(|| ResearchError::NotFound("no research results are connected".to_owned()))?;
+    let dir = r.view().replay_ledger(scenario, day)?;
+    let sessions = tf_catalog::sessions(
+        ReadOnlyStore::open(&dir),
+        &format!("{scenario}/{day}"),
+        Kind::Backtest,
+    )
+    .map_err(|e| ResearchError::Refused(e.to_string()))?;
+    let cat = Catalog::new(
+        sessions
+            .into_iter()
+            .map(|s| tf_catalog::as_replay(s, scenario, day))
+            .collect(),
+    );
+    overview_of(&cat, &dir, Kind::Backtest).map_err(ResearchError::Refused)
+}
+
+fn overview_of(cat: &Catalog, dir: &Path, kind: Kind) -> Result<String, String> {
     let (j, rec) = Journal::open_recorded(ReadOnlyStore::open(dir)).map_err(|e| e.to_string())?;
     let gw = j.gateway();
     let snap = j.snapshot();

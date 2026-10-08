@@ -9,6 +9,7 @@
   var failed = false;
   var props = null;     // /api/proposals
   var runView = null;   // {strategy, id, runs, detail} for the run screen
+  var dayCtx = null;    // {scenario, day} while a replayed day's overview is being drawn
   var btView = null;    // {want, list, missing, trades, error} for the backtests screens
   var REASONS = {
     invalid: "the order itself was malformed", kill_switch: "the kill switch was on",
@@ -51,7 +52,13 @@
   function ratio(a, b) { return b > 0 ? Math.min(1, Math.max(0, a / b)) : 0; }
   function pctOf(a, b) { return b > 0 ? Math.round((a / b) * 100) + "%" : "0%"; }
   function pnlClass(s) { var n = num(s); return n > 0 ? "mono pos" : n < 0 ? "mono neg" : "mono"; }
-  function select(id) { selected = id; location.hash = "g=" + encodeURIComponent(id); draw(); }
+  function select(id) {
+    selected = id;
+    var w = route();
+    // On a replayed day's overview the address says which day; picking a group only redraws.
+    if (!(w && w.backtests)) location.hash = "g=" + encodeURIComponent(id);
+    draw();
+  }
 
   function totals(a) {
     var reserved = data.groups.reduce(function (t, g) { return t + num(g.budget); }, 0);
@@ -122,7 +129,8 @@
       var fill = h("div", { "class": "fill" + (used > budget ? " hot" : "") });
       fill.style.width = (ratio(used, budget) * 100).toFixed(1) + "%";
       var track = h("div", { "class": "track", style: "height:6px" }, fill);
-      return h("a", { "class": "trow link", role: "row", href: "#/s/" + encodeURIComponent(s.name), "aria-label": "Open " + s.name + ", " + s.runs + (s.runs === 1 ? " run" : " runs") },
+      var rowHref = "#/s/" + encodeURIComponent(s.name) + (dayCtx ? "/" + encodeURIComponent("replay:" + dayCtx.scenario + ":" + dayCtx.day) : "");
+      return h("a", { "class": "trow link", role: "row", href: rowHref, "aria-label": "Open " + s.name + ", " + s.runs + (s.runs === 1 ? " run" : " runs") },
         h("span", { style: "font-weight:500" }, s.name),
         h("span", { "class": "mono" }, pct(s.share_bp)),
         h("span", { "class": "mono" }, usd(s.budget)),
@@ -379,6 +387,10 @@
       summaryBox("Trades", run.trades === null ? "—" : String(run.trades), run.kind + (run.explorable ? " · stored" : "")),
       summaryBox("Budget that session", run.budget ? usd(run.budget) : "—", null),
       summaryBox("Entry rules", run.rules ? run.rules.slice(0, 12) : "—", run.rules ? "" : "not recorded for this kind of run")));
+    if (run.replayed) {
+      main.push(h("div", { "class": "row" }, h("span", { "class": "small mute" }, "A replayed day of the scenario " + run.scenario + ", read from its ledger."),
+        h("a", { "class": "btn", href: "#/backtests/" + encodeURIComponent(run.scenario) + "/" + encodeURIComponent(run.day) }, "The day, its trades and replays ›")));
+    }
     if (!d) {
       main.push(h("div", { "class": "card empty" }, "Loading the run…"));
     } else if (d.trades === null) {
@@ -624,23 +636,63 @@
         h.apply(null, ["div", { "class": "row" }, h("span", { "class": "small mute" }, "Days:")].concat(links)));
     });
     var c = sc.cost;
+    var dayChips = days.map(function (d) {
+      var l = (sc.ledgers || []).filter(function (x) { return x.day === d; })[0];
+      if (l && !l.ok) return h("span", { "class": "chip mute", title: l.error }, d.slice(5) + " · no ledger");
+      return h("a", { "class": "chip", href: "#/backtests/" + encodeURIComponent(sc.name) + "/" + encodeURIComponent(d) }, d.slice(5));
+    });
     return h("section", { "class": "card panel" },
       h("div", { "class": "between" }, h("h2", null, sc.name),
         h("span", { "class": "row" }, h("span", { "class": "chip" }, days.length + " days " + (days.length ? days[0] + " to " + days[days.length - 1] : "")),
           h("span", { "class": pnlClass(sc.net) + " chip" }, usd(sc.net) + " · " + sc.trades + " trades"))),
       h("div", { "class": "small mute" }, "Costs: " + c.latency_ms + " ms to the broker · borrow " + c.borrow_bps_per_year + " bp a year · Section 31 rates through " + c.sec_through + " · TAF rates through " + c.taf_through),
-      splitBars(sc), h.apply(null, ["div", null].concat(rows)));
+      splitBars(sc),
+      h.apply(null, ["div", { "class": "row" }, h("span", { "class": "small mute" }, "A day from its ledger, as the engine left it:")].concat(dayChips)),
+      h.apply(null, ["div", null].concat(rows)));
   }
   function drawBacktests() {
     var bt = btView;
     var kids = [h("nav", { "class": "row small mute" }, h("a", { "class": "btn", href: "#" }, "‹ Overview"), h("span", null, "Workspace"), h("span", { "aria-hidden": "true" }, "/"), h("b", { style: "color:var(--ink)" }, "Backtests"))];
-    if (bt.want.scenario) return drawBtDay(kids);
+    if (bt.want.scenario) return bt.want.strategy ? drawBtDay(kids) : drawDayOverview(kids);
     kids.push(h("h1", null, "Backtests"));
     if (bt.missing) kids.push(h("div", { "class": "card empty" }, "No research results are connected to this workspace."));
     else if (bt.list.scenarios.length === 0) kids.push(h("div", { "class": "card empty" }, "There are no scenarios yet."));
     else bt.list.scenarios.forEach(function (sc) { kids.push(scenarioCard(sc)); });
     app.replaceChildren.apply(app, kids);
   }
+  // A replayed day as its ledger left it: the overview a live ledger has (budgets, use, day P&L, state), then where its trades are.
+  function drawDayOverview(kids) {
+    var bt = btView, w = bt.want, d = bt.day;
+    kids.push(h("a", { "class": "btn", style: "align-self:flex-start", href: btHash() }, "‹ All scenarios"),
+      h("h1", null, w.scenario + " · " + w.day));
+    if (!d || d.error) {
+      kids.push(h("div", { "class": "card empty" }, d ? d.error : "Loading…"));
+      app.replaceChildren.apply(app, kids);
+      return;
+    }
+    if (!d.account || !d.account.budgets) {
+      kids.push(h("div", { "class": "card empty" }, "This day's ledger holds no budgets, so there is nothing to split."));
+      app.replaceChildren.apply(app, kids);
+      return;
+    }
+    kids.push(h("div", { "class": "small mute" }, "Read from the day's ledger as the ledger of a live day is: the same figures the engine would show at the close. Fills are simulated against the recorded quotes."));
+    // The overview's own pieces read the data they are given: give them this day's, and hand the page's back.
+    var keepData = data, keepDay = dayCtx;
+    data = d; dayCtx = { scenario: w.scenario, day: w.day };
+    try {
+      var ids = data.groups.map(function (g) { return g.id; });
+      if (ids.indexOf(selected) < 0) selected = ids[0];
+      var gi = ids.indexOf(selected), g = data.groups[gi];
+      kids.push(totals(data.account), allocation(), h("div", { "class": "split" },
+        h("div", { "class": "mainc" }, groupCards(), strategies(g, gi)), h("aside", null, limits(g))));
+    } finally { data = keepData; dayCtx = keepDay; }
+    var links = d.strategies.map(function (st) {
+      return h("a", { "class": "btn", href: btHash(w.scenario, w.day, st.number) }, st.name + ": trades and replay ›");
+    });
+    kids.push(h.apply(null, ["div", { "class": "row" }].concat(links)));
+    app.replaceChildren.apply(app, kids);
+  }
+
   function drawBtDay(kids) {
     var bt = btView, w = bt.want, t = bt.trades;
     var sc = bt.list && bt.list.scenarios.filter(function (x) { return x.name === w.scenario; })[0];
@@ -661,6 +713,7 @@
       sc.strategies.forEach(function (st) {
         if (String(st.id) !== String(w.strategy)) near.appendChild(h("a", { "class": "btn", href: btHash(w.scenario, w.day, st.id) }, st.name));
       });
+      near.appendChild(h("a", { "class": "btn", href: "#/backtests/" + encodeURIComponent(w.scenario) + "/" + encodeURIComponent(w.day) }, "The day from its ledger"));
       kids.push(near);
     }
     var net = t.trades.reduce(function (a, x) { return a + num(x.net); }, 0).toFixed(2);
@@ -727,7 +780,7 @@
 
   function route() {
     if (location.hash === "#/edit") return { edit: true };
-    var b = /^#\/backtests(?:\/([^/]+)\/([^/]+)\/(\d+))?$/.exec(location.hash);
+    var b = /^#\/backtests(?:\/([^/]+)\/([^/]+)(?:\/(\d+))?)?$/.exec(location.hash);
     if (b) return { backtests: true, scenario: b[1] ? decodeURIComponent(b[1]) : null, day: b[2] ? decodeURIComponent(b[2]) : null, strategy: b[3] || null };
     var m = /^#\/s\/([^/]+)(?:\/(.+))?$/.exec(location.hash);
     if (m) return { strategy: decodeURIComponent(m[1]), id: m[2] ? decodeURIComponent(m[2]) : null };
@@ -749,7 +802,13 @@
 
   function loadBacktests(want) {
     var jobs = [get("/api/research").catch(function (e) { return e.message === "404" ? "missing" : null; })];
-    if (want.scenario) {
+    if (want.scenario && !want.strategy) {
+      // A replayed day's overview: what the ledger says, or why it cannot be read (the server's reason, as text).
+      jobs.push(fetch("/api/overview?scenario=" + encodeURIComponent(want.scenario) + "&day=" + encodeURIComponent(want.day), { credentials: "same-origin", cache: "no-store" }).then(function (r) {
+        if (r.status === 401) { location.href = "/"; return null; }
+        return r.json().then(function (j) { return r.ok ? { overview: j } : { error: j.error || "This day cannot be shown." }; });
+      }).catch(function () { return { error: "Could not load the day." }; }));
+    } else if (want.scenario) {
       jobs.push(get("/api/research/trades?scenario=" + encodeURIComponent(want.scenario) + "&day=" + encodeURIComponent(want.day) + "&strategy=" + encodeURIComponent(want.strategy))
         .catch(function (e) { return { error: e.message === "404" ? "There is nothing at this address." : e.message === "422" ? "These results cannot be shown: a file is damaged or does not match." : "Could not load the trades." }; }));
     }
@@ -757,9 +816,11 @@
       if (res[0] === null && !btView) { app.replaceChildren(h("p", { "class": "err" }, "Could not load the backtests.")); return; }
       var same = btView && btView.want.scenario === want.scenario && btView.want.day === want.day && btView.want.strategy === want.strategy;
       var list = res[0] === "missing" ? null : res[0] || (btView && btView.list);
-      var t = res[1] && !res[1].error ? res[1] : null;
-      var next = { want: want, list: list, missing: res[0] === "missing", trades: t || (same && !res[1] ? btView.trades : null), error: res[1] && res[1].error };
-      next.sig = JSON.stringify([next.want, next.list, next.missing, next.trades, next.error]);
+      var isDay = want.scenario && !want.strategy;
+      var t = !isDay && res[1] && !res[1].error ? res[1] : null;
+      var next = { want: want, list: list, missing: res[0] === "missing", trades: t || (same && !isDay && !res[1] ? btView.trades : null), error: !isDay && res[1] && res[1].error,
+        day: isDay && res[1] ? (res[1].overview || { error: res[1].error }) : null };
+      next.sig = JSON.stringify([next.want, next.list, next.missing, next.trades, next.error, next.day]);
       // Nothing new: leave the page alone, so that what is being typed in it is not thrown away.
       if (btView && btView.sig === next.sig) return;
       btView = next;

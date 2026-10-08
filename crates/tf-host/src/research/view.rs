@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tf_calendar::{Calendar, Date};
+use tf_calendar::Calendar;
 use tf_catalog::Run;
 use tf_core::Nanos;
 
@@ -177,20 +177,6 @@ fn mean_bp(n: u64, bps: i128) -> String {
     js(&bp(mean))
 }
 
-/// The start of a scenario's data: the open of its first day, as event time (0 if the calendar does not say).
-fn started(first_day: Option<&str>) -> Nanos {
-    let Some(d) = first_day.filter(|d| is_date(d)) else {
-        return 0;
-    };
-    let date = Date::new(
-        d[..4].parse().unwrap_or(0),
-        d[5..7].parse().unwrap_or(0),
-        d[8..10].parse().unwrap_or(0),
-    );
-    date.and_then(|date| Calendar::us_equities().times(date).ok().flatten())
-        .map_or(0, |t| t.open)
-}
-
 fn budget_of(results: &Results, id: u16) -> Option<u128> {
     let b = results.budgets().ok().flatten()?;
     b.tree.strategy_budget(b.balance, b.ids.get(&id)?)
@@ -263,13 +249,26 @@ fn scenario_json(root: &Path, name: &str) -> Result<String, ViewError> {
     let trips = r.trips()?;
     let cost = r.cost();
     let strategies: Vec<String> = lines.iter().map(|l| strategy_json(l, &trips, &r)).collect();
+    // Which days have their ledger, as the host wrote it, and for each that has not, why: the workspace opens a day from it.
+    let ledgers: Vec<String> = days
+        .iter()
+        .map(|d| match r.ledger(d) {
+            Ok(_) => format!("{{\"day\":{},\"ok\":true}}", js(d)),
+            Err(e) => format!(
+                "{{\"day\":{},\"ok\":false,\"error\":{}}}",
+                js(d),
+                js(&ledger_problem(&r, d, &e.to_string()))
+            ),
+        })
+        .collect();
     let (n, net, _) = trips.iter().fold((0u64, 0i128, 0i128), |a, t| {
         (a.0 + 1, a.1 + i128::from(t.net), 0)
     });
     Ok(format!(
-        "{{\"name\":{},\"days\":[{}],\"trades\":{n},\"net\":{},\"cost\":{{\"latency_ms\":{},\"borrow_bps_per_year\":{},\"sec_through\":{},\"taf_through\":{}}},\"strategies\":[{}],\"budgets\":{}}}",
+        "{{\"name\":{},\"days\":[{}],\"ledgers\":[{}],\"trades\":{n},\"net\":{},\"cost\":{{\"latency_ms\":{},\"borrow_bps_per_year\":{},\"sec_through\":{},\"taf_through\":{}}},\"strategies\":[{}],\"budgets\":{}}}",
         js(name),
         days.iter().map(|d| js(d)).collect::<Vec<_>>().join(","),
+        ledgers.join(","),
         js(&dollars(net)),
         cost.latency_ns / 1_000_000,
         cost.borrow_bps_per_year,
@@ -295,29 +294,54 @@ pub fn scenarios_json(root: &Path) -> Result<String, String> {
     Ok(format!("{{\"scenarios\":[{}]}}", items.join(",")))
 }
 
-/// The strategies of every scenario under `root` as runs for the catalog.
+/// Why a day's ledger cannot be used, in words: a day made before ledgers were kept says so.
+fn ledger_problem(r: &Results, day: &str, why: &str) -> String {
+    if r.ledger_dir(day).join("ledger.log").exists() {
+        why.to_owned()
+    } else {
+        "this day was made before ledgers were kept: run the scenario again to have it".to_owned()
+    }
+}
+
+/// The sessions of every replayed day under `root`, read from the day's ledger as a live ledger is: one run for each strategy
+/// that acted on each day, a backtest of that scenario and day. A day without a good ledger has none.
 pub fn catalog_runs(root: &Path) -> Result<Vec<Run>, String> {
     let mut runs = Vec::new();
     for name in scenario_names(root)? {
         let Ok(r) = open(root, &name) else { continue };
-        let (Ok(lines), Ok(trips), Ok(days)) = (r.definition_lines(), r.trips(), r.dates()) else {
-            continue;
-        };
-        let at = started(days.first().map(String::as_str));
-        for l in &lines {
-            let (n, net, _) = net_of(&trips, l.fingerprint);
-            runs.push(tf_catalog::research_run(
-                &name,
-                &format!("{:016x}", l.fingerprint),
-                &l.name,
-                at,
-                net,
-                n,
-                budget_of(&r, l.id),
-            ));
+        let Ok(days) = r.dates() else { continue };
+        for day in days {
+            let Ok(dir) = r.ledger(&day) else { continue };
+            let Ok(sessions) = tf_catalog::sessions(
+                tf_ledger::ReadOnlyStore::open(dir),
+                &format!("{name}/{day}"),
+                tf_catalog::Kind::Backtest,
+            ) else {
+                continue;
+            };
+            runs.extend(
+                sessions
+                    .into_iter()
+                    .map(|s| tf_catalog::as_replay(s, &name, &day)),
+            );
         }
     }
     Ok(runs)
+}
+
+/// The directory of a replayed day's ledger, checked to be the one the day was made with, for the workspace to read as it reads a
+/// live ledger.
+pub fn replay_ledger(root: &Path, scenario: &str, day: &str) -> Result<PathBuf, ViewError> {
+    let r = open(root, scenario)?;
+    day_of(&r, day)?;
+    r.ledger(day).map_err(|e| {
+        let why = ledger_problem(&r, day, &e.to_string());
+        if r.ledger_dir(day).join("ledger.log").exists() {
+            ViewError::Refused(why)
+        } else {
+            ViewError::NotFound(why)
+        }
+    })
 }
 
 /// The directory of a scenario, if `scenario` names one: for the hosting program to say where results are.

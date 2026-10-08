@@ -3993,3 +3993,233 @@ mod live_day {
         }
     }
 }
+
+// ---- what the engine did with Tier 1 around a trade (E19-S43) ----
+
+mod tier_parts {
+    use super::super::trade::{
+        TIER_ROWS, TierEv, held_before, symbol_names, tier_events, tier_reason, tiers_json,
+    };
+    use super::*;
+    use crate::equiv::{Answer, Rec};
+    use tf_strategy::trace::Trace;
+
+    fn dec(
+        ts: Nanos,
+        strategy: u16,
+        instrument: u32,
+        side: Side,
+        purpose: Purpose,
+        answer: Answer,
+    ) -> Rec {
+        Rec::Decision {
+            idx: 0,
+            ts,
+            strategy,
+            seq: 0,
+            instrument,
+            side,
+            qty: 100,
+            purpose,
+            limit: 1,
+            reason: 0,
+            answer,
+        }
+    }
+
+    fn fill(ts: Nanos, order: u64, instrument: u32, qty: u32, px: i64) -> Rec {
+        Rec::Fill {
+            idx: 0,
+            ts,
+            order,
+            instrument,
+            qty,
+            px,
+        }
+    }
+
+    fn acc(o: u64) -> Answer {
+        Answer::Accepted(o)
+    }
+
+    fn tier(ts: Nanos, instrument: u32, promote: bool, reason: u8, score: i64) -> Rec {
+        Rec::Tier {
+            idx: 0,
+            ts,
+            instrument,
+            promote,
+            reason,
+            score,
+        }
+    }
+
+    #[test]
+    fn the_tier_changes_of_a_log_are_read_in_order_with_their_reasons_in_words() {
+        let recs = vec![
+            dec(1, 1, 5, Side::Buy, Purpose::Open, acc(1)),
+            tier(10, 5, true, 1, 9_200),
+            fill(11, 1, 5, 100, 1),
+            tier(20, 6, false, 2, 0),
+            Rec::Action {
+                idx: 0,
+                ts: 21,
+                what: "end_of_day".into(),
+            },
+            tier(30, 7, true, 3, 0),
+        ];
+        let evs = tier_events(&recs);
+        assert_eq!(evs.len(), 3);
+        assert_eq!(
+            evs[0],
+            TierEv {
+                ts: 10,
+                instrument: 5,
+                promote: true,
+                reason: 1,
+                score: 9_200
+            }
+        );
+        assert_eq!(
+            (evs[1].ts, evs[1].promote, evs[2].instrument),
+            (20, false, 7)
+        );
+        assert!(tier_events(&[]).is_empty());
+        assert_eq!(tier_reason(1, 9_200), "scanner hit, volume z-score 9.200");
+        assert_eq!(tier_reason(1, -500), "scanner hit, volume z-score -0.500");
+        assert_eq!(tier_reason(2, 0), "cooled off");
+        assert_eq!(tier_reason(3, 0), "a strategy asked for it");
+        assert_eq!(
+            tier_reason(4, 0),
+            "made room for a request of higher priority"
+        );
+        assert_eq!(tier_reason(9, 0), "reason 9");
+    }
+
+    #[test]
+    fn who_held_tier_1_before_a_time_is_what_the_changes_before_it_leave() {
+        let e = |ts, instrument, promote| TierEv {
+            ts,
+            instrument,
+            promote,
+            reason: 1,
+            score: 0,
+        };
+        let evs = [
+            e(10, 1, true),
+            e(20, 2, true),
+            e(30, 1, false),
+            e(40, 1, true),
+            e(45, 1, true),
+            e(50, 9, false),
+        ];
+        assert_eq!(held_before(&evs, 5), Vec::<u32>::new());
+        assert_eq!(
+            held_before(&evs, 10),
+            Vec::<u32>::new(),
+            "a change at the time is not before it"
+        );
+        assert_eq!(held_before(&evs, 11), [1]);
+        assert_eq!(held_before(&evs, 25), [1, 2]);
+        assert_eq!(held_before(&evs, 31), [2]);
+        assert_eq!(held_before(&evs, 46), [2, 1], "promoted again, once");
+        assert_eq!(
+            held_before(&evs, 99),
+            [2, 1],
+            "a demotion of a name that was not held changes nothing"
+        );
+        assert!(held_before(&[], 99).is_empty());
+    }
+
+    #[test]
+    fn instrument_names_come_from_the_hosts_trace_and_the_page_lists_the_changes_around_a_trade() {
+        let mut book = Trace::new(0, "instruments").with_columns(&["instrument", "symbol"]);
+        for (i, n) in [("5", "AAA"), ("6", "BBB"), ("x", "bad")] {
+            book.push_row(vec![i.into(), n.into()]);
+        }
+        let mut other = Trace::new(0, "instruments").with_columns(&["instrument", "symbol"]);
+        other.push_row(vec!["9".into(), "NOPE".into()]);
+        let traces = vec![(1, other), (0, book)];
+        let names = symbol_names(&traces);
+        assert_eq!(names.len(), 2);
+        assert_eq!((names[&5].as_str(), names[&6].as_str()), ("AAA", "BBB"));
+        assert!(symbol_names(&[]).is_empty());
+        let e = |ts, instrument, promote, reason, score| TierEv {
+            ts,
+            instrument,
+            promote,
+            reason,
+            score,
+        };
+        let evs = [
+            e(5_000, 6, true, 1, 7_000),
+            e(10_000, 5, true, 1, 9_200),
+            e(20_000, 7, true, 3, 0),
+            e(30_000, 5, false, 2, 0),
+            e(99_000, 5, true, 1, 1),
+        ];
+        let us = |ts: Nanos| (ts / 1000) as i64;
+        // The window is inclusive at both ends; the traded instrument's changes of the whole day are listed apart.
+        let j = json(&tiers_json(&evs, &names, Some(5), 10_000, 30_000, &us));
+        assert_eq!(j.get("day_events").s(), "5");
+        assert_eq!(
+            j.get("start").arr().iter().map(J::s).collect::<Vec<_>>(),
+            ["BBB"]
+        );
+        assert_eq!(j.get("around_total").s(), "3");
+        let around = j.get("around").arr();
+        assert_eq!(
+            around
+                .iter()
+                .map(|a| a.get("symbol").s())
+                .collect::<Vec<_>>(),
+            ["AAA", "#7", "AAA"]
+        );
+        assert_eq!(
+            around
+                .iter()
+                .map(|a| a.get("action").s())
+                .collect::<Vec<_>>(),
+            ["promoted", "promoted", "demoted"]
+        );
+        assert_eq!(
+            around.iter().map(|a| a.get("mine")).collect::<Vec<_>>(),
+            [&J::Bool(true), &J::Bool(false), &J::Bool(true)]
+        );
+        assert_eq!(
+            (
+                around[0].get("us").s(),
+                around[0].get("reason").s(),
+                around[0].get("score").s()
+            ),
+            ("10", "scanner hit, volume z-score 9.200", "9200")
+        );
+        assert_eq!(around[1].get("reason").s(), "a strategy asked for it");
+        let mine = j.get("mine").arr();
+        assert_eq!(
+            mine.iter().map(|m| m.get("us").s()).collect::<Vec<_>>(),
+            ["10", "30", "99"]
+        );
+        // No traded instrument known: none is marked, and none is listed apart.
+        let none = json(&tiers_json(&evs, &names, None, 0, 100_000, &us));
+        assert!(none.get("mine").arr().is_empty());
+        assert!(
+            none.get("around")
+                .arr()
+                .iter()
+                .all(|a| a.get("mine") == &J::Bool(false))
+        );
+        // A long window is cut at the page's limit and says how many there were.
+        let many: Vec<TierEv> = (0..=TIER_ROWS as u64)
+            .map(|i| e(i * 1000, 5, i % 2 == 0, 1, 0))
+            .collect();
+        let long = json(&tiers_json(&many, &names, Some(5), 0, 1_000_000, &us));
+        assert_eq!(
+            (long.get("around").arr().len(), long.get("around_total").s()),
+            (TIER_ROWS, "301")
+        );
+        // Nothing at all.
+        let empty = json(&tiers_json(&[], &names, Some(5), 0, 1, &us));
+        assert_eq!(empty.get("day_events").s(), "0");
+        assert!(empty.get("around").arr().is_empty() && empty.get("start").arr().is_empty());
+    }
+}

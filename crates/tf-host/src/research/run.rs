@@ -800,7 +800,7 @@ pub(crate) fn easy_to_borrow(reference: &Reference) -> BTreeSet<u32> {
         .collect()
 }
 
-/// The kind of the host's trace of the instruments a day traded, by number and symbol (strategy 0 in a day's traces).
+/// The kind of the host's trace of the instruments a day made a decision, a fill or a tier change about, by number and symbol (strategy 0 in a day's traces).
 pub const INSTRUMENTS: &str = "instruments";
 
 /// The kind of the host's trace of the day's executions (strategy 0 in a day's traces): what each was for, the price asked
@@ -949,7 +949,9 @@ fn run_day_on<S: LedgerStore>(
     let mut traded = std::collections::BTreeSet::new();
     for rec in &host.log().expect("recording").recs {
         match rec {
-            Rec::Decision { instrument, .. } | Rec::Fill { instrument, .. } => {
+            Rec::Decision { instrument, .. }
+            | Rec::Fill { instrument, .. }
+            | Rec::Tier { instrument, .. } => {
                 traded.insert(*instrument);
             }
             _ => {}

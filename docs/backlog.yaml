@@ -2373,7 +2373,25 @@ epics:
       - id: E19-S43
         jira: TIC-197
         title: "Trade replay shows the engine's tiers: scanner hit, promotion, demotion and the names in Tier 1"
-        status: todo
+        status: done
+        evidence: >-
+          ADR 0070. The trade page shows what the engine did with Tier 1 from the day's decision log as recorded (a time, a name, promoted
+          or demoted, the reason code in words with the scanner's volume z-score, and the score): markers on the chart where the traded
+          name was promoted or demoted in the window the market is kept for (edges inclusive), the number and names (first five) holding
+          Tier 1 at the cursor in the readout, and an "engine's tiers" panel with the traded name's own changes of the day, every name's
+          changes in the window (up to 300, saying how many) with the traded name shaded and the rows after the cursor dimmed, and who held
+          Tier 1 when the window began. A day with no tier changes says the engine promoted no one and the strategy decided on Tier 0; a day
+          with changes but none of this name says it was never promoted. The day's host trace of instruments now includes every instrument
+          whose tier changed, so a promoted name that was never traded keeps its symbol. Checked in a browser on a three-day T04 scenario
+          whose log was given scanner promotions and demotions by hand (the scripted days have none): the markers, the readout "Tier 1: 2
+          (S00, NVDA)", the table with its shading and the sentence about this name. Tests: the tier events and their reasons, who held
+          Tier 1 before a time (strict at the time, repeats, a demotion of a name not held), the names from the host's trace and not a
+          strategy's, the window's inclusive edges with names and the `#number` fallback and the 300-row limit, the page's data from a day
+          whose log was given changes at, just inside and just outside both edges of the window (the markers, the list, the held set, the
+          day's own list), a day with none, and a syntax check of both pages' scripts by node when it is installed (the first version of
+          this page had a missing parenthesis that no Rust test saw). Full workspace 1,196 passed; clippy and fmt clean. Mutation run on
+          the new code: 15 mutants, 2 survivors on the first run (the window's edges), given a test at the edges and killed. Not known: how
+          useful the panel is on a real day with real scanner hits; the strategies' own pins on Tier 1 are not in the log.
         deps: [E19-S41, E19-S35]
         ac:
           - "The trade page shows what the engine did with the symbol and the names around it: when the scanner promoted it (with the score and reason the engine recorded), when it was demoted, and which names held Tier 1 at the cursor, from the day's decision log"

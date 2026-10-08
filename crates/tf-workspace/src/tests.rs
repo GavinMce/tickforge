@@ -1557,3 +1557,260 @@ fn trip_loss(j: &mut Journal<FileStore>) {
     fill(j, &s, 4 * P / 10);
     assert!(!j.check_loss_limits(1_500 * SEC).unwrap().is_empty());
 }
+
+// ---- the backtest view (E19-S34, E19-S35) ----
+
+struct FakeResearch;
+
+impl crate::ResearchView for FakeResearch {
+    fn runs(&self) -> Result<Vec<tf_catalog::Run>, String> {
+        Ok(vec![tf_catalog::research_run(
+            "alpha",
+            "00ff00ff00ff00ff",
+            "t04",
+            5 * SEC,
+            -2 * i128::from(P),
+            3,
+            Some(50_000 * P as u128),
+        )])
+    }
+
+    fn scenarios(&self) -> Result<String, String> {
+        Ok("{\"scenarios\":[]}".to_owned())
+    }
+
+    fn trades(
+        &self,
+        scenario: &str,
+        day: &str,
+        strategy: u16,
+    ) -> Result<String, crate::ResearchError> {
+        use crate::ResearchError::{NotFound, Refused};
+        match (scenario, day, strategy) {
+            ("alpha", "2026-05-04", 1) => Ok("{\"trades\":[]}".to_owned()),
+            ("damaged", _, _) => Err(Refused("the trace file <b>does not match</b>".into())),
+            _ => Err(NotFound("no such day".into())),
+        }
+    }
+
+    fn trade_page(
+        &self,
+        scenario: &str,
+        day: &str,
+        strategy: u16,
+        n: usize,
+    ) -> Result<String, crate::ResearchError> {
+        use crate::ResearchError::{NotFound, Refused};
+        match (scenario, day, strategy, n) {
+            ("alpha", "2026-05-04", 1, 0) => Ok("<!doctype html><title>TRADE PAGE</title>".into()),
+            ("damaged", _, _, _) => Err(Refused("a <b>damaged</b> log & trace".into())),
+            _ => Err(NotFound("no such trade".into())),
+        }
+    }
+}
+
+fn with_research() -> Source {
+    Source {
+        research: Some(crate::Research::new(FakeResearch)),
+        ..Source::default()
+    }
+}
+
+#[test]
+fn the_backtest_routes_answer_only_signed_in_gets_and_map_what_the_view_says() {
+    let s = with_research();
+    let api = "/api/research/trades";
+    let with = |path: &str, q: &str| Request {
+        query: q.into(),
+        ..signed(path)
+    };
+    assert_eq!(handle(&s, TOKEN, &get("/api/research")).status, 401);
+    assert_eq!(handle(&s, TOKEN, &get("/research/trade")).status, 401);
+    let list = handle(&s, TOKEN, &signed("/api/research"));
+    assert_eq!(
+        (list.status, list.body.as_str()),
+        (200, "{\"scenarios\":[]}")
+    );
+    let q = "scenario=alpha&day=2026-05-04&strategy=1";
+    assert_eq!(handle(&s, TOKEN, &with(api, q)).status, 200);
+    assert_eq!(
+        handle(
+            &s,
+            TOKEN,
+            &with(api, "scenario=alpha&day=2026-05-05&strategy=1")
+        )
+        .status,
+        404
+    );
+    // The view's refusal is a 422 and its text is JSON, not markup.
+    let refused = handle(&s, TOKEN, &with(api, "scenario=damaged&day=d&strategy=1"));
+    assert_eq!(refused.status, 422);
+    assert!(refused.body.contains("does not match"), "{}", refused.body);
+    // A request that does not say which day of what is a 400 and reaches nobody.
+    for bad in [
+        "",
+        "scenario=alpha",
+        "scenario=alpha&day=2026-05-04",
+        "scenario=alpha&day=2026-05-04&strategy=x",
+        "scenario=alpha&day=2026-05-04&strategy=70000",
+    ] {
+        assert_eq!(handle(&s, TOKEN, &with(api, bad)).status, 400, "{bad}");
+    }
+    // Nothing is changed through them.
+    for path in ["/api/research", api, "/research/trade"] {
+        let post = Request {
+            method: "POST".into(),
+            ..signed(path)
+        };
+        assert_eq!(handle(&s, TOKEN, &post).status, 405, "{path}");
+    }
+    // Without results there is nothing to show.
+    let none = Source::default();
+    assert_eq!(handle(&none, TOKEN, &signed("/api/research")).status, 404);
+    assert_eq!(handle(&none, TOKEN, &with(api, q)).status, 404);
+    assert_eq!(
+        handle(&none, TOKEN, &with("/research/trade", &format!("{q}&n=0"))).status,
+        404
+    );
+}
+
+#[test]
+fn a_trade_page_is_the_explorers_kind_of_page_and_says_why_it_is_not_given_as_text() {
+    let s = with_research();
+    let page = |q: &str| {
+        handle(
+            &s,
+            TOKEN,
+            &Request {
+                query: q.into(),
+                ..signed("/research/trade")
+            },
+        )
+    };
+    let ok = page("scenario=alpha&day=2026-05-04&strategy=1&n=0");
+    assert_eq!(ok.status, 200);
+    assert!(ok.body.contains("TRADE PAGE"));
+    assert!(
+        ok.csp.contains("script-src 'unsafe-inline'") && ok.csp.contains("connect-src 'none'"),
+        "{}",
+        ok.csp
+    );
+    assert!(ok.csp.contains("frame-ancestors 'none'") && ok.csp.contains("form-action 'none'"));
+    assert_eq!(
+        page("scenario=alpha&day=2026-05-04&strategy=1&n=9").status,
+        404
+    );
+    let refused = page("scenario=damaged&day=2026-05-04&strategy=1&n=0");
+    assert_eq!(refused.status, 422);
+    assert!(
+        refused
+            .body
+            .contains("a &lt;b&gt;damaged&lt;/b&gt; log &amp; trace"),
+        "{}",
+        refused.body
+    );
+    assert!(!refused.body.contains("<b>damaged"));
+    for bad in [
+        "",
+        "scenario=alpha&day=2026-05-04&strategy=1",
+        "scenario=alpha&day=2026-05-04&strategy=1&n=-1",
+        "scenario=alpha&day=2026-05-04&strategy=1&n=x",
+    ] {
+        let r = page(bad);
+        assert_eq!(r.status, 400, "{bad}");
+        assert!(!r.body.contains("TRADE PAGE"));
+    }
+}
+
+#[test]
+fn a_research_strategy_is_in_the_runs_with_a_pointer_to_the_backtests() {
+    let s = with_research();
+    let runs = crate::runs(&s, Some("t04")).unwrap();
+    assert!(
+        runs.contains("\"researchable\":true") && runs.contains("\"explorable\":false"),
+        "{runs}"
+    );
+    assert!(
+        runs.contains("\"source\":\"research\"")
+            && runs.contains("research:alpha:00ff00ff00ff00ff"),
+        "{runs}"
+    );
+    let d = crate::run_detail(&s, "t04", "research:alpha:00ff00ff00ff00ff")
+        .unwrap()
+        .unwrap();
+    assert!(
+        d.contains("\"trades\":null") && d.contains("scenario alpha") && d.contains("Backtests"),
+        "{d}"
+    );
+    assert!(!d.contains("A stored backtest"), "{d}");
+    // A run of another kind is not researchable.
+    let none = crate::runs(&Source::default(), None).unwrap();
+    assert!(!none.contains("\"researchable\":true"));
+}
+
+#[test]
+fn the_backtest_screens_read_only_what_the_view_sends_and_stay_get_only() {
+    let app = include_str!("ui/app.js");
+    // The keys the screens read; the host's own tests read every one of them out of what it writes.
+    for key in [
+        "scenarios",
+        "error",
+        "days",
+        "trades",
+        "net",
+        "cost",
+        "latency_ms",
+        "borrow_bps_per_year",
+        "sec_through",
+        "taf_through",
+        "strategies",
+        "id",
+        "name",
+        "params",
+        "universe",
+        "mean_bp",
+        "budget",
+        "budgets",
+        "balance",
+        "unassigned_bp",
+        "groups",
+        "share_bp",
+        "soft_bp",
+        "hard_bp",
+        "number",
+        "strategy",
+        "accepted",
+        "rejected",
+        "refused",
+        "rejections",
+        "reason",
+        "count",
+        "symbol",
+        "side",
+        "qty",
+        "entry",
+        "entry_px",
+        "exit",
+        "exit_px",
+        "bp",
+        "exit_reason",
+        "open_at_end",
+        "researchable",
+    ] {
+        assert!(
+            app.contains(&format!(".{key}")),
+            "the screens do not use {key}"
+        );
+    }
+    // Only the pages of the service itself and the one trade page, and the trade page is addressed by encoded values.
+    assert!(
+        app.contains("\"/api/research\"")
+            && app.contains("/api/research/trades?scenario=\" + encodeURIComponent")
+    );
+    assert!(
+        app.contains("\"/research/trade?\" + q") && app.contains("&n=\" + encodeURIComponent(x.n)")
+    );
+    // Still no request but the two writing ones.
+    assert_eq!(app.matches("method:").count(), 2);
+    assert!(app.contains("#/backtests"));
+}

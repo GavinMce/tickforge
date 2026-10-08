@@ -157,6 +157,51 @@ pub struct RunOptions {
     pub evidence: Option<EvidenceWindow>,
 }
 
+fn unescape(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        match (c, it.clone().next()) {
+            ('\\', Some('\\')) => {
+                o.push('\\');
+                it.next();
+            }
+            ('\\', Some('n')) => {
+                o.push('\n');
+                it.next();
+            }
+            ('\\', Some('t')) => {
+                o.push('\t');
+                it.next();
+            }
+            _ => o.push(c),
+        }
+    }
+    o
+}
+
+/// One definition as the stored configuration lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefLine {
+    pub id: u16,
+    /// The fingerprint of the definition: the variant of its trips.
+    pub fingerprint: u64,
+    pub name: String,
+    pub params: String,
+    /// The universe spec, as text.
+    pub universe: String,
+}
+
+/// The budget tree a run was made under, as the configuration stores it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BudgetView {
+    /// What the tree divides, raw units.
+    pub balance: u128,
+    pub tree: tf_budget::Tree,
+    /// Which strategy number is which strategy of the tree.
+    pub ids: BTreeMap<u16, String>,
+}
+
 fn escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\n', "\\n")
@@ -213,6 +258,15 @@ impl Setup<'_> {
     /// The configuration as text: kept in the results directory and fingerprinted into every day.
     pub fn render(&self) -> String {
         let mut s = format!("{CONFIG_HEADER}\nhost {:016x}\n", self.host_fingerprint());
+        // The budget tree the strategies were run under, so that a result can say what each was allowed (the host line holds only
+        // its fingerprint).
+        if let Some(b) = &self.host.budgets {
+            s.push_str(&format!("budget\tbalance\t{}\n", b.balance()));
+            s.push_str(&format!("budget\ttree\t{}\n", escape(&b.tree().render())));
+            for (n, id) in b.ids() {
+                s.push_str(&format!("budget\tid\t{n}\t{id}\n"));
+            }
+        }
         for d in self.defs {
             s.push_str(&format!(
                 "def\t{}\t{:016x}\t{}\t{}\t{}\n",
@@ -314,9 +368,9 @@ impl Results {
         &self.cost
     }
 
-    /// The strategies the run was made with, as the stored configuration lists them: the fingerprint and the name of each,
-    /// in the order given. A strategy that made no trade is here too.
-    pub fn definitions(&self) -> Result<Vec<(u64, String)>, ResearchError> {
+    /// The strategies the run was made with, as the stored configuration lists them, in the order given. A strategy that made no
+    /// trade is here too.
+    pub fn definition_lines(&self) -> Result<Vec<DefLine>, ResearchError> {
         let path = self.dir.join(CONFIG_FILE);
         let text = fs::read_to_string(&path).map_err(|e| io(&path, e))?;
         let bad = |l: &str| {
@@ -328,13 +382,61 @@ impl Results {
             .filter(|l| l.starts_with("def\t"))
             .map(|l| {
                 let w: Vec<&str> = l.split('\t').collect();
-                let (Some(fp), Some(name)) = (w.get(2), w.get(3)) else {
+                let [_, id, fp, name, params, universe] = w.as_slice() else {
                     return Err(bad(l));
                 };
-                let fp = u64::from_str_radix(fp, 16).map_err(|_| bad(l))?;
-                Ok((fp, (*name).to_owned()))
+                Ok(DefLine {
+                    id: id.parse().map_err(|_| bad(l))?,
+                    fingerprint: u64::from_str_radix(fp, 16).map_err(|_| bad(l))?,
+                    name: (*name).to_owned(),
+                    params: unescape(params),
+                    universe: unescape(universe),
+                })
             })
             .collect()
+    }
+
+    /// The strategies the run was made with: the fingerprint and the name of each, in the order given.
+    pub fn definitions(&self) -> Result<Vec<(u64, String)>, ResearchError> {
+        Ok(self
+            .definition_lines()?
+            .into_iter()
+            .map(|d| (d.fingerprint, d.name))
+            .collect())
+    }
+
+    /// The budget tree the run was made under; `None` for a run without budgets.
+    pub fn budgets(&self) -> Result<Option<BudgetView>, ResearchError> {
+        let path = self.dir.join(CONFIG_FILE);
+        let text = fs::read_to_string(&path).map_err(|e| io(&path, e))?;
+        let bad = |m: &str| ResearchError::Config(format!("{CONFIG_FILE}: the budget lines {m}"));
+        let (mut balance, mut tree, mut ids) = (None, None, BTreeMap::new());
+        for l in text.lines().filter(|l| l.starts_with("budget\t")) {
+            let w: Vec<&str> = l.split('\t').collect();
+            match w.as_slice() {
+                [_, "balance", v] => {
+                    balance = Some(v.parse::<u128>().map_err(|_| bad("do not read"))?)
+                }
+                [_, "tree", t] => {
+                    tree = Some(
+                        tf_budget::Tree::parse(&unescape(t))
+                            .map_err(|e| bad(&format!("do not read: {e:?}")))?,
+                    )
+                }
+                [_, "id", n, id] => {
+                    ids.insert(
+                        n.parse::<u16>().map_err(|_| bad("do not read"))?,
+                        (*id).to_owned(),
+                    );
+                }
+                _ => return Err(bad("do not read")),
+            }
+        }
+        match (balance, tree) {
+            (None, None) => Ok(None),
+            (Some(balance), Some(tree)) => Ok(Some(BudgetView { balance, tree, ids })),
+            _ => Err(bad("are not whole")),
+        }
     }
 
     pub fn fingerprint(&self) -> u64 {
@@ -626,6 +728,11 @@ pub(crate) fn easy_to_borrow(reference: &Reference) -> BTreeSet<u32> {
         .collect()
 }
 
+/// What a strategy's orders met that was not the gateway's limits: the broker's refusals and the rate limit.
+pub(crate) fn refusals(st: &crate::host::StrategyStats) -> u64 {
+    st.refused_by_broker + st.rate_limited
+}
+
 /// One day through one host: the definitions, the events of `input`, the round trips.
 pub fn run_day(
     date: &str,
@@ -696,7 +803,20 @@ pub fn run_day(
     }
     host.end_of_day(last).map_err(ResearchError::Host)?;
     notes.extend(host.take_fill_notes());
-    let traces = host.take_traces();
+    let mut traces = host.take_traces();
+    // What each strategy was refused, from the host's own counts: not a strategy's trace but kept beside them, so that the
+    // view can say what a strategy tried and was not allowed. A strategy that panicked has none.
+    for d in setup.defs {
+        if let Some(st) = host.stats_of(d.id) {
+            traces.push((
+                d.id,
+                Trace::new(last, "stats")
+                    .with("accepted", st.accepted)
+                    .with("rejected", st.rejected_by_gateway)
+                    .with("refused", refusals(&st)),
+            ));
+        }
+    }
     let who: BTreeMap<u16, Who> = setup
         .defs
         .iter()
@@ -736,7 +856,7 @@ pub fn run_day(
             .defs
             .iter()
             .filter_map(|d| host.stats_of(d.id))
-            .map(|s| s.refused_by_broker + s.rate_limited)
+            .map(|s| refusals(&s))
             .sum(),
         notes,
         traces,

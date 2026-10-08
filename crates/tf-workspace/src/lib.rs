@@ -59,6 +59,54 @@ impl std::fmt::Debug for Explorer {
     }
 }
 
+/// Why a research view was not given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResearchError {
+    /// No such scenario, day, strategy or trade.
+    NotFound(String),
+    /// It exists but cannot be shown (a damaged or inconsistent file); the text says which.
+    Refused(String),
+}
+
+/// What the backtest view reads: the research scenarios of the program that hosts the service (E19-S34, E19-S35). The service
+/// does not know how a results directory is read; the program does, as it does for the explorer. Every method only reads.
+pub trait ResearchView: Send + Sync {
+    /// The strategies of every scenario as runs, for the catalog.
+    fn runs(&self) -> Result<Vec<Run>, String>;
+    /// Every scenario with its days, strategies, costs and budgets, as JSON.
+    fn scenarios(&self) -> Result<String, String>;
+    /// One strategy's trades on a day, as JSON.
+    fn trades(&self, scenario: &str, day: &str, strategy: u16) -> Result<String, ResearchError>;
+    /// The page that replays trade `n` (counting a strategy's trades of the day from 0): the whole page, its data embedded.
+    fn trade_page(
+        &self,
+        scenario: &str,
+        day: &str,
+        strategy: u16,
+        n: usize,
+    ) -> Result<String, ResearchError>;
+}
+
+/// The backtest view's source, if this process has research results to show.
+#[derive(Clone)]
+pub struct Research(std::sync::Arc<dyn ResearchView>);
+
+impl Research {
+    pub fn new(v: impl ResearchView + 'static) -> Research {
+        Research(std::sync::Arc::new(v))
+    }
+
+    pub fn view(&self) -> &dyn ResearchView {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Debug for Research {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Research")
+    }
+}
+
 /// Where the service reads from.
 #[derive(Clone, Debug, Default)]
 pub struct Source {
@@ -68,6 +116,8 @@ pub struct Source {
     pub ledger: Option<(PathBuf, Kind)>,
     /// The run store of backtests.
     pub store: Option<PathBuf>,
+    /// The research scenarios of the backtest view.
+    pub research: Option<Research>,
 }
 
 /// Dollars to the cent from raw 1e-9 dollars, as text so no precision is lost in JSON.
@@ -111,6 +161,7 @@ pub fn run_id(r: &Run) -> String {
     match &r.source {
         RunSource::Stored { hash } => hash.clone(),
         RunSource::Ledger { session, .. } => format!("session-{session}"),
+        RunSource::Research { scenario, variant } => format!("research:{scenario}:{variant}"),
     }
 }
 
@@ -119,10 +170,11 @@ pub fn run_json(r: &Run) -> String {
     let kind_src = match &r.source {
         RunSource::Stored { .. } => "stored",
         RunSource::Ledger { .. } => "ledger",
+        RunSource::Research { .. } => "research",
     };
     let id = run_id(r);
     format!(
-        "{{\"strategy\":{},\"kind\":{},\"started_ns\":{},\"started\":{},\"net_pnl\":{},\"trades\":{},\"rules\":{},\"budget\":{},\"source\":{},\"id\":{},\"explorable\":{}}}",
+        "{{\"strategy\":{},\"kind\":{},\"started_ns\":{},\"started\":{},\"net_pnl\":{},\"trades\":{},\"rules\":{},\"budget\":{},\"source\":{},\"id\":{},\"explorable\":{},\"researchable\":{}}}",
         js(&r.strategy),
         js(r.kind.name()),
         js(&r.started.to_string()),
@@ -133,7 +185,8 @@ pub fn run_json(r: &Run) -> String {
         opt(r.budget.map(|b| dollars(b as i128))),
         js(kind_src),
         js(&id),
-        r.explorable()
+        r.explorable(),
+        r.researchable()
     )
 }
 
@@ -152,6 +205,9 @@ pub fn catalog(src: &Source) -> Result<Catalog, String> {
             tf_catalog::sessions(ReadOnlyStore::open(dir), &name, *kind)
                 .map_err(|e| e.to_string())?,
         );
+    }
+    if let Some(r) = &src.research {
+        runs.extend(r.view().runs()?);
     }
     Ok(Catalog::new(runs))
 }
@@ -181,6 +237,15 @@ pub fn run_detail(src: &Source, strategy: &str, id: &str) -> Result<Option<Strin
     let Some(run) = cat.of(strategy).find(|r| run_id(r) == id) else {
         return Ok(None);
     };
+    if let RunSource::Research { scenario, .. } = &run.source {
+        return Ok(Some(format!(
+            "{{\"run\":{},\"trades\":null,\"curve\":null,\"refused\":[],\"note\":{}}}",
+            run_json(run),
+            js(&format!(
+                "A research backtest of the scenario {scenario}. Its days and trades are under Backtests."
+            ))
+        )));
+    }
     let RunSource::Ledger { session, .. } = &run.source else {
         return Ok(Some(format!(
             "{{\"run\":{},\"trades\":null,\"curve\":null,\"refused\":[],\"note\":{}}}",

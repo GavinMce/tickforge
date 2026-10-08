@@ -9,6 +9,7 @@
   var failed = false;
   var props = null;     // /api/proposals
   var runView = null;   // {strategy, id, runs, detail} for the run screen
+  var btView = null;    // {want, list, missing, trades, error} for the backtests screens
   var REASONS = {
     invalid: "the order itself was malformed", kill_switch: "the kill switch was on",
     max_notional: "the order was larger than the order limit", max_position: "it would exceed the position limit",
@@ -244,6 +245,7 @@
         h("h1", null, "Overview")),
       h("div", { "class": "row", style: "justify-content:flex-end" },
         h("div", { "class": "small mute", style: "max-width:380px" }, "Budgets are reserved and rebalance after each session: gains and losses move into the strategy that made them."),
+        h("a", { "class": "btn", href: "#/backtests" }, "Backtests"),
         a && a.budgets ? h("a", { "class": "btn dark", href: "#/edit" }, "Edit budgets") : null));
     kids.push(head);
     if (!a) {
@@ -384,7 +386,8 @@
       main.push(h("section", { "class": "card panel", "aria-label": "Run" },
         h("h2", null, "Trades and decisions"),
         h("div", { "class": "mute" }, d.note),
-        h("a", { "class": "btn", style: "align-self:flex-start", href: "/explorer/" + encodeURIComponent(run.id) + "?back=" + encodeURIComponent(back) }, "Open in trade explorer ›")));
+        run.explorable ? h("a", { "class": "btn", style: "align-self:flex-start", href: "/explorer/" + encodeURIComponent(run.id) + "?back=" + encodeURIComponent(back) }, "Open in trade explorer ›") : null,
+        run.researchable ? h("a", { "class": "btn", style: "align-self:flex-start", href: "#/backtests" }, "Open in Backtests ›") : null));
     } else {
       main.push(h("section", { "class": "card panel", "aria-label": "Run chart" },
         h("h2", null, "Realised profit through the session"),
@@ -584,10 +587,148 @@
     });
   }
 
+  // ---- the backtests -------------------------------------------------------------------------
+
+  function btHash(scenario, day, strategy) {
+    return "#/backtests" + (scenario ? "/" + encodeURIComponent(scenario) + "/" + encodeURIComponent(day) + "/" + encodeURIComponent(strategy) : "");
+  }
+  function bpText(s) { return s + " bp"; }
+  function splitBars(sc) {
+    var names = {};
+    sc.strategies.forEach(function (st) { names[st.id] = st.name; });
+    var b = sc.budgets;
+    if (!b) return h("div", { "class": "small mute" }, "This scenario kept no budget split: its strategies ran unbudgeted.");
+    var rows = [h("div", { "class": "small mute" }, "Balance " + usd(b.balance) + (b.unassigned_bp > 0 ? " · " + pct(b.unassigned_bp) + " not assigned" : ""))];
+    b.groups.forEach(function (g) {
+      rows.push(h("div", { "class": "kv", style: "margin-top:6px" }, h("b", null, g.id + " · " + pct(g.share_bp) + " · " + usd(g.budget)),
+        h("span", { "class": "small mute" }, "loss limit soft " + pct(g.soft_bp) + ", hard " + pct(g.hard_bp))));
+      g.strategies.forEach(function (m, i) {
+        rows.push(h("div", { "class": "kv small" }, h("span", null, (names[m.number] || m.id) + " (" + m.id + ")"), h("span", { "class": "mono" }, pct(m.share_bp))),
+          h("div", { "class": "track", "aria-hidden": "true" }, h("div", { "class": "fill", style: "width:" + Math.min(100, m.share_bp / 100) + "%;background:" + COLORS[i % COLORS.length] })));
+      });
+    });
+    return h.apply(null, ["div", null].concat(rows));
+  }
+  function scenarioCard(sc) {
+    if (sc.error) {
+      return h("section", { "class": "card panel" }, h("h2", null, sc.name), h("div", { "class": "err small" }, "This scenario cannot be read: " + sc.error));
+    }
+    var days = sc.days;
+    var rows = sc.strategies.map(function (st) {
+      var links = days.map(function (d) { return h("a", { "class": "chip", href: btHash(sc.name, d, st.id) }, d.slice(5)); });
+      return h("div", { "class": "stack", style: "padding:10px 0;border-top:1px solid var(--soft);gap:6px" },
+        h("div", { "class": "between" }, h("b", null, st.name),
+          h("span", { "class": pnlClass(st.net) }, usd(st.net) + " · " + st.trades + " trades · " + bpText(st.mean_bp) + " a trade")),
+        h("div", { "class": "small mute", style: "overflow-wrap:anywhere" }, "Parameters: " + st.params + " · budget " + (st.budget ? usd(st.budget) : "none")),
+        h("div", { "class": "small mute", style: "overflow-wrap:anywhere;white-space:pre-wrap" }, "Universe: " + st.universe.replace(/^universe v1\n/, "").replace(/\n+$/, "")),
+        h.apply(null, ["div", { "class": "row" }, h("span", { "class": "small mute" }, "Days:")].concat(links)));
+    });
+    var c = sc.cost;
+    return h("section", { "class": "card panel" },
+      h("div", { "class": "between" }, h("h2", null, sc.name),
+        h("span", { "class": "row" }, h("span", { "class": "chip" }, days.length + " days " + (days.length ? days[0] + " to " + days[days.length - 1] : "")),
+          h("span", { "class": pnlClass(sc.net) + " chip" }, usd(sc.net) + " · " + sc.trades + " trades"))),
+      h("div", { "class": "small mute" }, "Costs: " + c.latency_ms + " ms to the broker · borrow " + c.borrow_bps_per_year + " bp a year · Section 31 rates through " + c.sec_through + " · TAF rates through " + c.taf_through),
+      splitBars(sc), h.apply(null, ["div", null].concat(rows)));
+  }
+  function drawBacktests() {
+    var bt = btView;
+    var kids = [h("nav", { "class": "row small mute" }, h("a", { "class": "btn", href: "#" }, "‹ Overview"), h("span", null, "Workspace"), h("span", { "aria-hidden": "true" }, "/"), h("b", { style: "color:var(--ink)" }, "Backtests"))];
+    if (bt.want.scenario) return drawBtDay(kids);
+    kids.push(h("h1", null, "Backtests"));
+    if (bt.missing) kids.push(h("div", { "class": "card empty" }, "No research results are connected to this workspace."));
+    else if (bt.list.scenarios.length === 0) kids.push(h("div", { "class": "card empty" }, "There are no scenarios yet."));
+    else bt.list.scenarios.forEach(function (sc) { kids.push(scenarioCard(sc)); });
+    app.replaceChildren.apply(app, kids);
+  }
+  function drawBtDay(kids) {
+    var bt = btView, w = bt.want, t = bt.trades;
+    var sc = bt.list && bt.list.scenarios.filter(function (x) { return x.name === w.scenario; })[0];
+    var title = h("h1", null, w.scenario + " · " + w.day + " · " + (t ? t.strategy.name : "strategy " + w.strategy));
+    kids.push(h("a", { "class": "btn", style: "align-self:flex-start", href: btHash() }, "‹ All scenarios"), title);
+    if (!t) {
+      kids.push(h("div", { "class": "card empty" }, bt.error || "Loading…"));
+      app.replaceChildren.apply(app, kids);
+      return;
+    }
+    if (sc && !sc.error) {
+      var at = sc.days.indexOf(w.day);
+      var near = h("div", { "class": "row" });
+      [["‹ Earlier day", at - 1], ["Later day ›", at + 1]].forEach(function (o) {
+        var to = sc.days[o[1]];
+        near.appendChild(to ? h("a", { "class": "btn", href: btHash(w.scenario, to, w.strategy) }, o[0] + " " + to) : h("button", { "class": "btn", disabled: "disabled" }, o[0]));
+      });
+      sc.strategies.forEach(function (st) {
+        if (String(st.id) !== String(w.strategy)) near.appendChild(h("a", { "class": "btn", href: btHash(w.scenario, w.day, st.id) }, st.name));
+      });
+      kids.push(near);
+    }
+    var net = t.trades.reduce(function (a, x) { return a + num(x.net); }, 0).toFixed(2);
+    kids.push(h("div", { "class": "summary" }, summaryBox("Trades", String(t.trades.length)),
+      summaryBox("Net of costs", usd(net), null, pnlClass(net)),
+      summaryBox("Orders accepted", String(t.accepted)),
+      summaryBox("Refused by the limits", String(t.rejected), "before reaching the broker"),
+      summaryBox("Refused by the broker", String(t.refused), "or sent too fast")));
+    if (t.rejections.length) {
+      kids.push(h("div", { "class": "small mute" }, "Refused: " + t.rejections.map(function (r) { return (REASONS[r.reason] || r.reason) + " ×" + r.count; }).join("; ") + "."));
+    }
+    if (t.trades.length === 0) kids.push(h("div", { "class": "card empty" }, "This strategy made no trade on this day."));
+    else kids.push(tradeControls(t, w));
+    app.replaceChildren.apply(app, kids);
+  }
+
+  // The trade table: filtered by symbol, side and result, and sorted; done here, on the trades the API sent. The choices
+  // survive the page's refresh so that a draft of them is not lost every fifteen seconds.
+  var tf = { symbol: "", side: "all", result: "all", sort: "time" };
+  function tradeControls(t, w) {
+    var box = h("div", { "class": "stack" }), table = h("div");
+    function paint() {
+      var q = tf.symbol.trim().toUpperCase();
+      var rows = t.trades.filter(function (x) {
+        return (!q || x.symbol.toUpperCase().indexOf(q) >= 0) && (tf.side === "all" || x.side === tf.side) &&
+          (tf.result === "all" || (tf.result === "win" ? num(x.net) > 0 : num(x.net) <= 0));
+      });
+      var key = { time: function (x) { return x.n; }, net: function (x) { return num(x.net); }, bp: function (x) { return num(x.bp); }, symbol: function (x) { return x.symbol; } }[tf.sort];
+      rows.sort(function (a, b) { var p = key(a), r = key(b); return p < r ? -1 : p > r ? 1 : a.n - b.n; });
+      table.replaceChildren(rows.length ? tradeTable(rows, w) : h("div", { "class": "card empty" }, "No trade matches."),
+        h("div", { "class": "small mute", style: "margin-top:6px" }, rows.length + " of " + t.trades.length + " trades"));
+    }
+    function pick(label, key, opts) {
+      var sel = h("select", { "class": "pctin", "aria-label": label });
+      opts.forEach(function (o) { var op = h("option", { value: o[0] }, o[1]); if (tf[key] === o[0]) op.selected = true; sel.appendChild(op); });
+      sel.addEventListener("change", function () { tf[key] = sel.value; paint(); });
+      return h("label", { "class": "small mute" }, label + " ", sel);
+    }
+    var sym = h("input", { "class": "pctin", type: "search", "aria-label": "Symbol", placeholder: "symbol", value: tf.symbol });
+    sym.addEventListener("input", function () { tf.symbol = sym.value; paint(); });
+    box.appendChild(h("div", { "class": "row" }, h("label", { "class": "small mute" }, "Symbol ", sym),
+      pick("Side", "side", [["all", "all"], ["long", "long"], ["short", "short"]]),
+      pick("Result", "result", [["all", "all"], ["win", "winners"], ["loss", "losers and flat"]]),
+      pick("Sort", "sort", [["time", "time"], ["net", "net dollars"], ["bp", "net basis points"], ["symbol", "symbol"]])));
+    box.appendChild(table);
+    paint();
+    return box;
+  }
+  function tradeTable(rows, w) {
+    var head = h("div", { "class": "tr9 thead", role: "row" }, h("span", null, "Trade"), h("span", null, "Symbol"), h("span", null, "Side"), h("span", null, "Qty"),
+      h("span", null, "In"), h("span", null, "Out"), h("span", null, "Net"), h("span", null, "Exit"), h("span", null, ""));
+    var body = rows.map(function (x) {
+      var q = "scenario=" + encodeURIComponent(w.scenario) + "&day=" + encodeURIComponent(w.day) + "&strategy=" + encodeURIComponent(w.strategy) + "&n=" + encodeURIComponent(x.n);
+      return h("div", { "class": "tr9 mono", role: "row", style: "font-size:13px;border-bottom:1px solid var(--soft)" },
+        h("span", null, "#" + (x.n + 1)), h("span", null, x.symbol), h("span", null, x.side), h("span", null, String(x.qty)),
+        h("span", null, x.entry + " $" + x.entry_px), h("span", null, x.open_at_end ? "open" : x.exit + " $" + x.exit_px),
+        h("span", { "class": pnlClass(x.net) }, usd(x.net) + " (" + bpText(x.bp) + ")" + (x.r !== null ? " " + x.r + "R" : "")), h("span", null, x.exit_reason),
+        h("a", { "class": "btn", href: "/research/trade?" + q }, "Replay"));
+    });
+    return h("div", { "class": "table" }, h.apply(null, ["div", { role: "table", style: "min-width:900px" }, head].concat(body)));
+  }
+
   // ---- routing and loading ------------------------------------------------------------------
 
   function route() {
     if (location.hash === "#/edit") return { edit: true };
+    var b = /^#\/backtests(?:\/([^/]+)\/([^/]+)\/(\d+))?$/.exec(location.hash);
+    if (b) return { backtests: true, scenario: b[1] ? decodeURIComponent(b[1]) : null, day: b[2] ? decodeURIComponent(b[2]) : null, strategy: b[3] || null };
     var m = /^#\/s\/([^/]+)(?:\/(.+))?$/.exec(location.hash);
     if (m) return { strategy: decodeURIComponent(m[1]), id: m[2] ? decodeURIComponent(m[2]) : null };
     return null;
@@ -602,7 +743,28 @@
   }
 
   function draw() {
-    if (route() && runView) drawRun(); else if (data) drawOverview();
+    var w = route();
+    if (w && w.backtests) { if (btView) drawBacktests(); } else if (w && runView) drawRun(); else if (data) drawOverview();
+  }
+
+  function loadBacktests(want) {
+    var jobs = [get("/api/research").catch(function (e) { return e.message === "404" ? "missing" : null; })];
+    if (want.scenario) {
+      jobs.push(get("/api/research/trades?scenario=" + encodeURIComponent(want.scenario) + "&day=" + encodeURIComponent(want.day) + "&strategy=" + encodeURIComponent(want.strategy))
+        .catch(function (e) { return { error: e.message === "404" ? "There is nothing at this address." : e.message === "422" ? "These results cannot be shown: a file is damaged or does not match." : "Could not load the trades." }; }));
+    }
+    return Promise.all(jobs).then(function (res) {
+      if (res[0] === null && !btView) { app.replaceChildren(h("p", { "class": "err" }, "Could not load the backtests.")); return; }
+      var same = btView && btView.want.scenario === want.scenario && btView.want.day === want.day && btView.want.strategy === want.strategy;
+      var list = res[0] === "missing" ? null : res[0] || (btView && btView.list);
+      var t = res[1] && !res[1].error ? res[1] : null;
+      var next = { want: want, list: list, missing: res[0] === "missing", trades: t || (same && !res[1] ? btView.trades : null), error: res[1] && res[1].error };
+      next.sig = JSON.stringify([next.want, next.list, next.missing, next.trades, next.error]);
+      // Nothing new: leave the page alone, so that what is being typed in it is not thrown away.
+      if (btView && btView.sig === next.sig) return;
+      btView = next;
+      drawBacktests();
+    }).catch(function () { app.replaceChildren(h("p", { "class": "err" }, "Could not load the backtests.")); });
   }
 
   function load() {
@@ -618,6 +780,7 @@
       }).catch(function () { app.replaceChildren(h("p", { "class": "err" }, "Could not load the editor.")); });
     }
     ed = null;
+    if (want && want.backtests) return loadBacktests(want);
     var jobs = [get("/api/overview")];
     if (want) jobs.push(get("/api/runs?strategy=" + encodeURIComponent(want.strategy)));
     else jobs.push(get("/api/proposals").catch(function () { return null; }));

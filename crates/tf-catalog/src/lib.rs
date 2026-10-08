@@ -56,6 +56,9 @@ pub enum Source {
     Stored { hash: String },
     /// Day number `session` (from 1) of the ledger named `ledger`.
     Ledger { ledger: String, session: u32 },
+    /// One strategy of a research scenario (E19-S34): the results directory named `scenario`, and the fingerprint of the strategy's
+    /// definition as text. The backtest view opens it.
+    Research { scenario: String, variant: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +81,11 @@ impl Run {
     /// Whether the explorer can open it.
     pub fn explorable(&self) -> bool {
         matches!(self.source, Source::Stored { .. })
+    }
+
+    /// Whether the backtest view can open it.
+    pub fn researchable(&self) -> bool {
+        matches!(self.source, Source::Research { .. })
     }
 }
 
@@ -125,6 +133,7 @@ fn key(s: &Source) -> (String, u32) {
     match s {
         Source::Stored { hash } => (hash.clone(), 0),
         Source::Ledger { ledger, session } => (ledger.clone(), *session),
+        Source::Research { scenario, variant } => (format!("{scenario}/{variant}"), 0),
     }
 }
 
@@ -170,6 +179,32 @@ pub fn run_of(r: &RunResult) -> Run {
         },
         kind: Kind::Backtest,
         strategy,
+    }
+}
+
+/// One strategy of a research scenario as a run: a backtest, from the day the scenario's data begins, with the net profit and the
+/// number of trades its trips made and the budget the scenario gave it, if it had one.
+pub fn research_run(
+    scenario: &str,
+    variant: &str,
+    strategy: &str,
+    started: Nanos,
+    net_pnl: i128,
+    trades: u64,
+    budget: Option<u128>,
+) -> Run {
+    Run {
+        strategy: strategy.to_owned(),
+        kind: Kind::Backtest,
+        started,
+        net_pnl: Some(net_pnl),
+        trades: Some(trades),
+        rules: None,
+        budget,
+        source: Source::Research {
+            scenario: scenario.to_owned(),
+            variant: variant.to_owned(),
+        },
     }
 }
 

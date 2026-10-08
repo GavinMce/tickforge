@@ -2188,7 +2188,29 @@ epics:
       - id: E19-S34
         jira: TIC-188
         title: "Backtest view: research runs in the run catalog, and the trade table"
-        status: todo
+        status: done
+        evidence: >-
+          ADR 0065. The workspace asks a ResearchView (runs, scenarios, trades, trade page), the explorer's callback pattern, and
+          `tf serve --research DIR` answers it with tf_host::research::view, so tf-workspace gains no dependency on the harness. A
+          scenario is a subdirectory with a research.cfg, named by one plain component (checked before any join: `..`, hidden, slashes,
+          odd characters and over 100 characters are not found); a damaged one is listed with its error and does not hide the rest.
+          The budget split is kept in the configuration (balance, tree, strategy numbers), so scenarios run with another split are other
+          directories shown side by side; each run also writes a per-strategy stats trace (accepted, refused by the limits, refused by the
+          broker or rate limited). Strategies are catalog runs (Source::Research, kept apart from stored, paper and live runs; the run
+          screen points to Backtests). Routes GET /api/research, /api/research/trades and /research/trade are sign-in only; 404 missing,
+          422 damaged (reason as text), 400 incomplete, 405 for any other method. The Backtests screens (#/backtests, then a scenario's
+          day and strategy) show each scenario's days, costs, budget split bars and strategies, then a trades table that filters by
+          symbol, side and result and sorts by time, net dollars, net basis points or symbol, with the refusals beside it; textContent
+          only, GET only (a test pins both), no redraw when nothing changed so typing is not lost. Looked at in a browser at 1280 and 390
+          px with a served three-day scenario: no console errors and no horizontal page scroll. Tests: view data (JSON validity checked
+          by a strict reader, text escaping, money, prices, basis points, R, time, exit reasons, names, scenarios listing with a damaged
+          one, strategies of different sizes keeping their own trades, trades with gateway refusals counted by reason, not found for every
+          bad name or day, a day without its companions refused), catalog, config budgets read back, routes, and the arguments of tf
+          serve. Full workspace 1,165 passed (tf-driver's operator-stop test failed once under load and passed in three reruns alone).
+          Mutation run, 54 mutants of view.rs plus the changed run, catalog, http, lib and serve code: 8 survivors on the first run, 6
+          given tests (space and control characters in text, a small negative price, strategies with different results, directory lookup
+          by name, the refusals sum); 2 remain, equivalent: a zero is not signed negative either way (dollars and price). Not here: the
+          trade page (E19-S35); the trade table has no per-trade R beyond the figure the trip holds.
         deps: [E19-S33, E17-S08, E17-S09]
         ac:
           - "The run catalog lists a research scenario (its strategies, days, budget tree and cost model) beside the backtests, paper and live runs, kept apart from them; the workspace's backtests view lists scenarios, then days, then strategies"

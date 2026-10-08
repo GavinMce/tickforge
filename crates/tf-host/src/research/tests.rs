@@ -1896,8 +1896,21 @@ fn a_run_keeps_each_days_log_and_traces_beside_its_trips_and_reads_them_back() {
                 .iter()
                 .map(|t| (t.0, t.1.kind.as_str()))
                 .collect::<Vec<_>>(),
-            [(1, "buy"), (2, "buy")]
+            [(1, "buy"), (2, "buy"), (1, "stats"), (2, "stats")]
         );
+        // What each strategy was allowed to do and refused, from the host's counts: a buy and a sell each, accepted.
+        for (k, id) in [(2usize, 1u16), (3, 2)] {
+            let st = &traces[k];
+            assert_eq!(st.0, id);
+            assert_eq!(
+                (
+                    st.1.value("accepted"),
+                    st.1.value("rejected"),
+                    st.1.value("refused")
+                ),
+                (Some("2"), Some("0"), Some("0"))
+            );
+        }
         assert_eq!(traces[0].1.columns[1], "last");
         // No evidence was asked for.
         assert!(results.evidence(&date).is_err());
@@ -2380,4 +2393,612 @@ fn a_companion_whose_trailer_is_gone_is_cut_short_not_misread_from_a_body_that_s
             .unwrap_err()
             .contains("cut short")
     );
+}
+
+// ---- the data of the backtest view (E19-S34) ----
+
+/// A strict little JSON reader for the tests: that what the view says is JSON, and what is in it.
+#[derive(Debug, Clone, PartialEq)]
+enum J {
+    Null,
+    Bool(bool),
+    Num(String),
+    Str(String),
+    Arr(Vec<J>),
+    Obj(Vec<(String, J)>),
+}
+
+impl J {
+    fn get(&self, k: &str) -> &J {
+        match self {
+            J::Obj(v) => v
+                .iter()
+                .find(|(x, _)| x == k)
+                .map(|(_, v)| v)
+                .unwrap_or_else(|| panic!("no `{k}` in {self:?}")),
+            _ => panic!("not an object: {self:?}"),
+        }
+    }
+    fn s(&self) -> &str {
+        match self {
+            J::Str(s) | J::Num(s) => s,
+            other => panic!("not text: {other:?}"),
+        }
+    }
+    fn arr(&self) -> &[J] {
+        match self {
+            J::Arr(v) => v,
+            other => panic!("not an array: {other:?}"),
+        }
+    }
+}
+
+fn json(text: &str) -> J {
+    fn ws(b: &[u8], i: &mut usize) {
+        while *i < b.len() && matches!(b[*i], b' ' | b'\n' | b'\t' | b'\r') {
+            *i += 1;
+        }
+    }
+    fn string(b: &[u8], i: &mut usize) -> String {
+        assert_eq!(b[*i], b'"');
+        *i += 1;
+        let mut out = Vec::new();
+        while b[*i] != b'"' {
+            if b[*i] == b'\\' {
+                *i += 1;
+                match b[*i] {
+                    b'"' => out.push(b'"'),
+                    b'\\' => out.push(b'\\'),
+                    b'/' => out.push(b'/'),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'u' => {
+                        let h = std::str::from_utf8(&b[*i + 1..*i + 5]).unwrap();
+                        let c = char::from_u32(u32::from_str_radix(h, 16).unwrap()).unwrap();
+                        out.extend_from_slice(c.to_string().as_bytes());
+                        *i += 4;
+                    }
+                    other => panic!("bad escape {}", other as char),
+                }
+            } else {
+                assert!(b[*i] >= 0x20, "a raw control character in a string");
+                out.push(b[*i]);
+            }
+            *i += 1;
+        }
+        *i += 1;
+        String::from_utf8(out).unwrap()
+    }
+    fn value(b: &[u8], i: &mut usize) -> J {
+        ws(b, i);
+        match b[*i] {
+            b'{' => {
+                *i += 1;
+                let mut v = Vec::new();
+                ws(b, i);
+                if b[*i] == b'}' {
+                    *i += 1;
+                    return J::Obj(v);
+                }
+                loop {
+                    ws(b, i);
+                    let k = string(b, i);
+                    ws(b, i);
+                    assert_eq!(b[*i], b':');
+                    *i += 1;
+                    v.push((k, value(b, i)));
+                    ws(b, i);
+                    match b[*i] {
+                        b',' => *i += 1,
+                        b'}' => {
+                            *i += 1;
+                            return J::Obj(v);
+                        }
+                        c => panic!("expected , or }} but {}", c as char),
+                    }
+                }
+            }
+            b'[' => {
+                *i += 1;
+                let mut v = Vec::new();
+                ws(b, i);
+                if b[*i] == b']' {
+                    *i += 1;
+                    return J::Arr(v);
+                }
+                loop {
+                    v.push(value(b, i));
+                    ws(b, i);
+                    match b[*i] {
+                        b',' => *i += 1,
+                        b']' => {
+                            *i += 1;
+                            return J::Arr(v);
+                        }
+                        c => panic!("expected , or ] but {}", c as char),
+                    }
+                }
+            }
+            b'"' => J::Str(string(b, i)),
+            b't' | b'f' | b'n' => {
+                let rest = &b[*i..];
+                for (w, j) in [
+                    ("true", J::Bool(true)),
+                    ("false", J::Bool(false)),
+                    ("null", J::Null),
+                ] {
+                    if rest.starts_with(w.as_bytes()) {
+                        *i += w.len();
+                        return j;
+                    }
+                }
+                panic!("a bad word");
+            }
+            _ => {
+                let start = *i;
+                while *i < b.len()
+                    && (b[*i].is_ascii_digit() || matches!(b[*i], b'-' | b'.' | b'e' | b'E' | b'+'))
+                {
+                    *i += 1;
+                }
+                assert!(
+                    *i > start,
+                    "not a value at {start}: {}",
+                    String::from_utf8_lossy(&b[start..(start + 20).min(b.len())])
+                );
+                J::Num(String::from_utf8_lossy(&b[start..*i]).into_owned())
+            }
+        }
+    }
+    let b = text.as_bytes();
+    let mut i = 0;
+    let v = value(b, &mut i);
+    ws(b, &mut i);
+    assert_eq!(i, b.len(), "text after the value");
+    v
+}
+
+/// A root holding one scenario (a run of the three-day fixture), and what it was made of.
+fn view_root(name: &str, scenario: &str) -> PathBuf {
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new(&format!("{name}-days"), 3);
+    let root = scratch(&format!("{name}-root"));
+    run(&setup(&host, &cost, &defs), &mut days, &root.join(scenario)).unwrap();
+    root
+}
+
+#[test]
+fn what_the_view_writes_is_json_with_text_escaped() {
+    use super::view::{bp, dollars, et, js, milli, price, reason_text, valid_name};
+    // The strings: quotes, backslashes, controls, and a `<` kept out of a page.
+    assert_eq!(
+        js("a\"b\\c\nd\te\u{1}<f/>"),
+        r#""a\"b\\c\nd\te\u0001\u003cf/>""#
+    );
+    assert_eq!(
+        json(&js("a\"b\\c\nd\te\u{1}<f/>")),
+        J::Str("a\"b\\c\nd\te\u{1}<f/>".into())
+    );
+    // A space stays a space, and the last control character is escaped.
+    assert_eq!(js(" \u{1f}\u{7f}é"), "\" \\u001f\u{7f}é\"");
+    // Money and prices, rounded half away from zero, and signed only when something is left.
+    assert_eq!(dollars(-6_182_038_200), "-6.18");
+    assert_eq!(dollars(5_000_000), "0.01");
+    assert_eq!(dollars(4_999_999), "0.00");
+    assert_eq!(dollars(-4_999_999), "0.00");
+    assert_eq!(dollars(123_456_789_000), "123.46");
+    assert_eq!(price(20_010_000_000), "20.0100");
+    assert_eq!(price(-50_000), "-0.0001");
+    assert_eq!(price(49_999), "0.0000");
+    assert_eq!(price(-49_999), "0.0000");
+    assert_eq!(price(-50_000), "-0.0001");
+    // Hundredths of a basis point: -1029 is -10.29.
+    assert_eq!(
+        (
+            bp(-1029).as_str(),
+            bp(5).as_str(),
+            bp(0).as_str(),
+            bp(155).as_str()
+        ),
+        ("-10.29", "0.05", "0.00", "1.55")
+    );
+    assert_eq!(bp(i64::MIN), "-92233720368547758.08");
+    // Thousandths of R.
+    assert_eq!(
+        (
+            milli(-2).as_str(),
+            milli(0).as_str(),
+            milli(1500).as_str(),
+            milli(-1000).as_str()
+        ),
+        ("-0.002", "0.000", "1.500", "-1.000")
+    );
+    // The time is New York's, with milliseconds: 20:00 UTC in May is 16:00.
+    let close = tf_calendar::Calendar::us_equities()
+        .times(tf_calendar::Date::new(2026, 5, 1).unwrap())
+        .unwrap()
+        .unwrap()
+        .close;
+    assert_eq!(et(close - 1800 * SEC + 50_000_000), "15:30:00.050");
+    assert_eq!(et(close - 30 * SEC), "15:59:30.000");
+    // What the exit reasons mean.
+    assert_eq!(
+        [0xE501u16, 0xE502, 0xE503, 0xFFFF, 7].map(reason_text),
+        [
+            "stop",
+            "target",
+            "time exit",
+            "still open at the end of the day",
+            "strategy code 7"
+        ]
+    );
+    // A scenario is one plain directory name.
+    for ok in ["a", "run-1_x.y", "2026"] {
+        assert!(valid_name(ok), "{ok}");
+    }
+    for bad in [
+        "", ".", "..", ".hidden", "a/b", "a\\b", "a b", "../x", "a\0", "é",
+    ] {
+        assert!(!valid_name(bad), "{bad:?}");
+    }
+    assert!(!valid_name(&"x".repeat(101)) && valid_name(&"x".repeat(100)));
+}
+
+#[test]
+fn a_scenario_is_listed_with_its_days_strategies_costs_and_budgets() {
+    use super::view::scenarios_json;
+    let root = view_root("list", "first");
+    // A second scenario that is not one (no configuration) and a file are not listed; a damaged one is, with its error.
+    fs::create_dir_all(root.join("not-a-scenario")).unwrap();
+    fs::write(root.join("loose.txt"), "x").unwrap();
+    fs::create_dir_all(root.join("broken")).unwrap();
+    fs::write(root.join("broken").join(CONFIG_FILE), "garbage").unwrap();
+    let j = json(&scenarios_json(&root).unwrap());
+    let all = j.get("scenarios").arr();
+    assert_eq!(
+        all.iter().map(|s| s.get("name").s()).collect::<Vec<_>>(),
+        ["broken", "first"]
+    );
+    assert!(!all[0].get("error").s().is_empty());
+    let s = &all[1];
+    assert_eq!(
+        s.get("days").arr().iter().map(J::s).collect::<Vec<_>>(),
+        ["2026-05-01", "2026-05-04", "2026-05-05"]
+    );
+    // Three days of two strategies, a trade each: six trades of -2.0606794 dollars.
+    assert_eq!((s.get("trades").s(), s.get("net").s()), ("6", "-12.36"));
+    let cost = s.get("cost");
+    assert_eq!(
+        (
+            cost.get("latency_ms").s(),
+            cost.get("borrow_bps_per_year").s(),
+            cost.get("sec_through").s(),
+            cost.get("taf_through").s()
+        ),
+        ("50", "0", "2026-09-30", "2027-12-31")
+    );
+    let strategies = s.get("strategies").arr();
+    assert_eq!(strategies.len(), 2);
+    for (st, (id, name, params, universe)) in strategies.iter().zip([
+        ("1", "round1", "buy_at 2 sell_at 5", "adv_shares <= 600"),
+        ("2", "round2", "buy_at 3 sell_at 6", "adv_shares >= 700"),
+    ]) {
+        assert_eq!(
+            (st.get("id").s(), st.get("name").s(), st.get("params").s()),
+            (id, name, params)
+        );
+        assert!(
+            st.get("universe").s().contains(universe),
+            "{}",
+            st.get("universe").s()
+        );
+        assert_eq!(st.get("variant").s().len(), 16);
+        // Three trades of -10.29 basis points, and a budget of half the $100,000 the tree divides.
+        assert_eq!(
+            (
+                st.get("trades").s(),
+                st.get("net").s(),
+                st.get("mean_bp").s(),
+                st.get("budget").s()
+            ),
+            ("3", "-6.18", "-10.29", "50000.00")
+        );
+    }
+    // The tree: one group with everything, the loss limits of the test configuration, the two strategies at half each.
+    let b = s.get("budgets");
+    assert_eq!(
+        (b.get("balance").s(), b.get("unassigned_bp").s()),
+        ("100000.00", "0")
+    );
+    let g = &b.get("groups").arr()[0];
+    assert_eq!(
+        (
+            g.get("id").s(),
+            g.get("share_bp").s(),
+            g.get("budget").s(),
+            g.get("soft_bp").s(),
+            g.get("hard_bp").s()
+        ),
+        ("g", "10000", "100000.00", "300", "600")
+    );
+    let members = g.get("strategies").arr();
+    assert_eq!(
+        members
+            .iter()
+            .map(|m| (m.get("id").s(), m.get("number").s(), m.get("share_bp").s()))
+            .collect::<Vec<_>>(),
+        [("s1", "1", "5000"), ("s2", "2", "5000")]
+    );
+    // A root that is not there is an error, and one with nothing in it lists nothing.
+    assert!(scenarios_json(&root.join("nope")).is_err());
+    let empty = scratch("list-empty");
+    fs::create_dir_all(&empty).unwrap();
+    assert_eq!(
+        json(&scenarios_json(&empty).unwrap())
+            .get("scenarios")
+            .arr()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn a_strategys_day_is_its_trades_and_what_it_was_refused() {
+    use super::view::{ViewError, trades_json};
+    let root = view_root("trades", "s");
+    let j = json(&trades_json(&root, "s", "2026-05-04", 1).unwrap());
+    assert_eq!(
+        (j.get("scenario").s(), j.get("day").s()),
+        ("s", "2026-05-04")
+    );
+    let st = j.get("strategy");
+    assert_eq!((st.get("id").s(), st.get("name").s()), ("1", "round1"));
+    // A buy and a sell, accepted; nothing refused, nothing the gateway turned away.
+    assert_eq!(
+        (
+            j.get("accepted").s(),
+            j.get("rejected").s(),
+            j.get("refused").s()
+        ),
+        ("2", "0", "0")
+    );
+    assert!(j.get("rejections").arr().is_empty());
+    let t = &j.get("trades").arr()[0];
+    assert_eq!(j.get("trades").arr().len(), 1);
+    // Bought at the ask 20.01 and sold at the bid 19.99, 100 shares of S02, in New York time (13:30 UTC on 4 May is 09:30).
+    assert_eq!(
+        (
+            t.get("n").s(),
+            t.get("symbol").s(),
+            t.get("side").s(),
+            t.get("qty").s()
+        ),
+        ("0", "S02", "long", "100")
+    );
+    assert_eq!(
+        (t.get("entry_px").s(), t.get("exit_px").s()),
+        ("20.0100", "19.9900")
+    );
+    assert!(
+        t.get("entry").s().starts_with("09:30:0") && t.get("exit").s().starts_with("09:30:0"),
+        "{}",
+        t.get("entry").s()
+    );
+    assert_eq!(
+        (
+            t.get("net").s(),
+            t.get("bp").s(),
+            t.get("exit_reason").s(),
+            t.get("open_at_end"),
+            t.get("r").s()
+        ),
+        ("-2.06", "-10.29", "time exit", &J::Bool(false), "-0.002")
+    );
+    // The other strategy is in its own symbol.
+    let k = json(&trades_json(&root, "s", "2026-05-04", 2).unwrap());
+    assert_eq!(k.get("trades").arr()[0].get("symbol").s(), "S08");
+    // Not found: another day, another strategy, another scenario, a name that is not one, a day that is not a date.
+    let nf = |r: Result<String, ViewError>| matches!(r, Err(ViewError::NotFound(_)));
+    assert!(nf(trades_json(&root, "s", "2026-05-02", 1)));
+    assert!(nf(trades_json(&root, "s", "2026-05-04", 9)));
+    assert!(nf(trades_json(&root, "other", "2026-05-04", 1)));
+    for bad in ["..", "../s", "s/..", "", ".s"] {
+        assert!(nf(trades_json(&root, bad, "2026-05-04", 1)), "{bad}");
+    }
+    assert!(nf(trades_json(&root, "s", "../../x", 1)));
+    assert!(nf(trades_json(&root, "s", "2026-5-4", 1)));
+    // A day whose companions are gone cannot be shown, and says so.
+    fs::remove_file(root.join("s").join("2026-05-04.trace")).unwrap();
+    assert!(matches!(
+        trades_json(&root, "s", "2026-05-04", 1),
+        Err(ViewError::Refused(_))
+    ));
+}
+
+#[test]
+fn what_the_gateway_turned_away_is_counted_with_its_reasons() {
+    use super::view::trades_json;
+    // 100,000 shares at $20 is far past the order limit: the gateway refuses the buy and the sell finds nothing to close.
+    let (host, cost) = (host_cfg(), CostModel::published());
+    let defs = [round_trip_of(1, 100_000, LOW, 2, 5)];
+    let mut days = Days::new("turn-days", 1);
+    let root = scratch("turn-root");
+    run(&setup(&host, &cost, &defs), &mut days, &root.join("s")).unwrap();
+    let j = json(&trades_json(&root, "s", "2026-05-01", 1).unwrap());
+    assert_eq!(
+        (
+            j.get("accepted").s(),
+            j.get("rejected").s(),
+            j.get("refused").s()
+        ),
+        ("0", "2", "0")
+    );
+    assert!(j.get("trades").arr().is_empty());
+    let reasons: Vec<(String, String)> = j
+        .get("rejections")
+        .arr()
+        .iter()
+        .map(|r| {
+            (
+                r.get("reason").s().to_owned(),
+                r.get("count").s().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons
+            .iter()
+            .map(|r| r.1.parse::<u64>().unwrap())
+            .sum::<u64>(),
+        2
+    );
+    assert!(reasons.iter().all(|r| !r.0.is_empty()), "{reasons:?}");
+}
+
+#[test]
+fn the_strategies_of_a_scenario_are_runs_of_the_catalog() {
+    use super::view::catalog_runs;
+    use tf_catalog::{Kind, Source};
+    let root = view_root("cat", "alpha");
+    let runs = catalog_runs(&root).unwrap();
+    assert_eq!(runs.len(), 2);
+    for (r, name) in runs.iter().zip(["round1", "round2"]) {
+        assert_eq!(
+            (r.strategy.as_str(), r.kind, r.trades),
+            (name, Kind::Backtest, Some(3))
+        );
+        assert_eq!(
+            (r.net_pnl, r.budget),
+            (Some(-6_182_038_200), Some(50_000 * 1_000_000_000))
+        );
+        // From the day the scenario's data begins: 9:30 New York on 1 May 2026.
+        assert_eq!(r.started, OPENS[0].1 * SEC);
+        assert!(r.researchable() && !r.explorable());
+        let Source::Research { scenario, variant } = &r.source else {
+            panic!("not a research run")
+        };
+        assert_eq!((scenario.as_str(), variant.len()), ("alpha", 16));
+    }
+    assert_ne!(runs[0].source, runs[1].source);
+    // A scenario that does not read is left out of the catalog, not a failure of it.
+    fs::create_dir_all(root.join("broken")).unwrap();
+    fs::write(root.join("broken").join(CONFIG_FILE), "garbage").unwrap();
+    assert_eq!(catalog_runs(&root).unwrap().len(), 2);
+}
+
+#[test]
+fn the_budget_tree_is_kept_in_the_configuration_and_read_back_and_a_run_without_one_has_none() {
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let mut days = Days::new("bud-days", 1);
+    let dir = out_dir("bud-out");
+    run(&setup(&host, &cost, &defs), &mut days, &dir).unwrap();
+    let r = Results::open(&dir).unwrap();
+    let b = r.budgets().unwrap().unwrap();
+    assert_eq!(b.balance, 100_000 * 1_000_000_000);
+    assert_eq!(
+        b.ids
+            .iter()
+            .map(|(n, s)| (*n, s.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, "s1"), (2, "s2")]
+    );
+    assert_eq!(b.tree, host.budgets.as_ref().unwrap().tree().clone());
+    // The definitions with their numbers, parameters and universes.
+    let lines = r.definition_lines().unwrap();
+    assert_eq!(
+        lines
+            .iter()
+            .map(|l| (l.id, l.name.as_str(), l.params.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (1, "round1", "buy_at 2 sell_at 5"),
+            (2, "round2", "buy_at 3 sell_at 6")
+        ]
+    );
+    assert!(lines[0].universe.contains("adv_shares <= 600") && lines[0].universe.contains('\n'));
+    assert_eq!(lines[0].fingerprint, defs[0].fingerprint());
+    // Without budgets: none, and the configuration is another configuration.
+    let bare = HostConfig {
+        budgets: None,
+        ..host_cfg()
+    };
+    let dir2 = out_dir("bud-out2");
+    run(&setup(&bare, &cost, &defs), &mut days, &dir2).unwrap();
+    assert_eq!(Results::open(&dir2).unwrap().budgets().unwrap(), None);
+    assert_ne!(
+        Results::open(&dir).unwrap().fingerprint(),
+        Results::open(&dir2).unwrap().fingerprint()
+    );
+}
+
+#[test]
+fn strategies_of_different_sizes_keep_their_own_trades_and_scenario_directories_are_found_only_by_name()
+ {
+    use super::view::{catalog_runs, scenario_dir, scenarios_json, trades_json};
+    let (host, cost) = (host_cfg(), CostModel::published());
+    let defs = [
+        round_trip_of(1, 100, LOW, 2, 5),
+        round_trip_of(2, 300, HIGH, 3, 6),
+    ];
+    let mut days = Days::new("size-days", 3);
+    let root = scratch("size-root");
+    run(&setup(&host, &cost, &defs), &mut days, &root.join("sz")).unwrap();
+    let j = json(&scenarios_json(&root).unwrap());
+    let st = j.get("scenarios").arr()[0].get("strategies").arr().to_vec();
+    assert_eq!(st[0].get("net").s(), "-6.18");
+    assert_ne!(st[1].get("net").s(), "-6.18");
+    assert_eq!(
+        (st[0].get("trades").s(), st[1].get("trades").s()),
+        ("3", "3")
+    );
+    let runs = catalog_runs(&root).unwrap();
+    assert_eq!(runs[0].net_pnl, Some(-6_182_038_200));
+    assert_ne!(runs[1].net_pnl, runs[0].net_pnl);
+    // Each strategy's day is its own size.
+    let (a, b) = (
+        json(&trades_json(&root, "sz", "2026-05-01", 1).unwrap()),
+        json(&trades_json(&root, "sz", "2026-05-01", 2).unwrap()),
+    );
+    assert_eq!(
+        (
+            a.get("trades").arr()[0].get("qty").s(),
+            b.get("trades").arr()[0].get("qty").s()
+        ),
+        ("100", "300")
+    );
+    // A directory is a scenario only if it is named plainly and holds a configuration.
+    assert_eq!(scenario_dir(&root, "sz"), Some(root.join("sz")));
+    fs::create_dir_all(root.join("plain")).unwrap();
+    assert_eq!(scenario_dir(&root, "plain"), None, "no configuration in it");
+    assert_eq!(scenario_dir(&root, "nope"), None);
+    // A configuration reached by a name that is not plain: `..` from inside a scenario, and a hidden directory.
+    fs::copy(
+        root.join("sz").join(CONFIG_FILE),
+        root.join("sz").join("again.cfg"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".hid")).unwrap();
+    fs::copy(
+        root.join("sz").join(CONFIG_FILE),
+        root.join(".hid").join(CONFIG_FILE),
+    )
+    .unwrap();
+    for bad in ["..", ".", ".hid", "sz/../sz", "sz/"] {
+        assert_eq!(scenario_dir(&root, bad), None, "{bad}");
+    }
+    assert_eq!(scenario_dir(&root.join("sz"), ".."), None);
+}
+
+#[test]
+fn what_the_broker_and_the_rate_limit_turned_away_is_one_count() {
+    use crate::host::StrategyStats;
+    let st = StrategyStats {
+        refused_by_broker: 2,
+        rate_limited: 3,
+        rejected_by_gateway: 7,
+        ..StrategyStats::default()
+    };
+    assert_eq!(super::run::refusals(&st), 5);
+    assert_eq!(super::run::refusals(&StrategyStats::default()), 0);
 }

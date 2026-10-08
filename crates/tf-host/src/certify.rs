@@ -1,6 +1,6 @@
 //! Replaying a strategy on a tape to earn the right to join a live day.
 
-use tf_core::Event;
+use tf_core::{Event, Nanos};
 use tf_ledger::MemStore;
 use tf_strategy::sim::SimBroker;
 
@@ -19,6 +19,8 @@ pub enum CertifyError {
     /// The ledger refused something it was told: the strategy or the host is inconsistent.
     LedgerRefused(u64),
     Host(HostError),
+    /// The tape's files could not be read.
+    Tape(String),
 }
 
 impl std::fmt::Display for CertifyError {
@@ -32,6 +34,7 @@ impl std::fmt::Display for CertifyError {
                 write!(f, "the ledger refused {n} things it was told")
             }
             CertifyError::Host(e) => write!(f, "{e}"),
+            CertifyError::Tape(m) => write!(f, "the tape cannot be read: {m}"),
         }
     }
 }
@@ -65,6 +68,16 @@ pub fn certify(
         scratch.on_event(ev).map_err(CertifyError::Host)?;
     }
     let last = events.last().map_or(0, Event::ts_recv);
+    conclude(scratch, def, tape_id, last)
+}
+
+/// What the replay showed: the day ended, the strategy still running, the ledger content with everything it was told.
+fn conclude(
+    mut scratch: Host<MemStore>,
+    def: &StrategyDef,
+    tape_id: u64,
+    last: Nanos,
+) -> Result<Certificate, CertifyError> {
     scratch.end_of_day(last).map_err(CertifyError::Host)?;
     match scratch.state_of(def.id) {
         Some(SlotState::Running) => {}
@@ -89,4 +102,50 @@ pub fn certify(
         scratch.accepted(),
         scratch.outcome_hash(),
     ))
+}
+
+/// [`certify`] over the files of a stored day (zstd DBN, in the order given), streamed through the scratch host and not held in
+/// memory: a whole market's day is tens of millions of events. The first pass names the day's instruments, as a replay does;
+/// events the gateway sent twice are dropped by the one rule the live run applies. `cfg` should carry the session times of the
+/// tape's date (`HostConfig::day`) and `snapshot` is the reference as it was before that day.
+pub fn certify_files(
+    def: &StrategyDef,
+    cfg: &HostConfig,
+    snapshot: tf_universe::Snapshot,
+    files: &[std::path::PathBuf],
+    tape_id: u64,
+) -> Result<Certificate, CertifyError> {
+    use tf_capture::CaptureReplay;
+    use tf_provider::{Poll, Provider};
+    let reference = Reference {
+        symbols: crate::replay::learn_symbols(files),
+        snapshot,
+    };
+    let mut scratch = Host::new(cfg.clone(), reference, MemStore::from_records(vec![]))
+        .map_err(CertifyError::Host)?
+        .with_paper(Box::new(SimBroker::new(cfg.sim, cfg.id_space)));
+    scratch.install(def).map_err(CertifyError::Admit)?;
+    let mut source = CaptureReplay::from_files(files.to_vec());
+    let mut dedupe = tf_core::Dedupe::new();
+    let mut buf: Vec<Event> = Vec::new();
+    let mut last: Nanos = 0;
+    loop {
+        buf.clear();
+        match source.poll(&mut buf, 4096) {
+            Poll::Events(_) => {}
+            Poll::Idle => continue,
+            _ => break,
+        }
+        for ev in buf.iter().filter(|e| dedupe.admit(e)) {
+            last = last.max(ev.ts_recv());
+            scratch.on_event(ev).map_err(CertifyError::Host)?;
+        }
+    }
+    if let Some(why) = source.failure() {
+        return Err(CertifyError::Tape(why.to_string()));
+    }
+    if scratch.events() == 0 {
+        return Err(CertifyError::NoEvents);
+    }
+    conclude(scratch, def, tape_id, last)
 }

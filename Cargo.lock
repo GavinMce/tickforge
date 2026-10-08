@@ -380,9 +380,12 @@ dependencies = [
  "tf-calendar",
  "tf-catalog",
  "tf-core",
+ "tf-driver",
  "tf-history",
  "tf-host",
+ "tf-ingest",
  "tf-ledger",
+ "tf-live",
  "tf-manifest",
  "tf-params",
  "tf-proposals",
@@ -394,6 +397,7 @@ dependencies = [
  "tf-synth",
  "tf-universe",
  "tf-workspace",
+ "zstd 0.13.3",
 ]
 
 [[package]]

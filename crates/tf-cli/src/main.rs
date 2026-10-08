@@ -3,6 +3,7 @@ mod catalog_cmd;
 mod explore;
 mod history_cmd;
 mod ledger_cmd;
+mod live_cmd;
 mod reference_cmd;
 mod research_cmd;
 mod rules_cmd;
@@ -1056,6 +1057,7 @@ fn main() -> ExitCode {
         Some("reference") => reference_cmd::reference(&args[1..]),
         Some("history") => history_cmd::history(&args[1..]),
         Some("research") => research_cmd::research(&args[1..]),
+        Some("live") => live_cmd::live(&args[1..]),
         Some("serve") => serve_cmd::serve_cmd(&args[1..]),
         Some("catalog") => catalog_cmd::catalog(&args[1..]),
         Some("ledger") => ledger_cmd::ledger(&args[1..]),

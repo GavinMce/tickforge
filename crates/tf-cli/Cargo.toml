@@ -35,3 +35,9 @@ tf-proposals.workspace = true
 tf-universe.workspace = true
 tf-reference.workspace = true
 tf-history.workspace = true
+tf-driver.workspace = true
+tf-live.workspace = true
+tf-ingest.workspace = true
+
+[dev-dependencies]
+zstd = "0.13"

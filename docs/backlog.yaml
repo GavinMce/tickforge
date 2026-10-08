@@ -1529,7 +1529,26 @@ epics:
       - id: E18-S13
         jira: TIC-198
         title: "tf live: certify a strategy set on a stored day, check the gateway, and run a live day from one config"
-        status: todo
+        status: done
+        evidence: >-
+          ADR 0072. `tf live certify` replays each strategy of a strategy set over a stored day of the history store, streamed through a
+          scratch host (`certify_files`, equal to certifying the same events held in memory, tested) and writes the certificates (one word
+          of text with its seal; an edited one does not read) to a file, nothing if any strategy fails. `tf live check` logs in with the key
+          from the environment and reads for a stated time placing and keeping nothing, saying the session, instruments named, records and
+          gaps, and that nothing arrived when so. `tf live run` reads one config (dataset, subscriptions, key variable, strategy set,
+          snapshot and certificate paths, directories, timings) and checks everything before opening the gateway (a trading day, the set,
+          a snapshot as of a session before the day, a certificate for each strategy's current fingerprint, no stale stop file, the ledger):
+          the gateway is shown not to be contacted for any refusal. It waits for --start-at, runs the driver to the close, writes one
+          file ledger for all the days and a directory for each (a restart gets a numbered one), ends cleanly on a STOP file, and is an
+          error unless the day closed normally. Run against the fake gateway end to end: a day closes and leaves its ledger (the strategy
+          has a session with trades), capture, decision log and report, and the capture replays to the same decisions; a stop file ends a
+          day that would not end; a start in the future waits and a stop during the wait never opens the gateway; the example files in
+          docs/examples/live read (the test found a mistake in the first universe file). Full workspace 1,233 passed; clippy and fmt clean.
+          Mutation run on the new code: 63 mutants in the first run, the survivors given tests (settings, date shapes, counting, early
+          end of a check, the report of a day that did not close or replay); 2 remain, timing-only (a loop bound and the early exit of a
+          check). NOT done: nothing here has run against the real gateway, which the first paid session will exercise; no orders reach a
+          broker (the simulated broker only; Alpaca paper needs its transport); no scheduling, alerting or clock discipline (E18-S09).
+          The runbook for the first day is docs/runbooks/first-live-day.md.
         deps: [E18-S12, E19-S31, E19-S41]
         ac:
           - "`tf live certify` replays each strategy of a strategy set over a stored day of the history store (streamed, not held in memory) and writes the certificates the host requires, refusing to write any if one strategy fails"

@@ -1,0 +1,3 @@
+universe v1
+# Names that traded a hundred thousand shares a day on average and cost between five and two hundred dollars.
+static adv_shares >= 100000; price >= 5; price <= 200

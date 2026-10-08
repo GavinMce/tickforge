@@ -52,7 +52,7 @@ mod short_tests;
 #[cfg(test)]
 mod tests;
 
-pub use certify::{CertifyError, certify};
+pub use certify::{CertifyError, certify, certify_files};
 pub use daily::{CaptureFacts, DailyReport, StrategySection, SystemInputs, SystemSection, money};
 pub use def::{Build, Certificate, Route, StrategyDef};
 pub use equiv::{Answer, Difference, Log, Rec, Verdict, compare, symbols_fingerprint};

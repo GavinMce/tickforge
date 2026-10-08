@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use crate::budgets::{self, Refusal};
 use crate::proposals;
-use crate::{ExplorerError, ResearchError, Source, js, overview, run_detail, runs};
+use crate::{
+    ExplorerError, ResearchError, Source, js, overview, replay_overview, run_detail, runs,
+};
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 16 * 1024;
@@ -429,6 +431,20 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     let answer = match req.path.as_str() {
         "/" => return Response::new(200, "text/html", HOME),
         "/app.js" => return Response::new(200, "text/javascript", APP_JS),
+        // One replayed day's overview, read from its ledger as a live ledger's is.
+        "/api/overview" if query_value(&req.query, "scenario").is_some() => {
+            let (Some(scenario), Some(day)) = (
+                query_value(&req.query, "scenario"),
+                query_value(&req.query, "day"),
+            ) else {
+                return Response::error(400, "give scenario and day");
+            };
+            return match replay_overview(src, &scenario, &day) {
+                Ok(body) => Response::json(200, body),
+                Err(ResearchError::NotFound(m)) => Response::error(404, &m),
+                Err(ResearchError::Refused(m)) => Response::error(422, &m),
+            };
+        }
         "/api/overview" => overview(src),
         "/api/research" | "/api/research/trades" => {
             return research_api(src, &req.path, &req.query);

@@ -85,3 +85,4 @@ How:
 | [0066](0066-a-trade-is-replayed-from-its-days-files-in-one-page-that-draws-only-what-has-happened-by-the-cursor.md) | A trade is replayed from its day's files in one page that draws only what has happened by the cursor | Accepted |
 | [0067](0067-the-replay-page-shows-the-strategy-as-configured-and-what-each-fill-was-asked-for.md) | The replay page shows the strategy as configured and what each fill was asked for | Accepted |
 | [0068](0068-a-replayed-day-is-a-live-day-the-host-over-a-file-ledger-in-the-days-own-directory-with-its-daily-report.md) | A replayed day is a live day: the host over a file ledger in the day's own directory, with its daily report | Accepted |
+| [0069](0069-the-workspace-reads-a-replayed-days-ledger-as-it-reads-a-live-one.md) | The workspace reads a replayed day's ledger as it reads a live one | Accepted |

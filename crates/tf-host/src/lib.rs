@@ -33,6 +33,7 @@ pub mod library;
 mod replay;
 pub mod research;
 mod runner;
+pub mod set;
 
 #[cfg(test)]
 mod bars_tests;
@@ -44,6 +45,8 @@ mod exit_tests;
 mod library_tests;
 #[cfg(test)]
 mod replay_tests;
+#[cfg(test)]
+mod set_tests;
 #[cfg(test)]
 mod short_tests;
 #[cfg(test)]

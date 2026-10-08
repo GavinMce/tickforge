@@ -6,6 +6,8 @@ mod keep;
 pub mod null;
 mod run;
 pub mod stats;
+mod store;
+mod summary;
 mod trade;
 mod trips;
 pub mod view;
@@ -16,6 +18,8 @@ pub use run::{
     BudgetView, CONFIG_FILE, DayFile, DayInput, DayOutcome, DaySource, DefLine, ResearchError,
     Results, RunOptions, RunReport, Setup, read_config, run, run_day, run_day_to, run_with,
 };
+pub use store::StoreSource;
+pub use summary::describe;
 pub use trips::{Assembler, COLUMNS, OPEN_AT_END, Trip, Who};
 
 #[cfg(test)]

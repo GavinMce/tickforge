@@ -22,6 +22,7 @@ tf-stats.workspace = true
 tf-ingest.workspace = true
 tf-ledger.workspace = true
 tf-provider.workspace = true
+tf-history.workspace = true
 tf-risk.workspace = true
 tf-strategy.workspace = true
 tf-universe.workspace = true
@@ -29,5 +30,4 @@ tf-universe.workspace = true
 [dev-dependencies]
 dbn = { version = "0.71" }
 tf-databento.workspace = true
-tf-history.workspace = true
 tf-synth.workspace = true

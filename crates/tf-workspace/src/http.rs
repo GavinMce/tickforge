@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::budgets::{self, Refusal};
 use crate::proposals;
-use crate::{ExplorerError, Source, js, overview, run_detail, runs};
+use crate::{ExplorerError, ResearchError, Source, js, overview, run_detail, runs};
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 16 * 1024;
@@ -220,6 +220,66 @@ fn explorer(src: &Source, run: &str) -> Response {
     }
 }
 
+/// The backtest view's data, as JSON.
+fn research_api(src: &Source, path: &str, query: &str) -> Response {
+    let Some(r) = &src.research else {
+        return Response::error(404, "no research results are connected");
+    };
+    let refuse = |e: ResearchError| match e {
+        ResearchError::NotFound(m) => Response::error(404, &m),
+        ResearchError::Refused(m) => Response::error(422, &m),
+    };
+    if path == "/api/research" {
+        return match r.view().scenarios() {
+            Ok(body) => Response::json(200, body),
+            Err(e) => Response::error(500, &e),
+        };
+    }
+    let (Some(scenario), Some(day), Some(strategy)) = (
+        query_value(query, "scenario"),
+        query_value(query, "day"),
+        query_value(query, "strategy").and_then(|s| s.parse::<u16>().ok()),
+    ) else {
+        return Response::error(400, "give scenario, day and strategy (a number)");
+    };
+    match r.view().trades(&scenario, &day, strategy) {
+        Ok(body) => Response::json(200, body),
+        Err(e) => refuse(e),
+    }
+}
+
+/// One trade replayed: the whole page, its data embedded, in the explorer's policy (one self-contained page that can reach nothing).
+fn research_trade(src: &Source, query: &str) -> Response {
+    let Some(r) = &src.research else {
+        return notice(
+            404,
+            "No research results",
+            "This service was not given research results to show.",
+        );
+    };
+    let (Some(scenario), Some(day), Some(strategy), Some(n)) = (
+        query_value(query, "scenario"),
+        query_value(query, "day"),
+        query_value(query, "strategy").and_then(|s| s.parse::<u16>().ok()),
+        query_value(query, "n").and_then(|s| s.parse::<usize>().ok()),
+    ) else {
+        return notice(
+            400,
+            "Which trade?",
+            "Give scenario, day, strategy (a number) and n (the trade, from 0).",
+        );
+    };
+    match r.view().trade_page(&scenario, &day, strategy, n) {
+        Ok(page) => {
+            let mut resp = Response::new(200, "text/html", page);
+            resp.csp = EXPLORER_CSP;
+            resp
+        }
+        Err(ResearchError::NotFound(m)) => notice(404, "No such trade", &m),
+        Err(ResearchError::Refused(m)) => notice(422, "This trade cannot be shown", &m),
+    }
+}
+
 /// The requests that ask for something to change: a budget edit previewed, scheduled or withdrawn.
 /// Nothing is changed here: a scheduled edit is put in the ledger's inbox for the engine. The caller
 /// must be signed in and must send `X-Requested-With: workspace`, which a page on another site cannot
@@ -333,6 +393,12 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
     if req.path == "/health" {
         return Response::json(200, "{\"ok\":true}");
     }
+    if req.path == "/research/trade" {
+        if !signed_in(req, token) {
+            return Response::new(401, "text/html", LOGIN);
+        }
+        return research_trade(src, &req.query);
+    }
     if let Some(run) = req.path.strip_prefix("/explorer/") {
         if !signed_in(req, token) {
             return Response::new(401, "text/html", LOGIN);
@@ -347,6 +413,8 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
             | "/api/run"
             | "/api/budgets"
             | "/api/proposals"
+            | "/api/research"
+            | "/api/research/trades"
     );
     if !known {
         return Response::error(404, "no such route");
@@ -362,6 +430,9 @@ pub fn handle(src: &Source, token: &str, req: &Request) -> Response {
         "/" => return Response::new(200, "text/html", HOME),
         "/app.js" => return Response::new(200, "text/javascript", APP_JS),
         "/api/overview" => overview(src),
+        "/api/research" | "/api/research/trades" => {
+            return research_api(src, &req.path, &req.query);
+        }
         "/api/proposals" => match proposals::view(src) {
             Ok(body) => Ok(body),
             Err(proposals::Refusal::NoLedger) => {

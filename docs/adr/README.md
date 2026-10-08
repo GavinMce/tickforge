@@ -81,3 +81,4 @@ How:
 | [0062](0062-the-null-strategy-is-random-names-at-random-times-with-the-same-exits-run-once-a-seed-in-one-pass-and-its-seeds-are-controls-not-trials.md) | The null strategy is random names at random times with the same exits, run once a seed in one pass, and its seeds are controls, not trials | Accepted |
 | [0063](0063-a-cross-strategy-records-why-it-acted-as-a-table-the-host-collects-beside-its-decision-log.md) | A cross strategy records why it acted as a table the host collects beside its decision log | Accepted |
 | [0064](0064-a-day-keeps-its-log-its-traces-and-the-market-around-its-trades-beside-its-trips.md) | A day keeps its log, its traces and the market around its trades beside its trips | Accepted |
+| [0065](0065-the-backtest-view-reads-a-results-directory-through-the-program-that-hosts-the-service-and-only-reads.md) | The backtest view reads a results directory through the program that hosts the service, and only reads | Accepted |

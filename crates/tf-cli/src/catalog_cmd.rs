@@ -39,6 +39,7 @@ fn line(r: &Run) -> String {
             &hash[..hash.len().min(8)]
         ),
         Source::Ledger { ledger, session } => format!("{ledger} day {session}"),
+        Source::Research { scenario, .. } => format!("scenario {scenario}"),
     };
     format!(
         "  {}  {:<8} {:>12} {:>6} trades  rules {:<8}  budget {:>12}  {}\n",

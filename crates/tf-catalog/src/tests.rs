@@ -466,3 +466,32 @@ fn a_strategy_that_only_passed_has_no_fills_and_says_why() {
     assert!(runs[0].1.fills.is_empty());
     assert_eq!(runs[0].1.refused, [("max_notional".to_owned(), 1)]);
 }
+
+#[test]
+fn a_research_strategy_is_a_backtest_run_the_backtest_view_opens_and_scenarios_stay_apart() {
+    let a = research_run(
+        "alpha",
+        "00ff",
+        "t04",
+        5 * SEC,
+        -2 * i128::from(P),
+        7,
+        Some(50_000 * P as u128),
+    );
+    assert_eq!(
+        (a.kind, a.trades, a.net_pnl, a.rules.as_deref()),
+        (Kind::Backtest, Some(7), Some(-2 * i128::from(P)), None)
+    );
+    assert_eq!(a.budget, Some(50_000 * P as u128));
+    assert!(a.researchable() && !a.explorable());
+    // A stored backtest and a ledger session are not researchable.
+    assert!(!run("t04", Kind::Backtest, SEC, "abc").researchable());
+    // The same strategy in two scenarios, or the same scenario and two variants, are different runs in a fixed order.
+    let b = research_run("beta", "00ff", "t04", 5 * SEC, 0, 0, None);
+    let c = research_run("alpha", "0100", "t04", 5 * SEC, 0, 0, None);
+    let one = Catalog::new(vec![b.clone(), a.clone(), c.clone()]);
+    let two = Catalog::new(vec![c.clone(), a.clone(), b.clone()]);
+    assert_eq!(one, two);
+    assert_eq!(one.of("t04").count(), 3);
+    assert_eq!(b.budget, None);
+}

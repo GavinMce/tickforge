@@ -900,7 +900,13 @@ fn a_t04_day_keeps_its_ranked_cross_section_and_the_market_around_its_trades() {
     for date in results.dates().unwrap() {
         // The day's one decision, with symbols: the three the strategy bought and the others ranked.
         let traces = results.traces(&date).unwrap();
-        assert_eq!(traces.len(), 1);
+        assert_eq!(traces.len(), 2);
+        // The strategy's rank trace, and the host's count of what it tried (three buys and three sells, all accepted).
+        assert_eq!(traces[1].1.kind, "stats");
+        assert_eq!(
+            (traces[1].1.value("accepted"), traces[1].1.value("rejected")),
+            (Some("6"), Some("0"))
+        );
         let (strategy, t) = &traces[0];
         assert_eq!((*strategy, t.kind.as_str(), t.rows.len()), (1, "rank", 6));
         assert_eq!(t.columns[1], "symbol");

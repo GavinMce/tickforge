@@ -166,6 +166,17 @@ impl Symbology {
             .map(|r| r.3.as_str())
     }
 
+    /// Every `(id, symbol)` in force on `day`, by id (one symbol for an id on a day, the first if the vendor says two).
+    pub fn names_on(&self, day: i64) -> Vec<(u32, &str)> {
+        let mut out: Vec<(u32, &str)> = Vec::new();
+        for r in &self.rows {
+            if r.1 <= day && day < r.2 && out.last().is_none_or(|l| l.0 != r.0) {
+                out.push((r.0, r.3.as_str()));
+            }
+        }
+        out
+    }
+
     pub fn len(&self) -> usize {
         self.rows.len()
     }

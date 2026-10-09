@@ -364,6 +364,14 @@ impl<'a> Decoder<'a> {
         self
     }
 
+    /// Names for raw ids that the file's own metadata does not give (a history pull of every symbol maps none): applied as the ids
+    /// are first seen, over a name the metadata gave. Call after [`Decoder::with_instruments`].
+    pub fn with_names(mut self, names: &[(u32, String)]) -> Self {
+        self.names.extend(names.iter().cloned());
+        self.mapper.ids.add_names(names);
+        self
+    }
+
     pub fn instruments(&self) -> &InstrumentMap {
         self.mapper.instruments()
     }

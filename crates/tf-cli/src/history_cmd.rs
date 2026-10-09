@@ -6,6 +6,7 @@ use tf_history::{Store, describe, index, verify};
 
 const USAGE: &str = "usage:
     tf history index DIR --dataset NAME --schema NAME [--symbols LIST]
+    tf history names DIR --dataset NAME --schema NAME --date DATE --symbology FILE
     tf history verify DIR
     tf history show DIR
     tf history screen DIR [--dataset NAME] [--from DATE] [--to DATE] [--quotes SCHEMA] [--min-price P] [--max-price P]
@@ -59,6 +60,7 @@ pub(crate) fn run(args: &[String]) -> Result<String, String> {
             }
             Ok(s)
         }
+        Some("names") => names(dir, &args[2..]),
         Some("verify") => {
             let r = verify(dir).map_err(|e| e.to_string())?;
             if r.is_clean() {
@@ -80,6 +82,51 @@ pub(crate) fn run(args: &[String]) -> Result<String, String> {
         Some("show") => Ok(describe(&Store::read(dir).map_err(|e| e.to_string())?)),
         _ => Err(USAGE.to_owned()),
     }
+}
+
+/// The names of a day's instruments, from the vendor's symbology, kept beside the day's file (`<date>.names`). A pull of every
+/// symbol has no mappings in its metadata, so without these a replay of the day knows ids and no symbols.
+fn names(dir: &Path, args: &[String]) -> Result<String, String> {
+    let (mut dataset, mut schema, mut date, mut sym) = (None, None, None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut v = |what: &str| it.next().cloned().ok_or(format!("{what} needs a value"));
+        match a.as_str() {
+            "--dataset" => dataset = Some(v("--dataset")?),
+            "--schema" => schema = Some(v("--schema")?),
+            "--date" => date = Some(v("--date")?),
+            "--symbology" => sym = Some(v("--symbology")?),
+            o => return Err(format!("unknown argument {o}\n{USAGE}")),
+        }
+    }
+    let (Some(dataset), Some(schema), Some(date), Some(sym)) = (dataset, schema, date, sym) else {
+        return Err(USAGE.to_owned());
+    };
+    let day = tf_reference::date_days(&date).ok_or(format!("--date: `{date}` is not a date"))?;
+    let text = std::fs::read_to_string(&sym).map_err(|e| format!("{sym}: {e}"))?;
+    let symbology = tf_reference::Symbology::parse(&text).map_err(|e| format!("{sym}: {e}"))?;
+    let names: Vec<(u32, String)> = symbology
+        .names_on(day)
+        .into_iter()
+        .map(|(id, s)| (id, s.to_owned()))
+        .collect();
+    if names.is_empty() {
+        return Err(format!("{sym} names no instrument on {date}"));
+    }
+    let file = dir
+        .join(&dataset)
+        .join(&schema)
+        .join(format!("{date}.dbn.zst"));
+    let path = tf_capture::names_path(&file);
+    let part = path.with_extension("names.part");
+    std::fs::write(&part, tf_capture::render_names(&names))
+        .map_err(|e| format!("{}: {e}", part.display()))?;
+    std::fs::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(format!(
+        "{} names for {date}: {}\n",
+        names.len(),
+        path.display()
+    ))
 }
 
 /// A decimal number of dollars (`12.5`) as raw price units.
@@ -202,5 +249,97 @@ mod tests {
                 .unwrap_err()
                 .contains("usage")
         );
+    }
+
+    #[test]
+    fn names_for_a_day_come_from_the_symbology_and_sit_beside_the_days_file() {
+        let a = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let dir = std::env::temp_dir().join(format!("tf-history-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("X").join("tbbo")).unwrap();
+        let sym = dir.join("sym.json");
+        std::fs::write(
+            &sym,
+            r#"{"result":{"AAPL":[{"d0":"2026-10-08","d1":"2026-10-09","s":"38"}],
+                "OLD":[{"d0":"2026-10-01","d1":"2026-10-08","s":"39"}]}}"#,
+        )
+        .unwrap();
+        let d = dir.to_str().unwrap();
+        let s = sym.to_str().unwrap();
+        let ok = run(&a(&[
+            "names",
+            d,
+            "--dataset",
+            "X",
+            "--schema",
+            "tbbo",
+            "--date",
+            "2026-10-08",
+            "--symbology",
+            s,
+        ]))
+        .unwrap();
+        assert!(ok.starts_with("1 names for 2026-10-08"), "{ok}");
+        let text = std::fs::read_to_string(dir.join("X/tbbo/2026-10-08.names")).unwrap();
+        assert_eq!(
+            tf_capture::parse_names(&text).unwrap(),
+            [(38, "AAPL".to_owned())]
+        );
+        assert!(!dir.join("X/tbbo/2026-10-08.names.part").exists());
+        for bad in [
+            vec!["names", d],
+            vec![
+                "names",
+                d,
+                "--dataset",
+                "X",
+                "--schema",
+                "tbbo",
+                "--date",
+                "soon",
+                "--symbology",
+                s,
+            ],
+            vec![
+                "names",
+                d,
+                "--dataset",
+                "X",
+                "--schema",
+                "tbbo",
+                "--date",
+                "2026-11-01",
+                "--symbology",
+                s,
+            ],
+            vec![
+                "names",
+                d,
+                "--dataset",
+                "X",
+                "--schema",
+                "tbbo",
+                "--date",
+                "2026-10-08",
+                "--symbology",
+                "/nonexistent.json",
+            ],
+            vec![
+                "names",
+                d,
+                "--dataset",
+                "X",
+                "--schema",
+                "tbbo",
+                "--date",
+                "2026-10-08",
+                "--symbology",
+                s,
+                "--bogus",
+            ],
+        ] {
+            assert!(run(&a(&bad)).is_err(), "{bad:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -758,3 +758,66 @@ fn a_first_file_that_is_missing_and_a_record_that_cannot_be_decoded_each_say_so(
     assert_eq!(n, 0, "nothing after the record that cannot be read");
     assert!(why.is_some());
 }
+
+#[test]
+fn names_beside_a_file_name_its_instruments_and_a_bad_names_file_stops_the_replay_saying_which() {
+    let dir = scratch("names");
+    let (mut w, _) = RawWriter::open(cfg(&dir, 1000)).unwrap();
+    feed(&mut w, &session(40, 1_000_000_000, 500_000_000));
+    w.finish().unwrap();
+    let file = dir.join(&list(&dir).unwrap()[0].file);
+    let drain = |file: &Path| {
+        let mut r = CaptureReplay::from_files(vec![file.to_owned()]);
+        loop {
+            let mut out = Vec::new();
+            if !matches!(r.poll(&mut out, 100), Poll::Events(_)) {
+                break;
+            }
+        }
+        let m = r.instruments();
+        let named: Vec<Option<String>> = (0..m.len() as u32)
+            .map(|i| m.symbol(i).map(str::to_owned))
+            .collect();
+        (named, r.failure().map(str::to_owned))
+    };
+    // None beside the file: ids and no symbols, and nothing wrong.
+    let (named, why) = drain(&file);
+    assert!(named.len() == 7 && named.iter().all(Option::is_none) && why.is_none());
+    // Names beside it: each id the file carries takes its name; one the file never shows makes no instrument.
+    let sidecar = names_path(&file);
+    assert!(
+        sidecar.to_string_lossy().ends_with(".names") && !sidecar.to_string_lossy().contains("dbn")
+    );
+    let given: Vec<(u32, String)> = (20_000..20_007u32)
+        .map(|i| (i, format!("S{}", i - 20_000)))
+        .chain([(5, "GHOST".to_owned())])
+        .collect();
+    fs::write(&sidecar, render_names(&given)).unwrap();
+    let (named, why) = drain(&file);
+    assert!(why.is_none() && named.len() == 7);
+    let mut got: Vec<String> = named.into_iter().flatten().collect();
+    got.sort();
+    assert_eq!(got, ["S0", "S1", "S2", "S3", "S4", "S5", "S6"]);
+    // A names file that does not read ends the replay and the failure names that file.
+    fs::write(&sidecar, "20000 AAA\nnot a name line\n").unwrap();
+    let (_, why) = drain(&file);
+    let why = why.unwrap();
+    assert!(why.contains(".names") && why.contains("line 2"), "{why}");
+}
+
+#[test]
+fn a_names_file_is_one_id_and_one_symbol_a_line_and_anything_else_is_refused() {
+    let names = vec![(5u32, "AAPL".to_owned()), (9, "BRK.B".to_owned())];
+    assert_eq!(parse_names(&render_names(&names)).unwrap(), names);
+    assert!(parse_names("").unwrap().is_empty());
+    assert_eq!(
+        parse_names("# c\n\n  7 X  \n").unwrap(),
+        [(7, "X".to_owned())]
+    );
+    for bad in ["7", "x X", "7 A B", "-1 A", "7 ", "4294967296 A"] {
+        assert!(parse_names(bad).is_err(), "{bad}");
+    }
+    let p = names_path(Path::new("/d/s/2026-10-08.dbn.zst"));
+    assert_eq!(p, Path::new("/d/s/2026-10-08.names"));
+    assert_eq!(names_path(Path::new("odd")), Path::new("odd.names"));
+}

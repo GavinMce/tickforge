@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Run the strategy set over a range of days on the homelab cluster and say where to look at the result.
 #
-#   scripts/backtest-dev.sh [--dry-run] [--detach] NAME FROM TO       # FROM and TO are dates, both included
+#   scripts/backtest-dev.sh [--dry-run] [--detach] [--set FILE] NAME FROM TO       # FROM and TO are dates, both included
 #
 # Starts a Job from the image the workspace runs (scripts/research-range.sh: pull the days that are not stored, make the
 # snapshots, run the set) and follows its log; the result is the scenario NAME in the workspace's Backtests screen. --detach
-# starts it and returns. --dry-run prints the Job and touches nothing. The set that is run is the one deployed
-# (deploy/k8s/config/month.set); change it and deploy first. A scenario is one configuration: use a new NAME for another set.
+# starts it and returns. --dry-run prints the Job and touches nothing. The set that is run is a file of the deployed config
+# (deploy/k8s/config/): month.set, or the one --set names (e.g. premarket.set); change it and deploy first. A scenario is one configuration: use a new NAME for another set.
 #
 # Same guard as deploy-dev.sh: only the homelab context, named on every call, never changed.
 #   TF_K8S_SERVER   optional API address for the context (e.g. https://10.0.30.20:6443)
@@ -21,11 +21,18 @@ URL="${TF_WORKSPACE_URL:-http://10.0.30.43:8787/}"
 
 dry=0
 detach=0
-while [ "${1:-}" = "--dry-run" ] || [ "${1:-}" = "--detach" ]; do
-  [ "$1" = "--dry-run" ] && dry=1
-  [ "$1" = "--detach" ] && detach=1
+setfile="month.set"
+while [ "${1:-}" = "--dry-run" ] || [ "${1:-}" = "--detach" ] || [ "${1:-}" = "--set" ]; do
+  case "$1" in
+    --dry-run) dry=1 ;;
+    --detach) detach=1 ;;
+    --set) shift; setfile="${1:?--set needs a file name}" ;;
+  esac
   shift
 done
+case "$setfile" in
+  "" | .* | *[!A-Za-z0-9._-]*) echo "refusing: $setfile is not a plain file name of the config" >&2; exit 2 ;;
+esac
 name="${1:?usage: backtest-dev.sh [--dry-run] [--detach] NAME FROM TO}"
 from="${2:?usage: backtest-dev.sh [--dry-run] [--detach] NAME FROM TO}"
 to="${3:?usage: backtest-dev.sh [--dry-run] [--detach] NAME FROM TO}"
@@ -89,6 +96,8 @@ spec:
           image: $image
           command: ["/opt/tickforge/scripts/research-range.sh", "$name", "$from", "$to"]
           env:
+            - name: SET
+              value: /config/$setfile
             - name: DATABENTO_API_KEY
               valueFrom: {secretKeyRef: {name: tickforge-databento, key: api-key}}
           resources:
@@ -118,7 +127,7 @@ if [ "$dry" = 1 ]; then
 fi
 
 manifest | kc apply -f - >/dev/null
-echo "started job $job: scenario $name, $from to $to"
+echo "started job $job: scenario $name, $from to $to, set $setfile"
 if [ "$detach" = 1 ]; then
   echo "follow it:  kubectl --context $CONTEXT -n $NAMESPACE logs -f job/$job"
   echo "then open:  $URL (Backtests)"

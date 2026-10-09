@@ -418,3 +418,21 @@ fn the_premarket_template_is_a_template_with_its_parameters_checked_when_the_set
     assert!(defs[0].params.contains("dollars=500") && defs[0].params.contains("names=3"));
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_sets_the_cluster_is_deployed_with_read_and_build() {
+    // The files of deploy/k8s/config, as the jobs read them: a typo in one is found here and not on the cluster.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/k8s/config");
+    for (file, strategies) in [("month.set", 4), ("premarket.set", 4)] {
+        let (_, defs) =
+            StrategySet::load(&dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        assert_eq!(defs.len(), strategies, "{file}");
+    }
+    // The premarket variants differ from one another, and each is a variant of its own for the registry.
+    let (_, defs) = StrategySet::load(&dir.join("premarket.set")).unwrap();
+    let mut params: Vec<&str> = defs.iter().map(|d| d.params.as_str()).collect();
+    params.sort_unstable();
+    params.dedup();
+    assert_eq!(params.len(), 4);
+    assert!(defs.iter().all(|d| d.name.starts_with("pm-")));
+}

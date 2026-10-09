@@ -102,6 +102,14 @@ case "$job" in *"claimName: tickforge-history"*"readOnlyRootFilesystem: true"*|*
 case "$job" in *"name: tickforge-live"*) no "the job does not touch the live volume";; *) ok "the job does not touch the live volume";; esac
 case "$job" in *"name: backtest-oct-"*) ok "the job is named for the scenario";; *) no "the job is named for the scenario";; esac
 [ "$(printf '%s' "$job" | grep -c 'kind: Job')" = 1 ] && ok "one job" || no "one job"
+case "$job" in *"value: /config/month.set"*) ok "the job runs the deployed month.set unless told otherwise";; *) no "the job runs the deployed month.set unless told otherwise";; esac
+job2=$("$here/backtest-dev.sh" --dry-run --set premarket.set pm 2026-10-01 2026-10-08 2>&1); code=$?
+[ "$code" = 0 ] && ok "a dry run with --set prints the job" || no "a dry run with --set prints the job: exit $code"
+case "$job2" in *"value: /config/premarket.set"*) ok "--set names the set the job runs";; *) no "--set names the set the job runs";; esac
+for bad in "../x" "a/b" ".hidden" ""; do
+  "$here/backtest-dev.sh" --dry-run --set "$bad" pm 2026-10-01 2026-10-08 > "$work/out" 2>&1; code=$?
+  [ "$code" != 0 ] && ok "backtest-dev refuses --set '$bad'" || no "backtest-dev refuses --set '$bad'"
+done
 for bad in "a/b 2026-10-08 2026-10-08" ".x 2026-10-08 2026-10-08" "oct 2026-13-01 2026-10-08" "oct 2026-10-09 2026-10-08" "oct 2026-10-08"; do
   # shellcheck disable=SC2086
   "$here/backtest-dev.sh" --dry-run $bad > "$work/out" 2>&1; code=$?

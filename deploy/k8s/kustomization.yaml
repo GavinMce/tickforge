@@ -15,6 +15,8 @@ configMapGenerator:
       - config/live.cfg
       - config/month.set
       - config/universe-liquid.txt
+      - config/premarket.set
+      - config/universe-premarket.spec
 generatorOptions:
   disableNameSuffixHash: true
 # scripts/deploy-dev.sh sets the tag to the commit it deploys; `main` is only what a bare `kubectl kustomize` shows.

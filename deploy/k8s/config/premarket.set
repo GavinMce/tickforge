@@ -1,0 +1,14 @@
+strategy set v1
+# The premarket volume-spike strategy (T25, ADR 0076) in four variants, for the backtest job (scripts/backtest-dev.sh --set premarket.set).
+# It is not the live set: the live day and the prepare job read month.set. There is no null beside it yet: the random-entry null only
+# draws entries in the regular session.
+balance 100000
+loss 300 600
+# The defaults: a window of five minutes at three times the premarket average, a pullback of ten to thirty percent of the run.
+strategy 1 pm-default t25 universe=universe-premarket.spec
+# A bigger spike is wanted.
+strategy 2 pm-spike5 t25 universe=universe-premarket.spec spike_x10=50
+# A deeper pullback is allowed, and a turn must be bigger.
+strategy 3 pm-deep t25 universe=universe-premarket.spec max_pullback_permille=450 turn_bp=60
+# A shorter window, so a faster burst counts.
+strategy 4 pm-fast t25 universe=universe-premarket.spec window_minutes=3 min_dollars=30000 min_trades=12

@@ -23,10 +23,23 @@ cost=$(curl -fsS -u "$key:" "$host/metadata.get_cost" -d dataset=EQUS.SUMMARY -d
   -d symbols="$symbols" -d stype_in=raw_symbol -d start="$start" -d end="$end")
 echo "Databento cost for the bars: \$$cost"
 
-curl -fsS -u "$key:" "$host/timeseries.get_range" -d dataset=EQUS.SUMMARY -d schema=ohlcv-1d \
-  -d symbols="$symbols" -d stype_in=raw_symbol -d start="$start" -d end="$end" -d encoding=csv \
-  -o "$out/bars.csv"
-curl -fsS -u "$key:" "$host/symbology.resolve" -d dataset=EQUS.SUMMARY -d symbols="$symbols" \
+# Databento's front end answers 504 now and then to a long request that works a minute later, and a long range is a long request:
+# the bars come in pieces of 28 days, each tried again if it fails, and are joined under one header.
+retry=(--retry 4 --retry-all-errors --retry-delay 10 --max-time 600)
+: > "$out/bars.csv.part"
+piece_start=$start
+first=1
+while [[ "$piece_start" < "$end" ]]; do
+  piece_end=$(date -u -d "$piece_start + 28 days" +%F)
+  [[ "$piece_end" > "$end" ]] && piece_end=$end
+  curl -fsS "${retry[@]}" -u "$key:" "$host/timeseries.get_range" -d dataset=EQUS.SUMMARY -d schema=ohlcv-1d \
+    -d symbols="$symbols" -d stype_in=raw_symbol -d start="$piece_start" -d end="$piece_end" -d encoding=csv -o "$out/piece.csv"
+  if [[ $first = 1 ]]; then cat "$out/piece.csv" >> "$out/bars.csv.part"; first=0; else tail -n +2 "$out/piece.csv" >> "$out/bars.csv.part"; fi
+  piece_start=$piece_end
+done
+rm -f "$out/piece.csv"
+mv "$out/bars.csv.part" "$out/bars.csv"
+curl -fsS "${retry[@]}" -u "$key:" "$host/symbology.resolve" -d dataset=EQUS.SUMMARY -d symbols="$symbols" \
   -d stype_in=raw_symbol -d stype_out=instrument_id -d start_date="$start" -d end_date="$end" \
   -o "$out/symbology.json"
 echo "bars: $(($(wc -l <"$out/bars.csv") - 1)) rows; symbology: $(wc -c <"$out/symbology.json") bytes"

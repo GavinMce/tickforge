@@ -326,6 +326,14 @@ pub(crate) fn learn_symbols(files: &[std::path::PathBuf]) -> SymbolTable {
     symbol_table(&names)
 }
 
+/// The snapshot without the symbols a stored tape never shows. A snapshot of the whole market names thousands that did not tick on
+/// a given day; they cannot trade on it, and a universe selecting one would be refused as unknown, so a replay of a stored day
+/// selects only from what the day has. (A live day is not given this: the gateway names every symbol it subscribed.)
+pub(crate) fn on_tape(mut snapshot: Snapshot, symbols: &SymbolTable) -> Snapshot {
+    snapshot.rows.retain(|r| symbols.get(&r.symbol).is_some());
+    snapshot
+}
+
 /// A host built as a replay builds it: a fresh ledger, recording, the paper route simulated too.
 pub(crate) fn replay_host(
     cfg: &HostConfig,

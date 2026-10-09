@@ -10,7 +10,7 @@ use tf_universe::LiveFeature;
 use super::*;
 use crate::host::FillNote;
 use crate::replay_tests::{dbn_day_at, scratch, write_capture};
-use crate::tests::{HIGH, LOW, SEC, config, snapshot};
+use crate::tests::{HIGH, LOW, SEC, SYMBOLS, config, snapshot};
 use crate::{HostConfig, Route, StrategyDef, runner};
 
 const D: i64 = 1_000_000_000;
@@ -1223,6 +1223,38 @@ fn a_day_the_cost_model_does_not_cover_or_the_market_was_closed_is_refused_befor
         snapshot: snapshot(),
     };
     assert!(run_day("2026-05-01", &empty, &s).is_err());
+}
+
+#[test]
+fn a_snapshot_of_the_whole_market_runs_a_stored_day_over_the_names_the_day_shows() {
+    let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
+    let days = Days::new("tape-days", 1);
+    let plain = DayInput {
+        files: days.files("2026-05-01"),
+        snapshot: snapshot(),
+    };
+    // Two names the universes select (one in each of the two) that the day never ticked on.
+    let mut wide = snapshot();
+    for (from, name) in [(0, "NOTICK"), (SYMBOLS as usize - 1, "NOTICL")] {
+        let mut row = wide.rows[from].clone();
+        row.symbol = name.into();
+        wide.rows.push(row);
+    }
+    wide.rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    let wide = DayInput {
+        files: plain.files.clone(),
+        snapshot: wide,
+    };
+    let s = setup(&host, &cost, &defs);
+    let (a, b) = (
+        run_day("2026-05-01", &plain, &s).unwrap(),
+        run_day("2026-05-01", &wide, &s).unwrap(),
+    );
+    assert!(!a.trips.is_empty());
+    assert_eq!(
+        (a.outcome_hash, a.events, a.trips.len()),
+        (b.outcome_hash, b.events, b.trips.len())
+    );
 }
 
 #[test]

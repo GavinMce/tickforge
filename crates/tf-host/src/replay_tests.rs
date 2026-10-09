@@ -14,8 +14,9 @@ use tf_core::{Event, Nanos, Px};
 use tf_ledger::MemStore;
 use tf_strategy::intent::StrategyId;
 use tf_strategy::{CrossStrategy, Ctx, MemberView};
-use tf_universe::{LiveFeature, Spec};
+use tf_universe::{LiveFeature, Snapshot, Spec};
 
+use crate::replay::{on_tape, symbol_table};
 use crate::tests::*;
 use crate::{
     Answer, Host, HostConfig, Log, Rec, ReplayError, Route, SlotState, StrategyDef, Verdict,
@@ -972,4 +973,27 @@ fn the_days_of_a_history_store_replay_through_the_hosts_replay_path_unchanged() 
     fs::write(&first, b).unwrap();
     assert!(tf_history::verify(&store).unwrap().problems[0].contains("altered"));
     let _ = (fs::remove_dir_all(&cap), fs::remove_dir_all(&store));
+}
+
+#[test]
+fn a_snapshot_is_cut_to_the_symbols_a_stored_day_shows_and_nothing_else_changes() {
+    // The market-wide snapshot names two symbols (S01, ZZZ) the day never ticked on; the day names S00, S02 and one it knows
+    // only by number.
+    let snap = Snapshot::parse(
+        "# as_of 2026-10-02\nsymbol,price,adv_shares\nS00,20.00,100\nS01,21.00,200\nS02,22.00,300\nZZZ,23.00,400\n",
+    )
+    .unwrap();
+    let day = symbol_table(&[Some("S00".into()), Some("S02".into()), None]);
+    let cut = on_tape(snap.clone(), &day);
+    let kept: Vec<&str> = cut.rows.iter().map(|r| r.symbol.as_str()).collect();
+    assert_eq!(kept, ["S00", "S02"]);
+    // The rows kept are the snapshot's own, and the header is unchanged.
+    assert_eq!(cut.rows[0], snap.rows[0]);
+    assert_eq!(cut.rows[1], snap.rows[2]);
+    assert_eq!(cut.as_of, snap.as_of);
+    assert_eq!(cut.columns, snap.columns);
+    // A day that shows every symbol the snapshot has loses none; a day that shows none leaves it empty.
+    let all = symbol_table(&["S00", "S01", "S02", "ZZZ"].map(|s| Some(s.to_string())));
+    assert_eq!(on_tape(snap.clone(), &all).rows, snap.rows);
+    assert!(on_tape(snap, &symbol_table(&[])).rows.is_empty());
 }

@@ -117,9 +117,10 @@ pub fn certify_files(
 ) -> Result<Certificate, CertifyError> {
     use tf_capture::CaptureReplay;
     use tf_provider::{Poll, Provider};
+    let symbols = crate::replay::learn_symbols(files);
     let reference = Reference {
-        symbols: crate::replay::learn_symbols(files),
-        snapshot,
+        snapshot: crate::replay::on_tape(snapshot, &symbols),
+        symbols,
     };
     let mut scratch = Host::new(cfg.clone(), reference, MemStore::from_records(vec![]))
         .map_err(CertifyError::Host)?

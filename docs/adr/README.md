@@ -90,3 +90,4 @@ How:
 | [0071](0071-research-and-the-live-day-read-one-strategy-set-and-research-runs-a-store-day-by-day.md) | Research and the live day read one strategy set, and research runs a store day by day | Accepted |
 | [0072](0072-tf-live-certifies-checks-and-runs-a-day-from-one-config-and-refuses-before-it-touches-the-gateway.md) | `tf live` certifies, checks and runs a day from one config, and refuses before it touches the gateway | Accepted |
 | [0073](0073-the-dev-environment-is-one-namespace-on-the-homelab-cluster-with-two-volumes-and-two-daily-jobs.md) | The dev environment is one namespace on the homelab cluster, with two volumes and two daily jobs | Accepted |
+| [0074](0074-a-stored-days-instruments-are-named-from-the-vendors-symbology-kept-beside-the-days-file.md) | A stored day's instruments are named from the vendor's symbology, kept beside the day's file | Accepted |

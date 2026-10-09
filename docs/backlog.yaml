@@ -2152,8 +2152,10 @@ epics:
           day's snapshot from a directory, a day identified by its file, snapshot and subset, a snapshot not from before the day refused),
           `tf research snapshots` (one snapshot per trading day from daily bars, as of the last session before it), `tf research show`;
           tested end to end over three scripted days of a store, with a mutation run (survivors given tests; the equivalent ones left
-          are a zero not signed negative and a refused soft-equals-hard that the tree also refuses). Not done: the minute-history
-          columns per day, and the twelve-month run on real quotes with its pull, time and decision-log replay (needs the data).
+          are a zero not signed negative and a refused soft-equals-hard that the tree also refuses). ADR 0074: a pulled day has no symbol
+          names in its metadata, so they are kept beside it (`<date>.names`, from the vendor's symbology) and the replay reads them; the
+          pull and the reference fetch retry and fetch bars in 28-day pieces. Not done: the minute-history columns per day, and the
+          twelve-month run on real quotes with its pull, time and decision-log replay.
         deps: [E19-S13, E19-S18]
         ac:
           - "`tf research run` takes strategy definitions by name and parameters (a registry the strategies add to), a store, a date range and a symbol subset (from the screening pass or a list), builds each day's reference snapshot as it was before that session (the E19-S04 columns up to the previous session), and runs tf_host::research::run into a results directory; `tf research show` prints the configuration and a per-variant summary of a directory and refuses one without its configuration"

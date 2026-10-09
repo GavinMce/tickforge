@@ -52,6 +52,7 @@ jobs:
           python3 -B scripts/check_manifests.py
           bash scripts/test_deploy_dev.sh
           bash scripts/test_prepare_day.sh
+          bash scripts/test_fetch_reference.sh
 
   # Determinism is a feature (README, "Rules of the road"): the synthetic stream
   # and its encoding must hash identically on every platform. The golden hash in

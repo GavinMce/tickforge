@@ -22,6 +22,8 @@ key=${DATABENTO_API_KEY:-$(cat "$HOME/.config/tickforge/databento.key")}
 host=https://hist.databento.com/v0
 out="$dir/$dataset/$schema"
 mkdir -p "$out"
+# Databento's front end answers 504 now and then to a long request that works a minute later: try again before giving up on a day.
+retry=(--retry 4 --retry-all-errors --retry-delay 10 --max-time 1800)
 common=(-d dataset="$dataset" -d schema="$schema" -d symbols="$symbols" -d stype_in=raw_symbol)
 
 cost=$(curl -fsS -u "$key:" "$host/metadata.get_cost" "${common[@]}" -d start="$start" -d end="$end")
@@ -40,7 +42,7 @@ while [[ "$day" < "$end" ]]; do
   file="$out/$day.dbn.zst"
   if [[ $dow -le 5 && ! -s "$file" ]]; then
     day_cost=$(curl -fsS -u "$key:" "$host/metadata.get_cost" "${common[@]}" -d start="$day" -d end="$next" || echo "")
-    if curl -fsS -u "$key:" "$host/timeseries.get_range" "${common[@]}" -d start="$day" -d end="$next" \
+    if curl -fsS "${retry[@]}" -u "$key:" "$host/timeseries.get_range" "${common[@]}" -d start="$day" -d end="$next" \
         -d encoding=dbn -d compression=zstd -o "$file.part" 2>/dev/null && [[ -s "$file.part" ]]; then
       mv "$file.part" "$file"
       [[ -n "$day_cost" ]] && echo "$day_cost" >"$out/$day.cost"

@@ -5,8 +5,8 @@
 #
 #   1. the reference: Databento daily bars up to the day before, and one snapshot for the day (`tf research snapshots`)
 #   2. the certificates, if they are missing or the strategy set (or a universe beside it) has changed since they were made: a
-#      stored day of the dataset to certify on (the last one stored, or the last session before the day, pulled now) and
-#      `tf live certify` over it
+#      stored day of the dataset to certify on (the last one stored, or the last session before the day, pulled now, with the
+#      names of its instruments from the vendor's symbology) and `tf live certify` over it
 #
 # Everything is a file under the volumes: SET, STORE (the history store), REF, SNAPS and CERTS. It does nothing on a weekend, and
 # says so on a day with no session. Databento key: $DATABENTO_API_KEY. The cost of each pull is asked first and refused above
@@ -65,6 +65,7 @@ for back in 1 2 3 4 5 6 7; do
 done
 [ -n "$tape" ] || { echo "no stored or pullable day of $DATASET $SCHEMA in the week before $day to certify on" >&2; exit 1; }
 echo "certifying on $tape"
+"$here/store_names.sh" "$STORE" "$DATASET" "$SCHEMA" "$tape"
 tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$tape" --to "$tape" --out "$SNAPS"
 tf history index "$STORE" --dataset "$DATASET" --schema "$SCHEMA"
 tf live certify --set "$SET" --store "$STORE" --dataset "$DATASET" --schema "$SCHEMA" --date "$tape" \

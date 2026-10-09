@@ -25,6 +25,8 @@ curl -fsS -u "$DATABENTO_API_KEY:" https://hist.databento.com/v0/metadata.list_s
 
 # 1. A real day of the same feed, to certify the strategies on (a day of tbbo for the whole market was quoted at $3.37 on 2026-10-08; the cost is asked first and refused above $MAX_COST).
 MAX_COST=8 scripts/pull_history.sh store EQUS.MINI tbbo ALL_SYMBOLS 2026-10-07 2026-10-08
+# The pull carries no symbol names (a request for every symbol has no mappings): keep the vendor's, free, beside the day (ADR 0074).
+scripts/store_names.sh store EQUS.MINI tbbo 2026-10-07
 tf history index store --dataset EQUS.MINI --schema tbbo && tf history verify store
 
 # 2. The reference for the tape's day and for the live day: daily bars to 2026-10-07, then one snapshot per trading day.

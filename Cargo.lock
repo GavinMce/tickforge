@@ -378,6 +378,7 @@ dependencies = [
  "tf-bench",
  "tf-budget",
  "tf-calendar",
+ "tf-capture",
  "tf-catalog",
  "tf-core",
  "tf-driver",

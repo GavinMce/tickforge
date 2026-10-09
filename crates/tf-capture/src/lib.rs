@@ -33,7 +33,9 @@ use dbn::{MetadataBuilder, Record, RecordRef, SType};
 
 mod reader;
 
-pub use reader::{CaptureReplay, Report, list, to_tape, verify};
+pub use reader::{
+    CaptureReplay, Report, list, names_path, parse_names, render_names, to_tape, verify,
+};
 
 #[cfg(test)]
 mod tests;

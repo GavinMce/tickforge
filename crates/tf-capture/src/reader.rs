@@ -1,7 +1,7 @@
 //! Reading a capture: listing, checking, and replay through the [`Provider`] trait.
 
 use std::fs::{self, File};
-use std::io::{Read, Seek, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use dbn::Record;
@@ -134,6 +134,53 @@ pub fn verify(dir: &Path) -> Result<Report, Error> {
     Ok(r)
 }
 
+/// Where a file's names are kept beside it: `2026-10-08.dbn.zst` has `2026-10-08.names`.
+pub fn names_path(file: &Path) -> PathBuf {
+    let name = file
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let stem = name.strip_suffix(".dbn.zst").unwrap_or(&name);
+    file.with_file_name(format!("{stem}.names"))
+}
+
+/// The names as a file holds them: one `ID SYMBOL` per line, ID the vendor's number. A pull of every symbol has no mappings in
+/// its metadata, so the names come from the vendor's symbology for the day and are kept beside the file.
+pub fn render_names(names: &[(u32, String)]) -> String {
+    let mut s = String::from("# raw instrument id, symbol\n");
+    for (id, sym) in names {
+        s.push_str(&format!("{id} {sym}\n"));
+    }
+    s
+}
+
+/// The names in a file's text; a line that is not `ID SYMBOL` is an error, so a cut file does not pass for a short one.
+pub fn parse_names(text: &str) -> Result<Vec<(u32, String)>, String> {
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let bad = || format!("line {}: expected `ID SYMBOL`, got `{line}`", n + 1);
+        let (id, sym) = line.split_once(' ').ok_or_else(bad)?;
+        let id = id.parse::<u32>().map_err(|_| bad())?;
+        if sym.is_empty() || sym.contains(' ') {
+            return Err(bad());
+        }
+        out.push((id, sym.to_owned()));
+    }
+    Ok(out)
+}
+
+/// The names beside a file; none if it has no names file.
+fn read_names(file: &Path) -> Result<Vec<(u32, String)>, String> {
+    match fs::read_to_string(names_path(file)) {
+        Ok(text) => parse_names(&text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// A capture replayed as a [`Provider`]: every segment in order, mapped to events by
 /// `tf-databento` with instrument ids that carry from one segment to the next. It delivers as fast
 /// as it is polled; to replay at the recorded pace, turn it into a tape ([`to_tape`]) and replay that.
@@ -219,9 +266,12 @@ impl CaptureReplay {
         let Some(path) = self.files.get(self.next_file) else {
             return Ok(false);
         };
+        let names = read_names(path)
+            .map_err(|e| ProviderError::Source(format!("{}: {e}", names_path(path).display())))?;
         let d = Decoder::from_zstd_file(path)
             .map_err(|e| ProviderError::Source(format!("{}: {e}", path.display())))?
             .with_instruments(std::mem::take(&mut self.ids))
+            .with_names(&names)
             .keep_zero_size(self.keep_zero_size);
         self.current = Some(d);
         self.next_file += 1;

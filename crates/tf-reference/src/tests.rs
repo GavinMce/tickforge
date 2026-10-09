@@ -383,3 +383,21 @@ fn the_etf_list_marks_every_row() {
             .contains("line 1")
     );
 }
+
+#[test]
+fn the_names_on_a_day_are_the_symbols_in_force_that_day_one_to_an_id() {
+    let s = Symbology::parse(
+        r#"{"result":{"OLD":[{"d0":"2026-10-01","d1":"2026-10-08","s":"7"}],
+            "NEW":[{"d0":"2026-10-08","d1":"2026-10-20","s":"7"}],
+            "ZED":[{"d0":"2026-10-08","d1":"2026-10-09","s":"3"}],
+            "ALT":[{"d0":"2026-10-08","d1":"2026-10-09","s":"3"}],
+            "GONE":[{"d0":"2026-09-01","d1":"2026-10-01","s":"9"}]}}"#,
+    )
+    .unwrap();
+    let d = |t: &str| date_days(t).unwrap();
+    assert_eq!(s.names_on(d("2026-10-08")).len(), 2);
+    assert_eq!(s.names_on(d("2026-10-08")), [(3, "ALT"), (7, "NEW")]);
+    assert_eq!(s.names_on(d("2026-10-07")), [(7, "OLD")]);
+    assert_eq!(s.names_on(d("2026-10-09")), [(7, "NEW")]);
+    assert!(s.names_on(d("2026-11-01")).is_empty());
+}

@@ -44,6 +44,13 @@ echo "pull_history $*" >> "$STUB_LOG"
 [ "${STUB_NO_TAPE:-0}" = 1 ] && exit 0
 mkdir -p "$1/$2/$3"; : > "$1/$2/$3/$5.dbn.zst"
 STUB
+  # names: stores the day's names unless STUB_NO_NAMES=1 (the symbology could not be had).
+  cat > "$work/scripts/store_names.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "store_names $*" >> "$STUB_LOG"
+[ "${STUB_NO_NAMES:-0}" = 1 ] && exit 1
+: > "$1/$2/$3/$4.names"
+STUB
   chmod +x "$work/bin/tf" "$work/scripts/"*.sh
   : > "$work/log"
 }
@@ -67,8 +74,10 @@ grep -q "tf research snapshots .*--from 2026-10-07 --to 2026-10-07" "$work/log" 
 grep -q "tf live certify .*--schema tbbo --date 2026-10-07" "$work/log" && ok "certifies on the tape" || no "certifies on the tape"
 [ -s "$work/data/certs.txt" ] && [ -s "$work/data/certs.txt.for" ] && ok "writes the certificates and their stamp" || no "writes the certificates and their stamp"
 [ ! -e "$work/data/certs.txt.new" ] && ok "leaves no half-written file" || no "leaves no half-written file"
-order=$(grep -n "fetch_reference\|snapshots.*2026-10-08\|pull_history\|history index\|live certify" "$work/log" | sed -E 's/^[0-9]+://; s/ .*//' | tr '\n' ' ')
-case "$order" in "fetch_reference tf pull_history tf tf ") ok "in the right order";; *) no "in the right order: $order";; esac
+order=$(grep -n "fetch_reference\|snapshots.*2026-10-08\|pull_history\|store_names\|history index\|live certify" "$work/log" | sed -E 's/^[0-9]+://; s/ .*//' | tr '\n' ' ')
+case "$order" in "fetch_reference tf pull_history store_names tf tf ") ok "in the right order";; *) no "in the right order: $order";; esac
+
+grep -q "store_names $work/data/store EQUS.MINI tbbo 2026-10-07" "$work/log" && ok "names the tape's instruments" || no "names the tape's instruments: $(cat "$work/log")"
 
 # The certificates are kept while the set is the same, and made again when it, or a universe beside it, changes.
 : > "$work/log"
@@ -86,6 +95,11 @@ rm -f "$work/data/certs.txt.for"; : > "$work/log"
 prep "$work/scripts/prepare-day.sh" 2026-10-08
 [ "$(lines 'live certify')" = 1 ] && ok "certifies again without the stamp" || no "certifies again without the stamp"
 
+# Names that cannot be had stop the certifying: a replay without symbols would refuse every strategy anyway.
+new_world
+prep STUB_NO_NAMES=1 "$work/scripts/prepare-day.sh" 2026-10-08; code=$?
+[ "$code" != 0 ] && [ "$(lines 'live certify')" = 0 ] && [ ! -e "$work/data/certs.txt" ] && ok "no names, no certificates" || no "no names, no certificates: exit $code"
+
 # A Monday: the last session before it is the Friday, not the weekend.
 new_world
 prep "$work/scripts/prepare-day.sh" 2026-10-12
@@ -97,6 +111,7 @@ prep STUB_NO_TAPE=1 "$work/scripts/prepare-day.sh" 2026-10-08; code=$?
 [ "$code" = 1 ] && ok "no tape is an error" || no "no tape is an error: exit $code"
 grep -q "no stored or pullable day" "$work/out" && ok "says so" || no "says so"
 [ ! -e "$work/data/certs.txt" ] && ok "writes no certificates without a tape" || no "writes no certificates without a tape"
+[ "$(lines store_names)" = 0 ] && ok "names nothing then" || no "names nothing then"
 [ "$(lines pull_history)" = 7 ] || [ "$(lines pull_history)" = 5 ] && ok "tries the week before" || no "tries the week before: $(lines pull_history)"
 
 # A holiday: no snapshot is made, so nothing more is done, and that is not an error.

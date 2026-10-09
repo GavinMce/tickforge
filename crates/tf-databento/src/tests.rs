@@ -1050,3 +1050,31 @@ fn names_carry_with_the_ids_from_file_to_file_and_a_ticker_change_takes_the_late
     let id = ids2.intern(5);
     assert_eq!(ids2.symbol(id), Some("FROM_METADATA"));
 }
+
+#[test]
+fn names_given_apart_from_a_file_name_its_ids_over_its_metadata_and_never_number_them() {
+    // The file's metadata calls raw 3 "OLD"; the names given say "NEW" for 3 and "ZZZ" for 7, and "NEVER" for 99, which never trades.
+    let bytes = day_with_metadata(&[("OLD", 3)], &[3, 7]);
+    let given = [
+        (3, "NEW".to_owned()),
+        (7, "ZZZ".to_owned()),
+        (99, "NEVER".to_owned()),
+    ];
+    let mut d = Decoder::new(&bytes[..]).unwrap().with_names(&given);
+    assert_eq!(d.instruments().len(), 0, "a name makes no instrument");
+    while d.next_item().unwrap().is_some() {}
+    let ids = d.instruments();
+    assert_eq!(ids.len(), 2);
+    assert_eq!((ids.raw_of(0), ids.symbol(0)), (Some(3), Some("NEW")));
+    assert_eq!((ids.raw_of(1), ids.symbol(1)), (Some(7), Some("ZZZ")));
+    // Carried to the next file with `with_instruments` first, they are applied again and not lost.
+    let ids = d.into_instruments();
+    let next = day_with_metadata(&[], &[7]);
+    let mut d2 = Decoder::new(&next[..])
+        .unwrap()
+        .with_instruments(ids)
+        .with_names(&[(7, "YYY".to_owned())]);
+    while d2.next_item().unwrap().is_some() {}
+    assert_eq!(d2.instruments().symbol(1), Some("YYY"));
+    assert_eq!(d2.instruments().symbol(0), Some("NEW"));
+}

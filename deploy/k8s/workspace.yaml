@@ -89,3 +89,22 @@ spec:
     app.kubernetes.io/name: tickforge-workspace
   ports:
     - {name: http, port: 80, targetPort: http}
+---
+# The workspace at a fixed address on the LAN, by plain IP and port: http://10.0.30.43:8787/ (MetalLB pool 10.0.30.40-59; .41 is Traefik and
+# .42 the Minecraft router). Plain HTTP behind the sign-in token, so the token crosses the LAN unencrypted; the https name through Traefik
+# (ingress.yaml) is the other way in. Not reachable beyond the LAN.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tickforge-workspace-lan
+  namespace: tickforge
+  labels:
+    app.kubernetes.io/name: tickforge-workspace
+  annotations:
+    metallb.io/loadBalancerIPs: 10.0.30.43
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: tickforge-workspace
+  ports:
+    - {name: http, port: 8787, targetPort: http}

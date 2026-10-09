@@ -21,13 +21,15 @@ const D: i64 = 1_000_000_000;
 fn the_published_rates_are_those_of_the_day_and_a_day_outside_the_table_is_refused() {
     let m = CostModel::published();
     let rate = |d: &str| m.sec_rate(d).map(|p| p.to_decimal());
-    // Section 31: $0.00 from 14 May 2025, $20.60 from 4 April 2026, known through the end of that fiscal year.
+    // Section 31: $0.00 from 14 May 2025, $20.60 from 4 April 2026, known through 11 December 2026, when the continuing resolution that funds the SEC ends.
     assert!(matches!(rate("2025-05-13"), Err(CostError::NoRate { .. })));
     assert_eq!(rate("2025-05-14").unwrap(), "0.00");
     assert_eq!(rate("2026-04-03").unwrap(), "0.00");
     assert_eq!(rate("2026-04-04").unwrap(), "20.60");
     assert_eq!(rate("2026-09-30").unwrap(), "20.60");
-    assert!(matches!(rate("2026-10-01"), Err(CostError::NoRate { .. })));
+    assert_eq!(rate("2026-10-08").unwrap(), "20.60");
+    assert_eq!(rate("2026-12-11").unwrap(), "20.60");
+    assert!(matches!(rate("2026-12-12"), Err(CostError::NoRate { .. })));
     // The Trading Activity Fee changes on 1 January.
     let taf = |d: &str| m.taf_rate(d).map(|(r, c)| (r.to_decimal(), c.to_decimal()));
     assert!(taf("2023-12-29").is_err());
@@ -51,8 +53,8 @@ fn the_published_rates_are_those_of_the_day_and_a_day_outside_the_table_is_refus
     assert!(taf("2027-12-31").is_ok());
     assert!(taf("2028-01-01").is_err());
     assert!(taf("2028-01-03").is_err());
-    let e = m.sale_fees("2026-10-05", 1, D).unwrap_err().to_string();
-    assert!(e.contains("Section 31") && e.contains("2026-10-05"), "{e}");
+    let e = m.sale_fees("2026-12-14", 1, D).unwrap_err().to_string();
+    assert!(e.contains("Section 31") && e.contains("2026-12-14"), "{e}");
 }
 
 #[test]
@@ -113,7 +115,7 @@ fn the_edges_of_a_cost_model_that_reads_are_where_they_should_be() {
     assert!(e.contains("date order"), "{e}");
     // A table that starts on the day it is known through has that one day; a month 12 and a day 31 are dates, 13 and 32 are not.
     let one_day = text
-        .replace("sec_through 2026-09-30", "sec_through 2025-05-14")
+        .replace("sec_through 2026-12-11", "sec_through 2025-05-14")
         .replace("sec 2026-04-04 20.60\n", "");
     let m = CostModel::parse(&one_day).unwrap();
     assert!(m.sec_rate("2025-05-14").is_ok() && m.sec_rate("2025-05-15").is_err());
@@ -219,7 +221,7 @@ fn a_cost_model_reads_back_and_every_change_is_another_fingerprint() {
         // Each table must say its date, whichever is the one missing (not just the later check that a table starts
         // before its date).
         (
-            text.replace("sec_through 2026-09-30\n", ""),
+            text.replace("sec_through 2026-12-11\n", ""),
             "must say the date",
         ),
         (
@@ -240,7 +242,7 @@ fn a_cost_model_reads_back_and_every_change_is_another_fingerprint() {
         ),
         (text.replace("sec 2026-04-04", "sec 2026-4-4"), "not a date"),
         (
-            text.replace("sec_through 2026-09-30", "sec_through 2025-01-01"),
+            text.replace("sec_through 2026-12-11", "sec_through 2025-01-01"),
             "starts after",
         ),
         (text.replace("end\n", "surprise 1\nend\n"), "does not know"),
@@ -700,7 +702,7 @@ fn a_day_the_cost_model_has_no_rate_for_is_an_error_not_a_guess() {
             None,
         ),
     ];
-    assert!(assemble(&CostModel::published(), "2026-10-02", &notes, true, 0).is_err());
+    assert!(assemble(&CostModel::published(), "2026-12-14", &notes, true, 0).is_err());
     assert!(assemble(&CostModel::published(), "2025-01-02", &notes, true, 0).is_err());
 }
 
@@ -1207,7 +1209,7 @@ fn a_day_the_cost_model_does_not_cover_or_the_market_was_closed_is_refused_befor
     };
     let s = setup(&host, &cost, &defs);
     // The same data under a date after the table's last (a fiscal year whose rate is not in it).
-    let e = run_day("2026-10-02", &input, &s).err().unwrap().to_string();
+    let e = run_day("2026-12-14", &input, &s).err().unwrap().to_string();
     assert!(e.contains("Section 31"), "{e}");
     // Saturday and Good Friday.
     let e = run_day("2026-05-02", &input, &s).err().unwrap().to_string();
@@ -1748,7 +1750,7 @@ fn a_date_the_cost_model_does_not_cover_is_refused_even_when_nothing_would_have_
         snapshot: snapshot(),
     };
     let e = run_day(
-        "2026-10-02",
+        "2026-12-14",
         &input,
         &setup(&host, &CostModel::published(), &defs),
     )
@@ -2820,7 +2822,7 @@ fn a_scenario_is_listed_with_its_days_strategies_costs_and_budgets() {
             cost.get("sec_through").s(),
             cost.get("taf_through").s()
         ),
-        ("50", "0", "2026-09-30", "2027-12-31")
+        ("50", "0", "2026-12-11", "2027-12-31")
     );
     let strategies = s.get("strategies").arr();
     assert_eq!(strategies.len(), 2);

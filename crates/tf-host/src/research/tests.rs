@@ -9,7 +9,7 @@ use tf_universe::LiveFeature;
 
 use super::*;
 use crate::host::FillNote;
-use crate::replay_tests::{dbn_day_at, scratch, write_capture};
+use crate::replay_tests::{dbn_bytes, dbn_day_at, scratch, write_capture};
 use crate::tests::{HIGH, LOW, SEC, SYMBOLS, config, snapshot};
 use crate::{HostConfig, Route, StrategyDef, runner};
 
@@ -1225,6 +1225,105 @@ fn a_day_the_cost_model_does_not_cover_or_the_market_was_closed_is_refused_befor
         snapshot: snapshot(),
     };
     assert!(run_day("2026-05-01", &empty, &s).is_err());
+}
+
+/// The premarket story of the strategy's own tests as a tape: S00 is quiet for twenty minutes of the premarket, busy for five (the
+/// price running from $10.00 to $10.70), pulls back from $10.80 to $10.65 and turns at $10.69; then it sits at $10.75 to the open.
+fn premarket_tape(open: u64) -> Vec<u8> {
+    use crate::replay_tests::{dbn_script, quote_rec, trade_rec};
+    const ID: u32 = 20_000;
+    let pre = open - 330 * 60 * SEC;
+    let px = |c: i64| c * 10_000_000;
+    let mut recs: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut seq = 0u32;
+    let mut at = |recs: &mut Vec<(u64, Vec<u8>)>,
+                  min: u64,
+                  sec: u64,
+                  bid: i64,
+                  ask: i64,
+                  trade: Option<(i64, u32)>| {
+        let ts = pre + (min * 60 + sec) * SEC;
+        recs.push((ts, dbn_bytes(&quote_rec(ID, ts, px(bid), px(ask)))));
+        if let Some((c, size)) = trade {
+            seq += 1;
+            recs.push((
+                ts + 1_000_000,
+                dbn_bytes(&trade_rec(ID, ts + 1_000_000, px(c), size, seq)),
+            ));
+        }
+    };
+    // A quote every six seconds for the reviews while the story is told and around the time exit, and one a minute between;
+    // five minutes past the open to the end.
+    let mut last = (999, 1001);
+    for step in 0..(335 * 10) {
+        let (min, sec) = (step / 10, (step % 10) * 6);
+        if !(min < 28 || (322..=327).contains(&min)) && sec != 0 {
+            continue;
+        }
+        let print = match (min, sec) {
+            (m, 30) if m < 20 => Some((1000, 100)),
+            (m @ 20..=24, 12 | 18 | 30 | 42 | 54) => Some((1010 + 15 * (m as i64 - 20), 2000)),
+            (25, 12) => Some((1080, 100)),
+            (25, 30) => Some((1070, 100)),
+            (25, 48) => Some((1065, 100)),
+            (26, 12) => Some((1069, 100)),
+            (26, 36) => Some((1075, 100)),
+            _ => None,
+        };
+        if let Some((c, _)) = print {
+            last = (c - 1, c + 1);
+        }
+        if (min, sec) == (26, 12) {
+            last = (1068, 1070);
+        }
+        at(&mut recs, min, sec, last.0, last.1, print);
+    }
+    dbn_script(pre, &[(ID, "S00")], recs)
+}
+
+#[test]
+fn the_premarket_strategy_runs_through_the_host_buys_the_turn_and_is_flat_before_the_open() {
+    use crate::library::premarket_pullback;
+    use tf_strategy::premarket_pullback::PremarketPullbackParams;
+    let open = OPENS[0].1 * SEC;
+    let root = scratch("pm-tape");
+    write_capture(&root, &premarket_tape(open));
+    let files: Vec<PathBuf> = tf_capture::list(&root)
+        .unwrap()
+        .iter()
+        .map(|e| root.join(&e.file))
+        .collect();
+    let def = premarket_pullback(
+        1,
+        "pm",
+        tf_universe::Spec::parse(LOW).unwrap(),
+        PremarketPullbackParams::default(),
+    )
+    .unwrap();
+    let defs = [def];
+    let (host, cost) = (host_cfg(), CostModel::published());
+    let input = DayInput {
+        files,
+        snapshot: snapshot(),
+    };
+    let out = run_day("2026-05-01", &input, &setup(&host, &cost, &defs)).unwrap();
+    assert_eq!(out.trips.len(), 1, "{:?}", out.anomalies);
+    let t = &out.trips[0];
+    assert_eq!((t.symbol.as_str(), t.strategy, t.long), ("S00", 1, true));
+    // $1,000 at the ask of $10.70, bought on the quote after the turn at 04:26:12.
+    assert_eq!((t.qty, t.entry_px, t.entry_reason), (93, 10_700_000_000, 1));
+    // Sold by the time exit five minutes before the open, against the bid, not stopped out and not held into the session.
+    assert_eq!(t.exit_reason, 0xE503);
+    assert!(!t.open_at_end);
+    let before_open = open - 5 * 60 * SEC;
+    assert!(
+        t.exit_ts >= before_open && t.exit_ts < open,
+        "{} not in [{before_open}, {open})",
+        t.exit_ts
+    );
+    assert_eq!(t.exit_px, 10_740_000_000);
+    assert_eq!(out.rejected + out.refused, 0, "the broker took every order");
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

@@ -25,12 +25,13 @@ use tf_core::Nanos;
 use tf_engine::{PromoterConfig, ScannerConfig};
 use tf_risk::{Budgets, Limits};
 use tf_strategy::closing_reversal::ClosingReversalParams;
+use tf_strategy::premarket_pullback::PremarketPullbackParams;
 use tf_strategy::random_entries::RandomEntriesParams;
 use tf_universe::Spec;
 
 use crate::def::{Route, StrategyDef};
 use crate::host::HostConfig;
-use crate::library::{closing_reversal, random_entries};
+use crate::library::{closing_reversal, premarket_pullback, random_entries};
 
 const HEADER: &str = "strategy set v1";
 const DOLLAR: u128 = 1_000_000_000;
@@ -57,6 +58,7 @@ pub fn templates() -> Vec<(&'static str, String)> {
     vec![
         ("t04", ClosingReversalParams::default().render()),
         ("t14", RandomEntriesParams::default().render()),
+        ("t25", PremarketPullbackParams::default().render()),
     ]
 }
 
@@ -331,6 +333,13 @@ impl StrategySet {
                         RandomEntriesParams::parse(&s.params).map_err(|e| SetError(e.0))?,
                     )
                     .map_err(|e| SetError(e.0))?,
+                    "t25" => premarket_pullback(
+                        s.id,
+                        &s.name,
+                        universe,
+                        PremarketPullbackParams::parse(&s.params).map_err(|e| SetError(e.0))?,
+                    )
+                    .map_err(|e| SetError(e.0))?,
                     other => return Err(SetError(format!("`{other}` is not a template"))),
                 };
                 def.priority = s.priority;
@@ -463,6 +472,7 @@ fn parse_strategy(n: usize, w: &[&str]) -> Result<SetStrategy, SetError> {
     // The values must be ones the template accepts, found now and not when the day starts.
     let check = match template {
         "t04" => ClosingReversalParams::parse(&params).map(|_| ()),
+        "t25" => PremarketPullbackParams::parse(&params).map(|_| ()),
         _ => RandomEntriesParams::parse(&params).map(|_| ()),
     };
     check.map_err(|e| SetError(format!("line {n}: {}", e.0)))?;

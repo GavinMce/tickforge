@@ -45,10 +45,16 @@ struct Rig {
     runner: CrossRunner<PremarketPullback>,
     day: SessionTimes,
     clock: u32,
+    /// Minutes added to every time the script gives: a story told after the open.
+    shift: u64,
 }
 
 impl Rig {
     fn new(p: PremarketPullbackParams, names: u32) -> Rig {
+        Rig::shifted(p, names, 0)
+    }
+
+    fn shifted(p: PremarketPullbackParams, names: u32, shift: u64) -> Rig {
         let day = times();
         let mut tier0 = Tier0::new(names as usize + 1);
         tier0.set_day(day);
@@ -69,6 +75,7 @@ impl Rig {
             runner,
             day,
             clock: names,
+            shift,
         };
         // The first event arms the review, the next one after it holds it.
         rig.tick(0, 0);
@@ -78,7 +85,7 @@ impl Rig {
 
     /// The instant `sec` seconds into minute `min` of the premarket.
     fn at(&self, min: u64, sec: u64) -> Nanos {
-        self.day.premarket + min * 60 * SEC + sec * SEC
+        self.day.premarket + (self.shift + min) * 60 * SEC + sec * SEC
     }
 
     fn feed(&mut self, ev: Event) {
@@ -699,4 +706,142 @@ fn a_new_day_forgets_the_last_one() {
     rig.tick(0, 6);
     rig.story(&[0]);
     assert_eq!(rig.stats().spikes, 2, "armed again on the new day");
+}
+
+// ---- the edges ----
+
+#[test]
+fn the_turn_is_bought_at_exactly_the_turn_and_not_a_cent_before() {
+    // A run from $10.00 to $14.00 and a pullback to $13.00 (25% of the run): 1% up from the low is $13.13.
+    let p = p_with(|p| p.turn_bp = 100);
+    let (rig, out) = after_the_high_of(p, 1400, &[1300, 1312]);
+    assert!(out.is_empty() && rig.stats().entries == 0);
+    let (_, out) = after_the_high_of(p, 1400, &[1300, 1313]);
+    assert_eq!(out.len(), 1);
+}
+
+/// The story, then this high and these prices; the intents sent after.
+fn after_the_high_of(p: PremarketPullbackParams, high: i64, path: &[i64]) -> (Rig, Vec<Intent>) {
+    let mut rig = Rig::new(p, 1);
+    rig.story(&[0]);
+    rig.print(0, 25, 10, high);
+    let mut out = Vec::new();
+    for (k, &px) in path.iter().enumerate() {
+        rig.print(0, 25, 20 + 10 * k as u64, px);
+        out.extend(rig.out());
+    }
+    (rig, out)
+}
+
+#[test]
+fn the_last_entry_time_itself_is_allowed_and_a_second_after_it_is_not() {
+    // The last entry is 303 minutes before the open: minute 27 exactly. One look a second, so the review that sees the turn is the
+    // tick at 27:00.
+    let go = |tick_min: u64, tick_sec: u64| {
+        let mut rig = Rig::new(
+            p_with(|p| {
+                p.last_entry_minutes = 303;
+                p.review_secs = 1;
+            }),
+            1,
+        );
+        rig.story(&[0]);
+        rig.print(0, 25, 10, 1080);
+        rig.print(0, 25, 30, 1070);
+        rig.print(0, 25, 50, 1065);
+        rig.print(0, 26, 10, 1066);
+        // The turn is printed at 26:58, after the review of the quote before it, and seen at the tick.
+        rig.quote(0, 26, 57, 1068, 1070);
+        rig.trade(0, 26, 58, 1069, 100);
+        rig.tick(tick_min, tick_sec);
+        (rig.out().len(), rig.stats())
+    };
+    let (n, s) = go(27, 0);
+    assert_eq!((n, s.entries, s.missed), (1, 1, 0));
+    let (n, s) = go(27, 1);
+    assert_eq!((n, s.entries, s.missed), (0, 0, 1));
+}
+
+#[test]
+fn a_filled_position_counts_against_the_names_as_a_pending_entry_does() {
+    let mut rig = Rig::new(p_with(|p| p.names = 1), 2);
+    rig.story(&[0, 1]);
+    for (sec, px) in [(10, 1080), (30, 1070), (50, 1065)] {
+        rig.trade(0, 25, sec, px, 100);
+        rig.trade(1, 25, sec, px, 100);
+        rig.tick(25, sec + 6);
+    }
+    rig.print(0, 26, 10, 1069);
+    let entry = rig.out().remove(0);
+    // It fills: the entry is over and the position is the exit book's.
+    rig.update(fill(&entry, entry.qty, 1070, rig.at(26, 20)));
+    rig.print(1, 26, 30, 1069);
+    assert!(rig.out().is_empty());
+    assert_eq!((rig.stats().entries, rig.stats().missed), (1, 1));
+}
+
+#[test]
+fn only_a_fair_quote_is_bought() {
+    // A turn to be bought at this quote: (bid, ask, spread cap in basis points) -> whether it is.
+    let at = |bid: i64, ask: i64, cap: u32| {
+        let mut rig = Rig::new(p_with(|p| p.spread_cap_bp = cap), 1);
+        rig.story(&[0]);
+        rig.print(0, 25, 10, 1080);
+        rig.print(0, 25, 30, 1070);
+        rig.print(0, 25, 50, 1065);
+        rig.trade(0, 26, 10, 1069, 100);
+        rig.quote(0, 26, 12, bid, ask);
+        rig.tick(26, 20);
+        rig.out().len() == 1
+    };
+    // A spread of exactly the cap (10 cents on a $10.00 mid is 100 basis points) is allowed; a basis point less is not.
+    assert!(at(995, 1005, 100));
+    assert!(!at(995, 1005, 99));
+    // A locked quote is allowed; a crossed one is not; a bid of nothing is not (with no cap to refuse it first).
+    assert!(at(1000, 1000, 0));
+    assert!(!at(1001, 1000, 0));
+    assert!(!at(0, 1000, 0));
+}
+
+#[test]
+fn nothing_is_armed_in_a_story_told_after_the_open() {
+    // The same busy minutes, but in the regular session (330 minutes later): this rule is for the premarket.
+    let mut rig = Rig::shifted(params(), 1, 330);
+    rig.story(&[0]);
+    assert_eq!(rig.stats().spikes, 0);
+    // And told in the premarket it arms, so it is the hour and not the story.
+    let mut rig = Rig::new(params(), 1);
+    rig.story(&[0]);
+    assert_eq!(rig.stats().spikes, 1);
+}
+
+#[test]
+fn the_edges_of_what_the_parameters_allow_are_in() {
+    let p = params();
+    let ok = |f: fn(&mut PremarketPullbackParams)| {
+        let mut q = p;
+        f(&mut q);
+        q.validate().is_ok()
+    };
+    assert!(ok(|q| {
+        q.window_minutes = 30;
+        q.min_history_minutes = 31;
+    }));
+    assert!(ok(|q| q.min_history_minutes = 300));
+    assert!(ok(|q| q.min_history_minutes = 6));
+    assert!(ok(|q| q.spike_x10 = 10));
+    assert!(ok(|q| q.max_cents = q.min_cents));
+    assert!(ok(|q| q.max_pullback_permille = 900));
+    assert!(ok(|q| q.max_pullback_permille = q.min_pullback_permille + 1));
+    assert!(ok(|q| q.collar_permille = 999));
+    assert!(ok(|q| q.stop_buffer_permille = 999));
+    assert!(ok(|q| q.trail_permille = 999));
+    assert!(ok(|q| q.last_entry_minutes = 330));
+    assert!(ok(|q| q.last_entry_minutes = q.flat_minutes + 1));
+    assert!(ok(|q| q.review_secs = 60));
+    assert!(ok(|q| q.review_secs = 1));
+    // And one past: the parse test above has the other side of each.
+    assert!(!ok(|q| q.min_history_minutes = q.window_minutes));
+    assert!(!ok(|q| q.max_cents = q.min_cents - 1));
+    assert!(!ok(|q| q.last_entry_minutes = q.flat_minutes));
 }

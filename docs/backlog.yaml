@@ -2459,3 +2459,28 @@ epics:
           - "The trade page shows what the engine did with the symbol and the names around it: when the scanner promoted it (with the score and reason the engine recorded), when it was demoted, and which names held Tier 1 at the cursor, from the day's decision log"
           - "A trade of a strategy that never asked for Tier 1 says so; a day with no tier records says so"
           - "Checked in a browser"
+      - id: E19-S44
+        jira: TIC-199
+        title: "T25 premarket volume spike and the first small pullback: a long bought on the turn, with exits the strategy holds"
+        status: todo
+        progress: >-
+          ADR 0076. Done: `PremarketPullback`, template `t25` (a cross strategy over the premarket: a name armed by a spike in the last
+          window's shares, dollars and trades against its premarket average with the price up from the window's low; the first pullback of
+          10 to 30 percent of the run that turns up is bought with a collar at the ask, a deeper one drops the name for the day; a stop
+          under the pullback low raised to trail the high since the entry, and a time exit before the open, both held by the strategy
+          because the broker takes no stop in the premarket; `ExitBook::raise_stop`). Tests: 30 from scripted events (every threshold at
+          its edge, the pullback bounds, a new high, the last entry time, names held and pending, the quote, the stop and the trail, the
+          time exit, nothing armed after the open, the parameters, tracing changing nothing, a new day), the exit book's raise, the
+          template in a set file, and the strategy through the host over a scripted premarket tape (bought at the $10.70 ask, sold before
+          the open at the bid, no order refused). Mutation run on the decision code: 179 mutants, 53 compile errors, 116 killed, 10
+          survivors that are equivalent or unreachable (a price of exactly zero, a stop of exactly zero, the retained mark beyond the
+          window, the window's first mark when a lower one follows it, an event at exactly the open or 04:00). Measured on 8 October 2026:
+          EQUS.MINI has 106,754 premarket trades (15 names with 100,000 shares) and one complete setup; XNAS.BASIC 2,281,426 (336 names)
+          and seven. Not done: a run over stored days against the null strategy, and a time-of-day window in the pull script for the
+          premarket of XNAS.BASIC.
+        deps: [E19-S05, E19-S18, E19-S31]
+        ac:
+          - "A name whose last few minutes of premarket trading are several times its premarket average, while its price runs up, is armed; the first pullback of 10 to 30 percent of the run that turns up is bought long with a collar at the ask, and a pullback past 30 percent drops the name for the day (docs/adr/0076)"
+          - "Exits are the strategy's own (the broker takes no stop in the premarket): a stop under the pullback low raised to trail the high since the entry, and a time exit before the open; a position is flat before the regular session"
+          - "Every decision has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a scripted premarket tape"
+          - "Run over stored days of EQUS.MINI and XNAS.BASIC premarket against the null strategy, with the number of setups said (about one a day on EQUS.MINI, about seven on XNAS.BASIC on 8 October 2026)"

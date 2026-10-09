@@ -608,6 +608,44 @@ pub(crate) fn dbn_day_at(base: u64, secs: u64, bump: i64) -> Vec<u8> {
     bytes
 }
 
+/// A DBN stream of scripted records: a symbol mapping for each of `names` (raw id, symbol), then `recs` in time order.
+pub(crate) fn dbn_script(
+    base: u64,
+    names: &[(u32, &str)],
+    mut recs: Vec<(u64, Vec<u8>)>,
+) -> Vec<u8> {
+    let md = MetadataBuilder::new()
+        .dataset("XNAS.BASIC".to_owned())
+        .schema(None)
+        .start(base)
+        .stype_in(None)
+        .stype_out(SType::InstrumentId)
+        .build();
+    let mut bytes = Vec::new();
+    {
+        let mut e = DbnEncoder::new(&mut bytes, &md).unwrap();
+        for (id, name) in names {
+            let m = SymbolMappingMsg::new(
+                *id,
+                base - 1,
+                SType::RawSymbol,
+                name,
+                SType::RawSymbol,
+                name,
+                0,
+                0,
+            )
+            .unwrap();
+            e.encode_record(&m).unwrap();
+        }
+        recs.sort_by_key(|r| r.0);
+        for (_, b) in recs {
+            bytes.extend_from_slice(&b);
+        }
+    }
+    bytes
+}
+
 pub(crate) fn dbn_bytes<R: dbn::Record + dbn::encode::DbnEncodable>(r: &R) -> Vec<u8> {
     let mut out = Vec::new();
     // A record is its raw bytes; the stream header is written once, by the caller.

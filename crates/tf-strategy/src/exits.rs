@@ -183,6 +183,19 @@ impl ExitBook {
         self.held.remove(&id).is_some()
     }
 
+    /// Raise the stop of a long held in `id` to `stop`, for a trailing stop; a stop that is not above the one held is ignored.
+    /// A short's stop is never moved this way. True if the stop was raised (or set where there was none).
+    pub fn raise_stop(&mut self, id: InstrumentId, stop: Px) -> bool {
+        let Some(h) = self.held.get_mut(&id) else {
+            return false;
+        };
+        if !h.long || h.plan.stop.is_some_and(|s| s >= stop) {
+            return false;
+        }
+        h.plan.stop = Some(stop);
+        true
+    }
+
     pub fn is_held(&self, id: InstrumentId) -> bool {
         self.held.contains_key(&id)
     }

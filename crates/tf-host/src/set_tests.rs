@@ -153,7 +153,7 @@ fn a_set_that_is_not_well_formed_is_refused_with_the_line() {
         ),
         (
             "balance 1000\nstrategy 1 a t99 universe=u\n",
-            "not a template (known: t04, t14)",
+            "not a template (known: t04, t14, t25)",
         ),
         (
             "balance 1000\nstrategy 1 a t04 universe=u wat=3\n",
@@ -329,8 +329,12 @@ fn the_definitions_have_their_universe_priority_and_parameters_and_each_variant_
     );
     // The templates and their defaults are listed.
     let t = templates();
-    assert_eq!(t.iter().map(|x| x.0).collect::<Vec<_>>(), ["t04", "t14"]);
+    assert_eq!(
+        t.iter().map(|x| x.0).collect::<Vec<_>>(),
+        ["t04", "t14", "t25"]
+    );
     assert!(t[0].1.contains("names=20") && t[1].1.contains("seed="));
+    assert!(t[2].1.contains("spike_x10=30") && t[2].1.contains("max_pullback_permille=300"));
     let _: Option<SetError> = None;
 }
 
@@ -380,4 +384,37 @@ fn the_edges_of_what_a_set_allows_are_in_and_one_past_them_is_out() {
     let odd = ok("balance 1000\nstrategy 1 a t04 universe=u share=2499\nstrategy 2 b t04 universe=u\nstrategy 3 c t04 universe=u\nstrategy 4 d t04 universe=u\n").unwrap();
     assert_eq!(odd.shares().unwrap(), [2_499, 2_501, 2_500, 2_500]);
     assert_eq!(odd.shares().unwrap().iter().sum::<u32>(), 10_000);
+}
+
+#[test]
+fn the_premarket_template_is_a_template_with_its_parameters_checked_when_the_set_is_read() {
+    let ok = StrategySet::parse(&text(
+        "balance 100000\nstrategy 1 pm t25 universe=u.txt names=2 spike_x10=40 max_pullback_permille=250\n",
+    ))
+    .unwrap();
+    assert_eq!(ok.strategies[0].template, "t25");
+    assert!(ok.strategies[0].params.contains("spike_x10=40"));
+    assert!(
+        ok.strategies[0]
+            .params
+            .contains("max_pullback_permille=250")
+    );
+    // Values the template refuses are refused here, not when the day starts; so are keys it does not have.
+    let e = refused("balance 100000\nstrategy 1 pm t25 universe=u.txt min_pullback_permille=400\n");
+    assert!(e.contains("pullback bounds"), "{e}");
+    let e = refused("balance 100000\nstrategy 1 pm t25 universe=u.txt extreme_bp=1\n");
+    assert!(e.contains("not a parameter of t25"), "{e}");
+    // It builds into a definition whose parameters are the text of its variant.
+    let dir = scratch("t25-set");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("u.txt"), UNIVERSE).unwrap();
+    fs::write(
+        dir.join("m.set"),
+        text("balance 100000\nstrategy 3 pm t25 universe=u.txt dollars=500\n"),
+    )
+    .unwrap();
+    let (_, defs) = StrategySet::load(&dir.join("m.set")).unwrap();
+    assert_eq!((defs[0].id, defs[0].name.as_str()), (3, "pm"));
+    assert!(defs[0].params.contains("dollars=500") && defs[0].params.contains("names=3"));
+    let _ = fs::remove_dir_all(&dir);
 }

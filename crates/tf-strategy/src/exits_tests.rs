@@ -59,6 +59,9 @@ struct Holder {
     exits: Vec<ExitReason>,
     timers: Vec<ExitReason>,
     extra: Extra,
+    /// For [`Extra::Raise`]: the stops to try to raise to, last first, and what came of each.
+    raises: Vec<i64>,
+    raised: Vec<bool>,
 }
 
 /// What else a test makes the strategy do with its book.
@@ -71,6 +74,8 @@ enum Extra {
     ArmTwice,
     /// Set the book's own timer for the instrument itself when the entry fills, though the plan has no time exit.
     StrayTimer,
+    /// At each review while the position is held, try to raise the stop to the next of `raises`.
+    Raise,
 }
 
 impl Holder {
@@ -84,6 +89,8 @@ impl Holder {
             exits: Vec::new(),
             timers: Vec::new(),
             extra: Extra::Nothing,
+            raises: Vec::new(),
+            raised: Vec::new(),
         }
     }
 
@@ -105,6 +112,11 @@ impl CrossStrategy for Holder {
     fn on_review(&mut self, ctx: &mut Ctx<'_>, view: &MemberView<'_>) {
         if self.extra == Extra::ArmZero {
             self.book.arm(ctx, 5, true, 0, self.plan);
+        }
+        if self.extra == Extra::Raise && self.book.is_held(0) {
+            if let Some(c) = self.raises.pop() {
+                self.raised.push(self.book.raise_stop(0, px(c)));
+            }
         }
         if self.entered.is_some() {
             return;
@@ -636,4 +648,75 @@ fn arming_adds_to_a_held_position_arming_nothing_holds_nothing_and_a_foreign_tim
     r.feed(&quote(8, 990, 991, 500));
     assert!(r.closes().is_empty(), "no time exit was planned");
     assert_eq!(r.h().timers, []);
+}
+
+#[test]
+fn a_longs_stop_can_be_raised_and_never_lowered_and_a_shorts_is_not_moved() {
+    // A long with a stop at 9.50: trying 9.40 (lower) is refused, 9.60 is taken, 9.60 again (not above) is refused.
+    let mut h = Holder::new(
+        true,
+        ExitPlan {
+            stop: Some(px(950)),
+            ..ExitPlan::new()
+        },
+    )
+    .with(Extra::Raise);
+    h.raises = vec![960, 960, 940];
+    let mut r = Rig::new(h);
+    enter(&mut r, true);
+    r.feed(&quote(4, 999, 1000, 500));
+    r.feed(&quote(5, 999, 1000, 500));
+    r.feed(&quote(6, 999, 1000, 500));
+    assert_eq!(r.h().raised, [false, true, false]);
+    // 9.55 is above the old stop and under the raised one: sold. Unraised it would not have been.
+    r.feed(&quote(7, 954, 956, 500));
+    r.feed(&trade(7, 955));
+    assert_eq!(r.closes().len(), 1);
+    assert_eq!(r.h().exits, [ExitReason::Stop]);
+
+    // A stop at 9.50 and no raise at all: the same print sells nothing.
+    let mut r = Rig::new(Holder::new(
+        true,
+        ExitPlan {
+            stop: Some(px(950)),
+            ..ExitPlan::new()
+        },
+    ));
+    enter(&mut r, true);
+    r.feed(&quote(7, 954, 956, 500));
+    r.feed(&trade(7, 955));
+    assert!(r.closes().is_empty());
+
+    // A long with no stop at all is given one by a raise.
+    let mut h = Holder::new(true, ExitPlan::new()).with(Extra::Raise);
+    h.raises = vec![960];
+    let mut r = Rig::new(h);
+    enter(&mut r, true);
+    r.feed(&quote(4, 999, 1000, 500));
+    assert_eq!(r.h().raised, [true]);
+    r.feed(&quote(7, 954, 956, 500));
+    r.feed(&trade(7, 955));
+    assert_eq!(r.closes().len(), 1);
+
+    // A short's stop is never moved by it.
+    let mut h = Holder::new(
+        false,
+        ExitPlan {
+            stop: Some(px(1050)),
+            ..ExitPlan::new()
+        },
+    )
+    .with(Extra::Raise);
+    h.raises = vec![1060];
+    let mut r = Rig::new(h);
+    enter(&mut r, false);
+    r.feed(&quote(4, 999, 1000, 500));
+    assert_eq!(r.h().raised, [false]);
+    r.feed(&quote(7, 1054, 1056, 500));
+    r.feed(&trade(7, 1055));
+    assert_eq!(
+        r.closes().len(),
+        1,
+        "the original stop of 10.50 still holds"
+    );
 }

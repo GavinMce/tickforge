@@ -2154,7 +2154,8 @@ epics:
           tested end to end over three scripted days of a store, with a mutation run (survivors given tests; the equivalent ones left
           are a zero not signed negative and a refused soft-equals-hard that the tree also refuses). ADR 0074: a pulled day has no symbol
           names in its metadata, so they are kept beside it (`<date>.names`, from the vendor's symbology) and the replay reads them; the
-          pull and the reference fetch retry and fetch bars in 28-day pieces. Not done: the minute-history columns per day, and the
+          pull and the reference fetch retry and fetch bars in 28-day pieces. A replay of a stored day cuts the snapshot to the symbols
+          the tape names, so a universe cannot select a name the day never showed. Not done: the minute-history columns per day, and the
           twelve-month run on real quotes with its pull, time and decision-log replay.
         deps: [E19-S13, E19-S18]
         ac:

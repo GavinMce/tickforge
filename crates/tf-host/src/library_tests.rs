@@ -1996,6 +1996,26 @@ mod store_run {
             cert,
             certify(&defs[0], &cfg, &reference, &events, 7).unwrap()
         );
+        // A snapshot of the whole market holds names the day never ticked on. The universe selects NOTICK too, but the tape cannot
+        // name it, so certifying over the stored day leaves it out and gives the same certificate; certifying with the wide
+        // snapshot as it stands (a live day's gateway names everything it subscribed) refuses it.
+        let mut wide = snap.clone();
+        let mut extra = wide.rows[0].clone();
+        extra.symbol = "NOTICK".into();
+        wide.rows.push(extra);
+        wide.rows.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        assert_eq!(
+            certify_files(&defs[0], &cfg, wide.clone(), &files, 7).unwrap(),
+            cert
+        );
+        let wide_ref = Reference {
+            symbols: reference.symbols.clone(),
+            snapshot: wide,
+        };
+        assert!(matches!(
+            certify(&defs[0], &cfg, &wide_ref, &events, 7),
+            Err(crate::CertifyError::Admit(crate::AdmitError::UnknownSymbols(v))) if v == ["NOTICK"]
+        ));
         assert_eq!(
             (
                 cert.tape_id,

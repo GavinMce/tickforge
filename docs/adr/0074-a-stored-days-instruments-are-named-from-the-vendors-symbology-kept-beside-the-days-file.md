@@ -29,6 +29,11 @@ EQUS.MINI on 8 October 13,320 symbols, covering every number the tape carried).
 - **The history manifest does not list the names files** and `verify` does not check them: they are small, free to make again, and a
   wrong one shows at once as symbols refused or a strategy trading a name it should not. Revisit if a run is ever reported without
   them.
+- **A replay of a stored day selects only from the names the day shows.** The snapshot of the whole market (13,452 rows on 8 October)
+  names thousands that did not tick that day; they cannot trade on it, and a universe selecting one was refused as unknown, so the
+  first certification still failed after the names resolved. `certify_files` and the research day cut the snapshot to the symbols
+  the tape names (`replay::on_tape`). A live day is not cut: the gateway names everything it subscribed. `replay_files`, which
+  compares against a live log made with the full snapshot, is not cut either.
 
 ## Consequences
 

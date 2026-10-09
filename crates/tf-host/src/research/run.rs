@@ -42,7 +42,7 @@ use super::trips::{Assembler, COLUMNS, Trip, Who};
 use crate::def::{StrategyDef, fnv};
 use crate::equiv::{Log, Rec};
 use crate::host::{FillNote, HostConfig, HostError, Reference};
-use crate::replay::{learn_symbols, replay_host_on};
+use crate::replay::{learn_symbols, on_tape, replay_host_on};
 use tf_ledger::{FileStore, LedgerStore, MemStore};
 
 pub const CONFIG_FILE: &str = "research.cfg";
@@ -870,8 +870,8 @@ fn run_day_on<S: LedgerStore>(
     }
     let symbols = learn_symbols(&input.files);
     let reference = Reference {
+        snapshot: on_tape(input.snapshot.clone(), &symbols),
         symbols,
-        snapshot: input.snapshot.clone(),
     };
     let cfg = day_config(setup.host, setup.cost, times);
     let mut host = replay_host_on(&cfg, &reference, store)

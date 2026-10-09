@@ -8,14 +8,16 @@
 //! - **SEC Section 31 fee**: dollars per million dollars of covered sales, from a date. The rate is set by the SEC for
 //!   each fiscal year and sometimes in the middle of it: $27.80 through 13 May 2025, $0.00 from 14 May 2025
 //!   ([fee rate advisory 2025-2](https://www.sec.gov/rules-regulations/fee-rate-advisories/2025-2)), $20.60 from
-//!   4 April 2026 ([2026-2](https://www.sec.gov/rules-regulations/fee-rate-advisories/2026-2)).
+//!   4 April 2026 ([2026-2](https://www.sec.gov/rules-regulations/fee-rate-advisories/2026-2)). That advisory keeps $20.60 until
+//!   60 days after legislation sets the Commission's fiscal year 2027 appropriation; the only law so far is the continuing
+//!   resolution (P.L. 119-103, signed 2 September 2026) that funds the government through 11 December 2026, which is not that
+//!   (the fiscal year 2025 one did not change the rate either), so the table is known through that day.
 //! - **FINRA Trading Activity Fee** on covered equity sales: a rate per share sold with a cap per trade, from 1 January
 //!   of each year: $0.000166 up to $8.30 in 2024 and 2025, $0.000195 up to $9.79 in 2026, $0.000232 up to $11.61 in
 //!   2027 ([FINRA fee adjustment schedule](https://www.finra.org/rules-guidance/rule-filings/sr-finra-2024-019/fee-adjustment-schedule)).
 //!   The cap is applied to each execution.
 //! - **A date the table does not cover is refused**, never given the nearest rate: each table says the last day it is
-//!   known for (`through`) and the first rate it has. The SEC rate for the fiscal year that began on 1 October 2026 is
-//!   not in the table until someone looks it up.
+//!   known for (`through`) and the first rate it has. A date past the table's end is for someone to look up and add.
 //! - **Borrow**: basis points a year of the value shorted, for the time held, charged on names that are not easy to
 //!   borrow (the broker charges none on easy-to-borrow names). Zero by default.
 //! - Fees are exact in raw price units (1e-9 dollars) and are not rounded to a cent per trade: brokers round, and the
@@ -94,7 +96,7 @@ impl CostModel {
                 ("2025-05-14".into(), px("0.00")),
                 ("2026-04-04".into(), px("20.60")),
             ],
-            sec_through: "2026-09-30".into(),
+            sec_through: "2026-12-11".into(),
             taf: vec![
                 ("2024-01-01".into(), px("0.000166"), px("8.30")),
                 ("2025-01-01".into(), px("0.000166"), px("8.30")),

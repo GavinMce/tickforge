@@ -29,6 +29,12 @@ a port-forward or by the https name through Traefik, which needs a hosts-file en
 - **The set that is run is the deployed one,** and a scenario is one configuration (ADR 0059), so another set is another name.
 - **The workspace has a `LoadBalancer` Service on a fixed address of the MetalLB pool,** `10.0.30.43` port 8787, beside the https name.
   It is plain HTTP behind the sign-in token, on the LAN only; the token therefore crosses the LAN unencrypted.
+- **The cost model's Section 31 table is known through 11 December 2026.** The first range run stopped at 1 October: the table ended
+  with the fiscal year, and a date past it is refused, not given the nearest rate. The SEC's advisory
+  [2026-2](https://www.sec.gov/rules-regulations/fee-rate-advisories/2026-2) keeps $20.60 until 60 days after legislation sets the
+  Commission's fiscal year 2027 appropriation. The only law so far is the continuing resolution P.L. 119-103 (signed 2 September 2026),
+  which funds the government to 11 December and does not set it (the table's own history shows the fiscal year 2025 resolution did not
+  change the rate either), so $20.60 is known through that day. It has to be looked up again after it.
 
 ## Consequences
 

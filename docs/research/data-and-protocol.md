@@ -130,3 +130,11 @@ The history harness (S07, S13 and S14) comes before any strategy is promoted, be
 foundations it needs (calendar, session features, bars and history state for cross strategies, protective orders, shorting
 realism) come before that. The strategies that need an event feed (earnings, news, FOMC: S10), depth (S11) or options (S12)
 wait for those.
+
+## EQUS.MINI, the dataset of the Standard plan (checked against the metadata service on 2026-10-08)
+
+- **Schemas:** mbp-1, tbbo, trades, bbo-1s, bbo-1m, ohlcv-1s, ohlcv-1m, ohlcv-1h, ohlcv-1d and definition. **Not** tcbbo or cmbp-1 (those are XNAS.BASIC's consolidated variants), and **not status**: halts and limit-up/limit-down are not in this feed.
+- **History:** available from 2023-03-28 for every schema above, to the end of the previous session. How much of it the Standard plan includes without a charge is its twelve months of L0/L1 history (above); older days are pay-as-you-go.
+- **What a day costs pay-as-you-go** (the whole market, 2026-10-07; days inside the plan's included history are not charged): tbbo $3.37, trades $2.02, mbp-1 $30.96 (346 million records), bbo-1m $0.85, ohlcv-1m $0.70, ohlcv-1d $0.02. `tbbo` is the one the strategies read: each trade with the best bid and offer at that moment.
+- **The decoder reads tbbo and mbp-1** (`Mbp1Msg`: the top of book, then the trade), so the same strategies run on it unchanged. A strategy that needs a quote at a moment when nothing traded sees the last one.
+

@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: tickforge
+resources:
+  - namespace.yaml
+  - storage.yaml
+  - workspace.yaml
+  - ingress.yaml
+  - jobs.yaml
+# The live config, the strategy set and its universe: edit them here and deploy again (a change of the set needs certificates
+# again, which the prepare job notices).
+configMapGenerator:
+  - name: tickforge-config
+    files:
+      - config/live.cfg
+      - config/month.set
+      - config/universe-liquid.txt
+generatorOptions:
+  disableNameSuffixHash: true
+# scripts/deploy-dev.sh sets the tag to the commit it deploys; `main` is only what a bare `kubectl kustomize` shows.
+images:
+  - name: ghcr.io/gavinmce/tickforge
+    newTag: main

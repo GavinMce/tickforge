@@ -1,0 +1,35 @@
+# Two volumes on the Proxmox pool (CSI, one node at a time; the pods that use them are kept on one node by affinity to the
+# workspace's pod, see workspace.yaml). Expandable, but NOT backed up, and the storage class deletes a volume with its claim: do not
+# delete these claims lightly.
+#
+# tickforge-live: the live ledger, each day's directory (capture, decision log, report), the day's reference snapshots and
+#   certificates. About a gigabyte a day of capture at most.
+# tickforge-history: the research store (a day of EQUS.MINI trades-with-top-of-book is a few hundred megabytes to a gigabyte),
+#   what the pulls fetched, and the results of research runs. Sized for months of days; grow it before pulling a year.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tickforge-live
+  namespace: tickforge
+  labels:
+    app.kubernetes.io/part-of: tickforge
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: proxmox-vmdata
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tickforge-history
+  namespace: tickforge
+  labels:
+    app.kubernetes.io/part-of: tickforge
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: proxmox-vmdata
+  resources:
+    requests:
+      storage: 60Gi

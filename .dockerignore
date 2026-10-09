@@ -1,0 +1,6 @@
+target
+.git
+data
+*.tape
+*.tape.zst
+__pycache__

@@ -845,3 +845,37 @@ fn the_edges_of_what_the_parameters_allow_are_in() {
     assert!(!ok(|q| q.max_cents = q.min_cents - 1));
     assert!(!ok(|q| q.last_entry_minutes = q.flat_minutes));
 }
+
+#[test]
+fn the_base_of_the_run_is_the_price_the_window_began_at() {
+    // The last quiet trade before the window is at $9.50 and a later one at $10.00, so the lowest price of the window's marks is
+    // $9.50, at its first. From there $10.30 is 842 basis points; from $10.00 it would be 300.
+    let go = |thrust: u32| {
+        let mut rig = Rig::new(p_with(|p| p.min_thrust_bp = thrust), 1);
+        for m in 0..19 {
+            rig.trade(0, m, 30, 950, 100);
+            rig.tick(m + 1, 1);
+        }
+        rig.trade(0, 19, 30, 1000, 100);
+        rig.tick(20, 1);
+        for m in 20..25 {
+            for t in 0..5 {
+                rig.trade(0, m, 10 + t * 10, 1030, 2000);
+            }
+            rig.tick(m + 1, 1);
+        }
+        rig.stats().spikes
+    };
+    assert_eq!(go(800), 1);
+    assert_eq!(go(843), 0);
+}
+
+#[test]
+fn a_price_back_at_the_high_that_completes_the_turn_is_bought() {
+    // Run to $10.80 from a base of $10.00, pull back to $10.65, and 140 basis points up from it is $10.80 itself.
+    let p = p_with(|p| p.turn_bp = 140);
+    let (rig, out) = after_the_high_of(p, 1080, &[1065, 1079]);
+    assert!(out.is_empty() && rig.stats().entries == 0);
+    let (_, out) = after_the_high_of(p, 1080, &[1065, 1079, 1080]);
+    assert_eq!(out.len(), 1);
+}

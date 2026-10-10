@@ -186,7 +186,7 @@ impl VwapReclaimParams {
         if self.flat_minutes == 0 || self.last_entry_minutes <= self.flat_minutes {
             return bad("flat_minutes must be at least 1 and less than last_entry_minutes");
         }
-        if self.last_entry_minutes > 330 || self.start_minutes + self.last_entry_minutes >= 330 {
+        if self.start_minutes + self.last_entry_minutes >= 330 {
             return bad(
                 "start_minutes plus last_entry_minutes must be under 330 (the premarket is 330 minutes)",
             );

@@ -1949,7 +1949,7 @@ epics:
         jira: TIC-169
         title: T01 opening range breakout on stocks in play (docs/research 1c)
         status: todo
-        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S16]
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S16, E19-S48, E19-S49, E19-S50, E19-S51, E19-S52, E19-S54]
         ac:
           - The rule of docs/research/01-trend.md (5- or 15-minute opening range, opening relative volume at least 100% of its 14-day average and the top 20 by it, price above $5, average volume above a million shares, ATR above $0.50; stop order at the range, stop loss at 10% or 20% of ATR, exit at 15:58, 1% risk of the strategy's budget) is a cross strategy whose eight variants are parameters
           - Tests cover no trade on a doji, entry on the break, the stop, the time exit, each filter excluding a name in turn, the sizing, and no second entry
@@ -1958,7 +1958,7 @@ epics:
         jira: TIC-170
         title: T02 hourly EMA(100) bias and the pullback entry (docs/research 1a)
         status: todo
-        deps: [E19-S02, E19-S03, E19-S04, E19-S05]
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S49, E19-S52, E19-S54, E19-S51]
         ac:
           - The bias (last completed regular-session hourly close above or below EMA(100), none before 10:30) is available to other strategies as a filter, and the standalone pullback entry of docs/research/01-trend.md has its four variants as parameters
           - "The live bias equals the offline one: the EMA state from the snapshot carried forward through a day equals the EMA computed over the same closes in one pass"
@@ -1967,7 +1967,7 @@ epics:
         jira: TIC-171
         title: "T03 VWAP reclaim: wick on volume against first touch, and the premarket variant (docs/research 1b, 8a)"
         status: todo
-        deps: [E19-S02, E19-S03, E19-S04, E19-S05]
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S48, E19-S49, E19-S52]
         ac:
           - Both variants of 1b (first touch; long wick on volume then confirmation) and the premarket reclaim of 8a (limit orders only, engine-held exit, spread filter) are one strategy with the variants as parameters
           - The anchored VWAP used is the session one from E19-S02, and a test shows the difference from the all-day Tier 0 VWAP
@@ -2013,7 +2013,7 @@ epics:
         jira: TIC-173
         title: T05 open-attention gap fade (docs/research 6c)
         status: todo
-        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S06]
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S06, E19-S48, E19-S52, E19-S54]
         ac:
           - The rule of docs/research/06-psychology.md (gap of at least 2% or 5%, in play by opening relative volume, entry at 09:45 or 10:30 while the gap is still more than half open, stop at the day's extreme, target the prior close) is a strategy with eight variants as parameters; shorts only in easy-to-borrow names
           - T05, T01 and T09 can be run on the same stock-days and their trades compared side by side
@@ -2022,7 +2022,7 @@ epics:
         jira: TIC-174
         title: "T06 intraday overreaction short: a run of green candles then an engulfing red one (docs/research 2a)"
         status: todo
-        deps: [E19-S03, E19-S04, E19-S05, E19-S06]
+        deps: [E19-S03, E19-S04, E19-S05, E19-S06, E19-S49, E19-S53, E19-S54, E19-S51]
         ac:
           - The rule of docs/research/02-mean-reversion.md (run of 5 or 8 green one-minute candles, 3% gain, volume against the time-of-day baseline, trigger by engulfing or by a lower low, stop at the run's high, 0.25% risk, 30-minute time stop) is a strategy with four variants as parameters
           - A short is skipped while the restriction applies, for a name that is not easy to borrow, and when the stop is more than 2% away
@@ -2031,7 +2031,7 @@ epics:
         jira: TIC-175
         title: T07 RSI exhaustion with the plain intraday-reversal baseline (docs/research 2c)
         status: todo
-        deps: [E19-S03, E19-S04, E19-S05, E19-S06]
+        deps: [E19-S03, E19-S04, E19-S05, E19-S06, E19-S49, E19-S53, E19-S54, E19-S51]
         ac:
           - RSI(14) on one-minute closes with the thresholds, the two-minute reversal-candle entry and the exits of docs/research/02-mean-reversion.md, four variants, plus the plain event of at least 4% in 60 minutes and 8 times normal volatility (price at least $10) as the baseline variant
           - The RSI uses Wilder smoothing from the first bar of the session and equals the engine's streaming RSI on a real day
@@ -2040,7 +2040,7 @@ epics:
         jira: TIC-176
         title: T08 prior-day high and low sweep reversal with control levels (docs/research 3a)
         status: todo
-        deps: [E19-S03, E19-S04, E19-S05, E19-S06]
+        deps: [E19-S03, E19-S04, E19-S05, E19-S06, E19-S48, E19-S49, E19-S52, E19-S54, E19-S51]
         ac:
           - The sweep rule of docs/research/03-liquidity.md at the prior regular-session high and low, and the same detector at the shifted control levels (25% and 50% of the prior range, both sides), run in one pass and reported separately
           - Short sweeps skip names that are not easy to borrow; long sweeps need no borrow
@@ -2049,7 +2049,7 @@ epics:
         jira: TIC-177
         title: T09 premarket-high rip and dip (docs/research 4a)
         status: todo
-        deps: [E19-S02, E19-S03, E19-S04, E19-S05]
+        deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S48, E19-S49, E19-S52, E19-S50]
         ac:
           - The rule of docs/research/04-scalping.md (first regular minute breaks and closes above the premarket high, dip of at least 40% of that bar's range holding above the premarket high, then a break of the first bar's high; four variants) is a strategy
           - The premarket high is taken from extended-hours trades and a test shows it ignores regular-session trades
@@ -2058,7 +2058,7 @@ epics:
         jira: TIC-178
         title: "T10 absorption: heavy volume with no movement, bar and refill variants (docs/research 3b)"
         status: todo
-        deps: [E19-S03, E19-S05]
+        deps: [E19-S03, E19-S05, E19-S49, E19-S50]
         ac:
           - The bar variant (volume at least 4 times the 30-minute average, range at most half the average true range, at a 30-minute extreme) and the refill variant (trades at the same best bid or offer exceeding five times the displayed size, bid price unchanged) of docs/research/03-liquidity.md are one strategy with a parameter for each
           - The first report of this strategy is the drift after a signal against unconditional drift, before any cost
@@ -2075,7 +2075,7 @@ epics:
         jira: TIC-180
         title: "T12 event studies: earnings reaction, FOMC reaction and gap-down flush bounce (docs/research 5a, 5b, 6a)"
         status: todo
-        deps: [E19-S10, E19-S13, E19-S14, E19-S15, E19-S19]
+        deps: [E19-S10, E19-S13, E19-S14, E19-S15, E19-S19, E19-S52]
         ac:
           - The earnings protocol of docs/research/05-news-reaction.md (gap, first-five-minute volume, return to the close and to the next day by gap size, with the follow rule and the fade rule on the same events), the FOMC study on SPY, and the flush-bounce rule of 06-psychology.md with and without the news flag are run on twelve months
           - Each study ends in a written result that includes the number of events, the standard error, and whether any rule follows; a result with too few events says so and stops
@@ -2083,7 +2083,7 @@ epics:
         jira: TIC-181
         title: T13 bull-flag fakeout measurement (docs/research 6b)
         status: todo
-        deps: [E19-S13, E19-S14]
+        deps: [E19-S13, E19-S14, E19-S49]
         ac:
           - The pole and flag are defined so that a machine finds them (docs/research/06-psychology.md), and over twelve months the counts of clean breakout, failed breakout and shakeout within 15 minutes are reported, with the same counts for other consolidations of the same height as the control
           - The result says whether a shakeout is more frequent than the control and whether it is followed by gains; no strategy is written unless it is
@@ -2507,3 +2507,113 @@ epics:
         ac:
           - "A null for the premarket strategy draws active names at random times in the premarket and exits as the strategy does, so its mean after costs is what the exits and the spread alone earn"
           - "Every decision has a test from scripted events, a mutation run on its code leaves no unexplained survivor, and it runs through the host over a scripted premarket tape"
+      - id: E19-S46
+        jira: TIC-201
+        title: "Host profiler: time per section of the host's step and per strategy callback, in the metrics, free when off"
+        status: todo
+        progress: >-
+          The machine has no sampling profiler (no perf), so the cost of E19-S47 was found with timers patched into the host's step (a throwaway patch, not kept). This
+          story makes that a feature of the host.
+        deps: []
+        ac:
+          - "The host counts the time spent in each section of its step (broker observe, settle, journal mark, Tier 0, bars, promoter, the strategies, collect, per-second work) and in each strategy's callbacks, and reports them in its metrics text, on `tf research run --profile` and in the live run's metrics"
+          - "With profiling off it costs nothing a benchmark can see (the clock is not read), and the same run with it on produces byte-identical results"
+          - "A test shows the sections add up to the step within a stated margin on a scripted day, and that a strategy that is made slow shows as the slow one"
+      - id: E19-S47
+        jira: TIC-202
+        title: "Host throughput: the simulated broker's per-event cost (borrow accrued over every slot at every event)"
+        status: done
+        evidence: >-
+          PR #120. Timers in the host's step over one real day showed the simulated broker's `accrue` at 54.6 of 76 seconds: it looped over the position of every
+          instrument slot on every market event to charge borrow on shorts. It now loops over the set of names held short (updated where positions change). One
+          strategy 83.2 s to 5.7 s, ten strategies 89.6 s to 10.1 s (16,793,799 events, release build); `diff -r` of the research outputs before and after: identical, for
+          both. Test: a short taken through flat by a buy stops accruing and starts again when it goes short again.
+        deps: []
+        ac:
+          - "One real EQUS.MINI day (16.8M events) runs one strategy in under 10 seconds and ten in under 15 on the development machine, release build"
+          - "The research outputs before and after are byte-identical, and a test takes a short through flat and back"
+      - id: E19-S48
+        jira: TIC-203
+        title: "Strategies read the session features: premarket and regular-session spans, the open, the opening ranges"
+        status: todo
+        deps: [E19-S02]
+        ac:
+          - "A cross strategy reads a member's session state through its view, and nothing else about the view changes (every golden hash holds)"
+          - "A test per field from scripted events: premarket and regular spans do not mix, the open is the first regular trade, the ranges end at 5 and 15 minutes, and a name that has not traded reads as unknown"
+      - id: E19-S49
+        jira: TIC-204
+        title: "Shared bars in the strategy set: the set-driven host (research and live) turns on one-minute to hourly bars"
+        status: todo
+        deps: [E19-S03, E19-S31]
+        ac:
+          - "The strategy set can ask for shared bars (alignment and the most symbols tracked) and the host built from it has them, in research and in the live day, with the same numbers"
+          - "Two strategies claiming the same names build one set of bars, a claim past the limit is refused and counted, and a day run with and without the line decides identically for a strategy that does not read bars"
+          - "Memory is stated for the claims of a day (about 40 KB a symbol)"
+      - id: E19-S50
+        jira: TIC-205
+        title: "Engine-held entry triggers: buy or sell when a trade goes through a level, as the exit book holds exits"
+        status: todo
+        deps: [E19-S05]
+        ac:
+          - "An EntryBook per strategy holds triggers (instrument, side, level, size, a time after which it lapses, a collar) and sends a marketable limit at the first trade at or through the level, once, with the reason of the trigger"
+          - "It is deterministic in event time like the exit book, never fires before it is armed or after it lapses, can be disarmed, and a trigger that fires for a name already held is refused by the strategy's own check"
+          - "Tests from scripted events for each edge; T09 or T01 uses it"
+      - id: E19-S51
+        jira: TIC-206
+        title: "A strategy sees its own budget and the risk it may take, to size a trade by the risk to its stop"
+        status: todo
+        deps: [E09-S03]
+        ac:
+          - "A strategy reads, through its context, its budget, what is in use and what is left (from the gateway's account of it), and a helper turns a risk fraction and a stop distance into shares"
+          - "Reading it changes no decision of a strategy that does not (golden hashes hold); a strategy sized this way takes fewer shares as its budget is used, and none when nothing is left"
+          - "Tests from scripted days; T01 or T06 uses it"
+      - id: E19-S52
+        jira: TIC-207
+        title: "Minute-history columns in each day's snapshot, in the research command and the daily prepare job"
+        status: todo
+        deps: [E19-S04, E19-S31]
+        ac:
+          - "`tf research snapshots --minutes FILE` builds each day's snapshot with the columns as of the session before it, from one pass over the minute bars, and a column is unknown, never zero, where the history is short"
+          - "scripts/fetch_minutes.sh runs in the prepare job and the range runner under a stated cost cap, and the cost and size of 60 sessions of the whole market are stated first"
+          - "A test that a day's columns do not use that day's bars, and one on real data compared with Databento's daily bars"
+      - id: E19-S53
+        jira: TIC-208
+        title: "Time-of-day volume and volatility profiles finer than seven checkpoints, for relative volume and the 60-minute move"
+        status: todo
+        deps: [E19-S52]
+        ac:
+          - "The snapshot carries average volume per quarter hour of the regular session and the premarket, and the normal absolute 60-minute move per quarter hour, over the last 20 sessions, unknown where short"
+          - "A strategy reads the average volume of any run of minutes by adding the quarter hours; a test checks it against a hand-computed day"
+      - id: E19-S54
+        jira: TIC-209
+        title: "Asset list without a person's credentials: shortable, easy to borrow, tradable and ETF flags for the shorts of T05 to T08"
+        status: todo
+        deps: [E19-S06]
+        ac:
+          - "The decision is recorded (an Alpaca paper key for the cluster as a secret, or shorts off and these strategies long-side only); with a key, the prepare job and the range runner fetch assets.json and the snapshots carry the flags, kept per day with the snapshot so a replay is as it was"
+          - "Without one, the shorts of the strategies are off in the set and the reports say so"
+      - id: E19-S55
+        jira: TIC-210
+        title: "A time budget per strategy callback in the live host: a slow strategy is seen, counted and, past a limit, stopped alone"
+        status: todo
+        deps: [E19-S46]
+        ac:
+          - "In the live host (the only place that reads a clock) the time of each strategy's callbacks is measured against a budget and a callback past it is counted against that strategy and reported; a strategy past a stated limit more than a stated number of times is stopped alone and flattened, as a panic is"
+          - "The research host does not read a clock, so research results are unchanged; a test with a deliberately slow strategy shows it named and stopped while the others carry on"
+      - id: E19-S56
+        jira: TIC-211
+        title: "The whole library at once: every built strategy in one host over a real day and an opening burst, with the headroom stated"
+        status: todo
+        deps: [E19-S46, E19-S47, E19-S49]
+        ac:
+          - "One set holding every built strategy runs a real EQUS.MINI day and a real XNAS.BASIC opening five minutes through the live path (ingest queue, host, capture) at full speed and paced; events per second, the queue's peak, the drops (none), the time of each strategy and the memory are stated"
+          - "The headroom against the busiest second is stated, and what limits first if the set doubles"
+          - "Tier 1 and bars claims contended by several strategies are refused and counted, never silently dropped; the gateway's refusals per strategy are listed"
+      - id: E19-S57
+        jira: TIC-212
+        title: "A time-of-day window in the history pull, for the premarket of XNAS.BASIC (20 times the trades of EQUS.MINI)"
+        status: todo
+        deps: [E19-S07]
+        ac:
+          - "scripts/pull_history.sh takes a start and end time of day (New York) for each day, the cost and size are asked of the metadata service for that window first, and the file says its window so a replay, the history manifest and verify do not take a half day for a whole one"
+          - "A day pulled for a window and replayed runs the premarket strategies as a whole day would over that window, and names are stored as for a whole day"

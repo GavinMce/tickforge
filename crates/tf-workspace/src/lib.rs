@@ -123,6 +123,17 @@ pub struct Source {
     pub research: Option<Research>,
 }
 
+impl Source {
+    /// The live or paper ledger, if it has begun: a directory the engine has made (the deployment makes it before any day has run)
+    /// whose `ledger.log` is missing or empty is no account yet, not a ledger that cannot be read. Looked at on every request, so a
+    /// service started before the first day shows it as soon as there is one.
+    pub fn live(&self) -> Option<(PathBuf, Kind)> {
+        let (dir, kind) = self.ledger.as_ref()?;
+        let begun = std::fs::metadata(dir.join("ledger.log")).is_ok_and(|m| m.len() > 0);
+        begun.then(|| (dir.clone(), *kind))
+    }
+}
+
 /// Dollars to the cent from raw 1e-9 dollars, as text so no precision is lost in JSON.
 pub fn dollars(raw: i128) -> String {
     let cents = (raw.abs() + 5_000_000) / 10_000_000;
@@ -210,7 +221,7 @@ pub fn catalog(src: &Source) -> Result<Catalog, String> {
             .map_err(|e| e.to_string())?;
         runs.extend(tf_catalog::from_results(&found).runs().iter().cloned());
     }
-    if let Some((dir, kind)) = &src.ledger {
+    if let Some((dir, kind)) = &src.live() {
         let name = dir.display().to_string();
         runs.extend(
             tf_catalog::sessions(ReadOnlyStore::open(dir), &name, *kind)
@@ -252,13 +263,8 @@ pub fn run_detail(src: &Source, strategy: &str, id: &str) -> Result<Option<Strin
     // ledger of a replayed day (one session per strategy).
     let (dir, kind, name, session) = match &run.source {
         RunSource::Ledger { session, .. } => {
-            let (dir, kind) = src.ledger.as_ref().ok_or("no ledger")?;
-            (
-                dir.clone(),
-                *kind,
-                dir.display().to_string(),
-                Some(*session),
-            )
+            let (dir, kind) = src.live().ok_or("no ledger")?;
+            (dir.clone(), kind, dir.display().to_string(), Some(*session))
         }
         RunSource::Replay { scenario, day } => {
             let r = src.research.as_ref().ok_or("no research results")?;
@@ -412,7 +418,7 @@ pub(crate) fn change_text(c: &Change, a: &Tree, b: &Tree, balance: u128) -> Stri
 /// The balance, groups and strategies as JSON: budget, use, day P&L, loss limits, state and runs.
 pub fn overview(src: &Source) -> Result<String, String> {
     let cat = catalog(src)?;
-    let Some((dir, kind)) = &src.ledger else {
+    let Some((dir, kind)) = &src.live() else {
         return Ok("{\"account\":null,\"groups\":[],\"strategies\":[]}".to_owned());
     };
     overview_of(&cat, dir, *kind)

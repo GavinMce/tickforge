@@ -258,6 +258,37 @@ fn without_budgets_or_without_a_ledger_the_overview_says_what_is_missing() {
 }
 
 #[test]
+fn a_ledger_directory_with_no_records_yet_is_no_account_and_is_one_as_soon_as_a_day_begins() {
+    // The deployment makes the directory before any day has run: nothing in it, then an empty log.
+    let dir = scratch("fresh");
+    std::fs::create_dir_all(&dir).unwrap();
+    let s = src(&dir);
+    let none = "{\"account\":null,\"groups\":[],\"strategies\":[]}";
+    for step in 0..2 {
+        if step == 1 {
+            std::fs::write(dir.join("ledger.log"), "").unwrap();
+        }
+        assert_eq!(overview(&s).unwrap(), none, "step {step}");
+        assert_eq!(runs(&s, None).unwrap(), "{\"runs\":[]}", "step {step}");
+        for path in ["/api/overview", "/api/runs"] {
+            let r = handle(&s, TOKEN, &signed(path));
+            assert_eq!(r.status, 200, "{path} step {step}: {}", r.body);
+        }
+    }
+    // The same service, no restart, once the engine has started a ledger there.
+    std::fs::remove_file(dir.join("ledger.log")).unwrap();
+    let j = account(&dir, true);
+    let text = overview(&s).unwrap();
+    assert!(text.contains("\"budgets\":true"), "{text}");
+    assert!(
+        runs(&s, None).unwrap().contains("\"runs\":[{"),
+        "a run appears"
+    );
+    drop(j);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn runs_can_be_filtered_by_strategy_and_say_whether_they_open() {
     let dir = scratch("runs");
     let j = account(&dir, true);

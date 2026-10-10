@@ -45,7 +45,7 @@ struct Now {
 }
 
 fn now(src: &Source) -> Result<(std::path::PathBuf, Now), Refusal> {
-    let Some((dir, _)) = &src.ledger else {
+    let Some((dir, _)) = &src.live() else {
         return Err(Refusal::NothingToEdit("no ledger is connected".to_owned()));
     };
     let (j, _) = Journal::open_recorded(ReadOnlyStore::open(dir))

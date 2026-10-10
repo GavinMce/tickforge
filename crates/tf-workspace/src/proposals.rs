@@ -44,7 +44,7 @@ fn state_name(s: State) -> &'static str {
 
 /// The proposals, newest first, each with what it changes in dollars of the budgets in force.
 pub fn view(src: &Source) -> Result<String, Refusal> {
-    let Some((dir, _)) = &src.ledger else {
+    let Some((dir, _)) = &src.live() else {
         return Err(Refusal::NoLedger);
     };
     let (entries, unreadable) = store::list(dir).map_err(|e| Refusal::Failed(e.to_string()))?;
@@ -112,7 +112,7 @@ fn refusal(e: FlowError) -> Refusal {
 
 /// A person approves a proposal that is waiting. Returns the inbox request it became.
 pub fn approve(src: &Source, id: u64, by: &str, note: &str) -> Result<String, Refusal> {
-    let Some((dir, _)) = &src.ledger else {
+    let Some((dir, _)) = &src.live() else {
         return Err(Refusal::NoLedger);
     };
     flow::approve(dir, id, by, note, wall_clock()).map_err(refusal)
@@ -120,7 +120,7 @@ pub fn approve(src: &Source, id: u64, by: &str, note: &str) -> Result<String, Re
 
 /// A person declines a proposal that is waiting.
 pub fn decline(src: &Source, id: u64, by: &str, note: &str) -> Result<(), Refusal> {
-    let Some((dir, _)) = &src.ledger else {
+    let Some((dir, _)) = &src.live() else {
         return Err(Refusal::NoLedger);
     };
     flow::decline(dir, id, by, note, wall_clock()).map_err(refusal)

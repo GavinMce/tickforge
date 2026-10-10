@@ -1967,6 +1967,13 @@ epics:
         jira: TIC-171
         title: "T03 VWAP reclaim: wick on volume against first touch, and the premarket variant (docs/research 1b, 8a)"
         status: todo
+        progress: >-
+          ADR 0078. Done: the premarket variant (docs/research 8a): `VwapReclaim`, template `t03`, over the shared one-minute bars and the premarket VWAP Tier 0 keeps;
+          candidates by premarket dollars and gap, a dip under the VWAP and a later bar closing above it, exits at a target over the VWAP, on a bar closing under it,
+          a disaster stop and before the open. 28 tests from scripted events with the VWAP held exact to the raw unit for the boundaries, and the strategy through the host
+          over a scripted premarket tape (with the bars on it buys and sells before the open; without them it buys nothing). Mutation run: 161 mutants, 54 compile errors,
+          100 killed, 5 survivors that are equivalent or unreachable (an event exactly at 04:00 or at the open, a price of exactly zero). Not done: the regular-session first-touch and wick variants
+          (they need the in-play baseline of E19-S52) and the run over stored days.
         deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S48, E19-S49, E19-S52]
         ac:
           - Both variants of 1b (first touch; long wick on volume then confirmation) and the premarket reclaim of 8a (limit orders only, engine-held exit, spread filter) are one strategy with the variants as parameters
@@ -2535,7 +2542,11 @@ epics:
       - id: E19-S48
         jira: TIC-203
         title: "Strategies read the session features: premarket and regular-session spans, the open, the opening ranges"
-        status: todo
+        status: done
+        evidence: >-
+          ADR 0078. `MemberView::session(id)` gives a member's `SessionState` (the premarket's and the regular session's high, low, volume and VWAP, the open, the first minute's and five minutes'
+          volume, the 5 and 15 minute ranges), none for a non-member. Test from scripted events: the spans do not mix, the VWAPs, the open as the first regular trade, the first-minute
+          volumes, a non-member reads none, a member that has not traded reads empty, and nothing is kept before the day is set. Used by T03.
         deps: [E19-S02]
         ac:
           - "A cross strategy reads a member's session state through its view, and nothing else about the view changes (every golden hash holds)"
@@ -2543,7 +2554,11 @@ epics:
       - id: E19-S49
         jira: TIC-204
         title: "Shared bars in the strategy set: the set-driven host (research and live) turns on one-minute to hourly bars"
-        status: todo
+        status: done
+        evidence: >-
+          ADR 0078. The strategy set takes a line `bars SYMBOLS` (1 to 100000, once) and the host built from it has the shared bars, aligned to the sessions, bounded as asked;
+          without it there are none, as before. Tests: the line's edges and every refusal, the host configuration with and without it. Through the host over a scripted premarket tape, T03 buys with
+          them and nothing without them. The host's configuration fingerprint already holds the bars. Memory stays about 40 KB a symbol claimed.
         deps: [E19-S03, E19-S31]
         ac:
           - "The strategy set can ask for shared bars (alignment and the most symbols tracked) and the host built from it has them, in research and in the live day, with the same numbers"

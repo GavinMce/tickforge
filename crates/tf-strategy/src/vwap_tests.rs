@@ -225,7 +225,7 @@ fn it_buys_the_first_bar_that_closes_above_the_vwap_after_a_dip() {
     assert_eq!(rig.stats().dips, 1);
     assert!(rig.out().is_empty());
     // Minute 3: a bar that closes at 10.45, above the VWAP: the reclaim, seen when the bar closes.
-    rig.minute(0, 3, &[(10, 1045, 1)]);
+    rig.minute(0, 3, &[(10, 1031, 1)]);
     let out = rig.out();
     assert_eq!(out.len(), 1);
     let i = &out[0];
@@ -234,11 +234,11 @@ fn it_buys_the_first_bar_that_closes_above_the_vwap_after_a_dip() {
         (0, Side::Buy, Purpose::Open, Tif::Day, REASON_ENTRY, None)
     );
     // $1,000 of whole shares at the ask of $10.46, a collar of 1% around it.
-    assert_eq!(i64::from(i.qty), 1_000 * D / cents(1046));
+    assert_eq!(i64::from(i.qty), 1_000 * D / cents(1032));
     assert_eq!(
         i.pricing,
         Pricing::Collar {
-            reference: Px::from_raw(cents(1046)),
+            reference: Px::from_raw(cents(1032)),
             collar_permille: 10
         }
     );
@@ -296,12 +296,12 @@ fn bars_before_the_window_opens_are_not_looked_at() {
     let mut rig = Rig::new(p_with(|p| p.start_minutes = 3), 1);
     rig.candidate(0);
     rig.minute(0, 1, &DIP);
-    rig.minute(0, 2, &[(10, 1045, 1)]);
+    rig.minute(0, 2, &[(10, 1031, 1)]);
     assert_eq!(rig.stats().dips, 0);
     assert!(rig.out().is_empty());
     rig.minute(0, 3, &DIP);
     assert_eq!(rig.stats().dips, 1);
-    rig.minute(0, 4, &[(10, 1045, 1)]);
+    rig.minute(0, 4, &[(10, 1031, 1)]);
     assert_eq!(rig.out().len(), 1);
 }
 
@@ -380,14 +380,14 @@ fn the_bars_are_claimed_for_the_candidates_only_and_let_go_when_a_name_is_finish
     rig.trade(0, 1, 10, DIP[0].1, 1);
     rig.trade(0, 1, 20, DIP[1].1, 1);
     rig.tick(2, 1);
-    rig.minute(0, 2, &[(10, 1045, 1)]);
+    rig.minute(0, 2, &[(10, 1031, 1)]);
     let entry = rig.out().remove(0);
-    rig.update(fill(&entry, entry.qty, 1046, rig.at(3, 2)));
+    rig.update(fill(&entry, entry.qty, 1032, rig.at(3, 2)));
     assert_eq!(rig.bars.as_ref().unwrap().tracked(), 2);
     // Sold before the open and the sale filled: the name is let go, and the watched one still is claimed.
     rig.tick(325, 1);
     let sale = rig.out().remove(0);
-    rig.update(fill(&sale, sale.qty, 1046, rig.at(325, 2)));
+    rig.update(fill(&sale, sale.qty, 1032, rig.at(325, 2)));
     rig.tick(326, 1);
     assert_eq!(rig.bars.as_ref().unwrap().tracked(), 1);
 }
@@ -396,7 +396,7 @@ fn the_bars_are_claimed_for_the_candidates_only_and_let_go_when_a_name_is_finish
 fn a_name_dropped_as_too_late_lets_its_bars_go_at_once() {
     let mut rig = dipped(p_with(|p| p.last_entry_minutes = 330 - 3), 1);
     assert_eq!(rig.bars.as_ref().unwrap().tracked(), 1);
-    rig.minute(0, 2, &[(10, 1045, 1)]);
+    rig.minute(0, 2, &[(10, 1031, 1)]);
     assert_eq!(rig.stats().missed, 1);
     assert_eq!(rig.bars.as_ref().unwrap().tracked(), 0);
 }
@@ -408,7 +408,7 @@ fn without_shared_bars_in_the_host_a_candidate_is_refused_and_counted_and_nothin
     let s = rig.stats();
     assert_eq!((s.candidates, s.refused_bars), (0, 1));
     rig.minute(0, 1, &DIP);
-    rig.minute(0, 2, &[(10, 1045, 1)]);
+    rig.minute(0, 2, &[(10, 1031, 1)]);
     assert!(rig.out().is_empty());
 }
 
@@ -444,13 +444,13 @@ fn dipped(p: VwapReclaimParams, names: u32) -> Rig {
 fn a_reclaim_after_the_last_entry_time_is_missed() {
     // The last entry is 310 minutes before the open: minute 20. The reclaim is seen at minute 4, and again with the limit at minute 3.
     let mut rig = dipped(p_with(|p| p.last_entry_minutes = 330 - 3), 1);
-    rig.minute(0, 2, &[(10, 1045, 1)]);
+    rig.minute(0, 2, &[(10, 1031, 1)]);
     assert!(rig.out().is_empty());
     let s = rig.stats();
     assert_eq!((s.entries, s.missed), (0, 1));
     // At the limit itself it is allowed: the review that sees the bar is at minute 3 second 1, and the last entry is minute 3 exactly.
     let mut rig = dipped(p_with(|p| p.last_entry_minutes = 330 - 3), 1);
-    rig.trade(0, 2, 10, 1045, 1);
+    rig.trade(0, 2, 10, 1031, 1);
     rig.tick(3, 0);
     // (the tick is the first event of minute 3: its bar closes and the review runs at exactly the last entry time)
     assert_eq!(rig.out().len(), 1);
@@ -460,7 +460,7 @@ fn a_reclaim_after_the_last_entry_time_is_missed() {
 fn only_as_many_positions_as_names_and_the_rest_are_missed() {
     let mut rig = dipped(p_with(|p| p.names = 1), 2);
     for id in [0, 1] {
-        rig.trade(id, 2, 10, 1045, 1);
+        rig.trade(id, 2, 10, 1031, 1);
     }
     rig.tick(3, 1);
     let out = rig.out();
@@ -473,14 +473,14 @@ fn only_as_many_positions_as_names_and_the_rest_are_missed() {
 fn a_wide_quote_or_a_halt_waits_for_the_next_bar() {
     let mut rig = dipped(params(), 1);
     // A reclaim bar with a spread of 5%: not bought, and not dropped.
-    rig.trade(0, 2, 10, 1045, 1);
+    rig.trade(0, 2, 10, 1031, 1);
     rig.quote(0, 2, 12, 1020, 1070);
     rig.tick(3, 1);
     assert!(rig.out().is_empty());
     let s = rig.stats();
     assert_eq!((s.entries, s.missed), (0, 0));
     // A halt: the same.
-    rig.trade(0, 3, 10, 1046, 1);
+    rig.trade(0, 3, 10, 1032, 1);
     rig.halt(0, 3, 12);
     rig.tick(4, 1);
     assert!(rig.out().is_empty());
@@ -492,7 +492,7 @@ fn a_wide_quote_or_a_halt_waits_for_the_next_bar() {
         lo: Px::from_raw(0),
         hi: Px::from_raw(0),
     }));
-    rig.trade(0, 4, 10, 1047, 1);
+    rig.trade(0, 4, 10, 1033, 1);
     rig.tick(5, 1);
     assert_eq!(rig.out().len(), 1);
 }
@@ -501,7 +501,7 @@ fn a_wide_quote_or_a_halt_waits_for_the_next_bar() {
 fn the_spread_cap_is_met_exactly_and_nothing_means_no_cap() {
     let at = |cap: u32| {
         let mut rig = dipped(p_with(|p| p.spread_cap_bp = cap), 1);
-        rig.trade(0, 2, 10, 1045, 1);
+        rig.trade(0, 2, 10, 1031, 1);
         // 10 cents on a $10.00 mid is 100 basis points.
         rig.quote(0, 2, 12, 995, 1005);
         rig.tick(3, 1);
@@ -524,12 +524,12 @@ fn fill(i: &Intent, qty: u32, px: i64, ts: Nanos) -> OrderUpdate {
     }
 }
 
-/// A position bought at $10.46 after the dip and the reclaim, filled at that price.
+/// A position bought at $10.32 after the dip and the reclaim, filled at that price.
 fn held() -> (Rig, Intent) {
     let mut rig = dipped(params(), 1);
-    rig.minute(0, 2, &[(10, 1045, 1)]);
+    rig.minute(0, 2, &[(10, 1031, 1)]);
     let entry = rig.out().remove(0);
-    rig.update(fill(&entry, entry.qty, 1046, rig.at(3, 2)));
+    rig.update(fill(&entry, entry.qty, 1032, rig.at(3, 2)));
     (rig, entry)
 }
 
@@ -568,11 +568,11 @@ fn a_bar_closing_under_the_vwap_by_the_margin_exits_and_a_price_touching_it_does
 
 #[test]
 fn the_disaster_stop_is_under_the_fill() {
-    // 3% under $10.46 is $10.1462: a trade at 10.14 sells; the signal exit is not what sells it here (no bar has closed).
+    // 3% under $10.32 is $10.0104: a trade at 10.01 sells; the signal exit is not what sells it here (no bar has closed).
     let (mut rig, entry) = held();
-    rig.trade(0, 3, 10, 1015, 1);
+    rig.trade(0, 3, 10, 1002, 1);
     assert!(rig.out().is_empty());
-    rig.trade(0, 3, 20, 1014, 1);
+    rig.trade(0, 3, 20, 1001, 1);
     let out = rig.out();
     assert_eq!(out.len(), 1);
     assert_eq!((out[0].qty, out[0].reason), (entry.qty, REASON_STOP));
@@ -672,7 +672,7 @@ fn recording_why_changes_nothing_it_decides_and_says_what_it_did() {
         rig.runner.set_tracing(tracing);
         rig.candidate(0);
         rig.minute(0, 1, &DIP);
-        rig.minute(0, 2, &[(10, 1045, 1)]);
+        rig.minute(0, 2, &[(10, 1031, 1)]);
         (rig.out(), rig.runner.drain_traces())
     };
     let (a, ta) = run(false);
@@ -723,12 +723,12 @@ fn a_dip_is_exactly_the_margin_under_the_vwap_down_to_the_raw_unit() {
 #[test]
 fn a_held_position_counts_against_the_names_as_a_pending_entry_does() {
     let mut rig = dipped(p_with(|p| p.names = 1), 2);
-    rig.trade(0, 2, 10, 1045, 1);
+    rig.trade(0, 2, 10, 1031, 1);
     rig.tick(3, 1);
     let entry = rig.out().remove(0);
     // It fills: the entry is over and the position is the exit book's. A second name's reclaim finds no room.
-    rig.update(fill(&entry, entry.qty, 1046, rig.at(3, 2)));
-    rig.trade(1, 3, 10, 1045, 1);
+    rig.update(fill(&entry, entry.qty, 1032, rig.at(3, 2)));
+    rig.trade(1, 3, 10, 1031, 1);
     rig.tick(4, 1);
     assert!(rig.out().is_empty());
     let s = rig.stats();
@@ -740,20 +740,20 @@ fn only_a_fair_quote_is_bought() {
     // (bid, ask, spread cap in basis points) -> whether the reclaim is bought at that quote.
     let at = |bid: i64, ask: i64, cap: u32| {
         let mut rig = dipped(p_with(|p| p.spread_cap_bp = cap), 1);
-        rig.trade(0, 2, 10, 1045, 1);
+        rig.trade(0, 2, 10, 1031, 1);
         rig.quote(0, 2, 12, bid, ask);
         rig.tick(3, 1);
         rig.out().len() == 1
     };
-    assert!(at(1045, 1045, 0), "locked");
-    assert!(!at(1046, 1045, 0), "crossed");
-    assert!(!at(0, 1045, 0), "no bid");
+    assert!(at(1031, 1031, 0), "locked");
+    assert!(!at(1032, 1031, 0), "crossed");
+    assert!(!at(0, 1031, 0), "no bid");
 }
 
 #[test]
 fn a_dollar_amount_that_buys_no_share_is_not_an_entry_and_not_a_refused_one() {
     let mut rig = dipped(p_with(|p| p.dollars = 5), 1);
-    rig.trade(0, 2, 10, 1045, 1);
+    rig.trade(0, 2, 10, 1031, 1);
     rig.tick(3, 1);
     assert!(rig.out().is_empty());
     let s = rig.stats();
@@ -765,12 +765,12 @@ fn the_exit_bar_closes_under_the_vwap_by_exactly_the_margin_and_not_at_it() {
     // A VWAP of 10.30 exactly; 50 basis points under is 10.2485. A bar that closes there is not under it; a raw unit lower is.
     let run = |close: i64| {
         let mut rig = dipped(params(), 1);
-        // The reclaim bar closes at 10.45 with a pair that keeps the VWAP at 10.30.
-        rig.trade_raw(0, 2, 10, 10_150_000_000, 1);
-        rig.trade_raw(0, 2, 20, 10_450_000_000, 1);
+        // The reclaim bar closes at 10.31 with a pair that keeps the VWAP at 10.30.
+        rig.trade_raw(0, 2, 10, 10_290_000_000, 1);
+        rig.trade_raw(0, 2, 20, 10_310_000_000, 1);
         rig.tick(3, 1);
         let entry = rig.out().remove(0);
-        rig.update(fill(&entry, entry.qty, 1046, rig.at(3, 2)));
+        rig.update(fill(&entry, entry.qty, 1032, rig.at(3, 2)));
         // The exit bar: a pair whose last price is the close, around a VWAP that stays 10.30.
         rig.trade_raw(0, 3, 10, 2 * 10_300_000_000 - close, 1);
         rig.trade_raw(0, 3, 20, close, 1);
@@ -785,9 +785,32 @@ fn the_exit_bar_closes_under_the_vwap_by_exactly_the_margin_and_not_at_it() {
 fn nothing_is_decided_after_the_open() {
     // A dipped name whose reclaim bar closes in the regular session is not bought and not counted missed: the premarket is over.
     let mut rig = dipped(params(), 1);
-    rig.trade(0, 331, 10, 1045, 1);
+    rig.trade(0, 331, 10, 1031, 1);
     rig.tick(332, 1);
     assert!(rig.out().is_empty());
     let s = rig.stats();
     assert_eq!((s.entries, s.missed), (0, 0));
+}
+
+#[test]
+fn a_reclaim_that_has_already_run_past_the_target_is_dropped_and_one_just_inside_it_is_bought() {
+    // A bar that closes at 10.45 on a VWAP of 10.30 has an ask of 10.46, over the target of 10.403: the exit would fire on the first trade,
+    // below the entry. Not bought, counted missed, and the name's bars are let go.
+    let mut rig = dipped(params(), 1);
+    rig.minute(0, 2, &[(10, 1045, 1)]);
+    assert!(rig.out().is_empty());
+    let s = rig.stats();
+    assert_eq!((s.entries, s.missed), (0, 1));
+    assert_eq!(rig.bars.as_ref().unwrap().tracked(), 0);
+    // To the raw unit, with a VWAP of exactly 10.30 (a pair around the close): an ask of exactly the target is out, a raw unit under is in.
+    let ask = |close: i64| {
+        let mut rig = dipped(params(), 1);
+        rig.trade_raw(0, 2, 10, 2 * 10_300_000_000 - close, 1);
+        rig.trade_raw(0, 2, 20, close, 1);
+        rig.tick(3, 1);
+        rig.out().len()
+    };
+    // The quote is a cent either side of the last trade: an ask of close + 0.01. The target is 10.403.
+    assert_eq!(ask(10_393_000_000), 0, "ask 10.403 is the target");
+    assert_eq!(ask(10_392_999_999), 1, "a raw unit under it");
 }

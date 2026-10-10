@@ -8,7 +8,7 @@
 //! - **Dip, then reclaim.** From `start_minutes` after 04:00, a closed one-minute bar whose low is at least `dip_bp` under the VWAP is a
 //!   dip; a *later* bar that closes above the VWAP is the reclaim and the entry: `dollars` at the ask with a collar, a day order, no
 //!   protective order. Not later than `last_entry_minutes` before the open, at most `names` positions at once, the quoted spread at
-//!   most `spread_cap_bp` of the mid. One trade a name a day.
+//!   most `spread_cap_bp` of the mid, and the ask under the target (a reclaim that has already run past it is dropped: the exit would fire at once, below the entry). One trade a name a day.
 //! - **Exits** are the strategy's own (the broker takes no stop in the premarket): the target is `target_bp` over the VWAP at the entry;
 //!   a one-minute bar that closes `exit_below_bp` under the VWAP sends the exit (a decision about a bar close, [`ExitBook::exit_now`]); a
 //!   disaster stop `stop_permille` under the fill; and a time exit `flat_minutes` before the open.
@@ -566,6 +566,11 @@ impl VwapReclaim {
             if i128::from(ask - bid) * 20_000 > i128::from(self.p.spread_cap_bp) * mid2 {
                 return Outcome::Wait;
             }
+        }
+        // A reclaim that has already run past its target has no room: the exit would fire on the first trade, below the entry.
+        let target = i128::from(vwap) * i128::from(10_000 + self.p.target_bp) / 10_000;
+        if i128::from(ask) >= target {
+            return Outcome::Drop("no_room_to_target");
         }
         let qty = u128::from(self.p.dollars) * 1_000_000_000 / ask.max(1) as u128;
         let Some(qty) = u32::try_from(qty).ok().filter(|&q| q > 0) else {

@@ -1359,6 +1359,46 @@ fn a_snapshot_of_the_whole_market_runs_a_stored_day_over_the_names_the_day_shows
 }
 
 #[test]
+fn the_premarket_null_runs_through_the_host_buys_an_active_name_at_its_time_and_is_flat_before_the_open()
+ {
+    use crate::library::premarket_null;
+    use tf_strategy::premarket_null::PremarketNullParams;
+    let open = OPENS[0].1 * SEC;
+    let root = scratch("pm-null-tape");
+    write_capture(&root, &premarket_tape(open));
+    let files: Vec<PathBuf> = tf_capture::list(&root)
+        .unwrap()
+        .iter()
+        .map(|e| root.join(&e.file))
+        .collect();
+    // One entry, at 04:26 exactly, in the one name that trades.
+    let params = PremarketNullParams {
+        names: 1,
+        window_start_minutes: 26,
+        window_end_minutes: 26,
+        ..PremarketNullParams::default()
+    };
+    let defs =
+        [premarket_null(2, "pm-null", tf_universe::Spec::parse(LOW).unwrap(), params).unwrap()];
+    let (host, cost) = (host_cfg(), CostModel::published());
+    let input = DayInput {
+        files,
+        snapshot: snapshot(),
+    };
+    let out = run_day("2026-05-01", &input, &setup(&host, &cost, &defs)).unwrap();
+    assert_eq!(out.trips.len(), 1, "{:?}", out.anomalies);
+    let t = &out.trips[0];
+    assert_eq!((t.symbol.as_str(), t.strategy, t.long), ("S00", 2, true));
+    // $1,000 at the ask of $10.66 (the quote of the 04:25:48 print), sold by the time exit at the bid of the last quote.
+    assert_eq!((t.qty, t.entry_px, t.entry_reason), (93, 10_660_000_000, 1));
+    assert!(t.entry_ts >= open - 330 * 60 * SEC + 26 * 60 * SEC);
+    assert_eq!(t.exit_reason, 0xE503);
+    assert!(t.exit_ts >= open - 5 * 60 * SEC && t.exit_ts < open);
+    assert_eq!(out.rejected + out.refused, 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn data_that_cannot_be_read_is_an_error_not_a_shorter_day() {
     let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());
     let days = Days::new("unread-days", 1);

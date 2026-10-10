@@ -153,7 +153,7 @@ fn a_set_that_is_not_well_formed_is_refused_with_the_line() {
         ),
         (
             "balance 1000\nstrategy 1 a t99 universe=u\n",
-            "not a template (known: t04, t14, t25)",
+            "not a template (known: t04, t14, t25, t26)",
         ),
         (
             "balance 1000\nstrategy 1 a t04 universe=u wat=3\n",
@@ -331,7 +331,7 @@ fn the_definitions_have_their_universe_priority_and_parameters_and_each_variant_
     let t = templates();
     assert_eq!(
         t.iter().map(|x| x.0).collect::<Vec<_>>(),
-        ["t04", "t14", "t25"]
+        ["t04", "t14", "t25", "t26"]
     );
     assert!(t[0].1.contains("names=20") && t[1].1.contains("seed="));
     assert!(t[2].1.contains("spike_x10=30") && t[2].1.contains("max_pullback_permille=300"));

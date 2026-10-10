@@ -1150,6 +1150,33 @@ mod trade_view {
     }
 
     #[test]
+    fn the_chart_draws_each_fill_at_its_price_and_says_the_row_of_markers_is_for_the_time() {
+        // The markers (decision, fill, exit) are a row at the top of the chart: their height is not a price. The fills are drawn
+        // again at the price they were made at, on the quotes' axis, and the price range takes them in; the legend says which is which.
+        let root = root("tp-fills");
+        let page = trade_page(&root, "s", "2026-05-04", 1, 0).unwrap();
+        assert!(
+            page.contains("circle\", { cx: X(o.us), cy: Y(o.px4)"),
+            "a dot at the fill's price"
+        );
+        assert!(
+            page.contains("lo = Math.min(lo, o.px4)"),
+            "the axis reaches every fill"
+        );
+        assert!(page.contains("each fill at its price (the row of dots at the top marks the time"));
+        // What the dot says when pointed at, and that the data it is made from holds the price of each fill.
+        assert!(page.contains("entry\" : \"exit\") + \" fill: \""));
+        let j = data(&root, "2026-05-04", 0);
+        assert!(
+            j.get("orders")
+                .a()
+                .iter()
+                .any(|o| o.get("kind").s() == "fill" && o.get("px4").s() != "0")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_trade_is_shown_with_its_orders_its_markers_its_costs_and_the_strategys_account() {
         let root = root("tp1");
         let j = data(&root, "2026-05-04", 0);

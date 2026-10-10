@@ -32,6 +32,7 @@ svg{display:block;width:100%;height:auto;background:var(--bg);border-radius:6px}
 .dot{fill:var(--trade)}
 .cursor{stroke:var(--ink);stroke-width:1;stroke-dasharray:3 3}
 .mk{stroke-width:1.5}
+.fillpx{stroke:var(--bg, #fff);stroke-width:1.5}
 .k-tier_up{stroke:#4A6B1E;fill:#4A6B1E}.k-tier_down{stroke:#7a7a7a;fill:#7a7a7a}
 .k-decision{stroke:#8A4FB0;fill:#8A4FB0}.k-fill{stroke:#0E7C6B;fill:#0E7C6B}.k-exit_decision{stroke:#B33A5B;fill:#B33A5B}.k-exit_fill{stroke:#B26A0B;fill:#B26A0B}.k-end{stroke:var(--mute);fill:var(--mute)}
 .kv{display:flex;justify-content:space-between;gap:12px;padding:3px 0;border-bottom:1px solid var(--soft)}.kv:last-child{border-bottom:0}
@@ -123,6 +124,7 @@ tr.gap td{text-align:center;color:var(--mute)}
     q.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[2]); });
     tr.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); });
     [D.entry_px4, D.exit_px4].forEach(function (p) { if (D.marks.some(function (m) { return m.us <= st.cursor; })) { lo = Math.min(lo, p); hi = Math.max(hi, p); } });
+    D.orders.forEach(function (o) { if (o.kind === "fill" && o.us <= st.cursor && o.px4 > 0) { lo = Math.min(lo, o.px4); hi = Math.max(hi, o.px4); } });
     if (!isFinite(lo)) { lo = D.entry_px4 - 50; hi = D.entry_px4 + 50; }
     if (hi - lo < 4) { lo -= 2; hi += 2; }
     var pad4 = (hi - lo) * 0.08; lo -= pad4; hi += pad4;
@@ -156,6 +158,15 @@ tr.gap td{text-align:center;color:var(--mute)}
       var ttl = svg("title"); ttl.textContent = clock(m.us) + "  " + m.label; line.appendChild(ttl);
       s.appendChild(line);
       s.appendChild(svg("circle", { cx: X(m.us), cy: T + 6 + (m.kind === "fill" || m.kind === "exit_fill" ? 14 : m.kind === "tier_up" || m.kind === "tier_down" ? 28 : 0), r: 5, "class": "k-" + m.kind }));
+    });
+    // Each fill at the price it was made at, on the same axis as the quotes (the markers above are for the time only).
+    D.orders.forEach(function (o) {
+      if (o.kind !== "fill" || o.us > st.cursor || o.us < x0 || o.us > x1 || !(o.px4 > 0)) return;
+      var dec = D.orders.filter(function (d) { return d.kind === "decision" && d.order === o.order; })[0];
+      var entry = dec ? (dec.side === "buy") === (D.side === "long") : true;
+      var dot = svg("circle", { cx: X(o.us), cy: Y(o.px4), r: 4.5, "class": "fillpx " + (entry ? "k-fill" : "k-exit_fill") });
+      var ttl = svg("title"); ttl.textContent = clock(o.us) + "  " + (entry ? "entry" : "exit") + " fill: " + o.qty + " at $" + (o.px4 / 10000).toFixed(4); dot.appendChild(ttl);
+      s.appendChild(dot);
     });
     if (st.cursor >= x0 && st.cursor <= x1) s.appendChild(svg("line", { x1: X(st.cursor), y1: T, x2: X(st.cursor), y2: H - B, "class": "cursor" }));
     chartBox.replaceChildren(s);
@@ -256,6 +267,7 @@ tr.gap td{text-align:center;color:var(--mute)}
   ["tier_up", "tier_down", "decision", "fill", "exit_decision", "exit_fill", "end"].forEach(function (k) {
     if (D.marks.some(function (m) { return m.kind === k; })) legend.appendChild(h("span", null, h("i", { style: "border-radius:50%;background:" + SWATCH[k] }), KIND[k]));
   });
+  if (D.orders.some(function (o) { return o.kind === "fill"; })) legend.appendChild(h("span", { "class": "mute" }, "dots on the price lines: each fill at its price (the row of dots at the top marks the time of each step, not a price)"));
   var chartCard = h("section", { "class": "card stack", style: "display:flex;flex-direction:column;gap:10px", "aria-label": "Price chart and replay" },
     h("div", { "class": "row" }, h("h2", null, "The market around the trade"), h("span", { "class": "small mute" }, M ? "showing " + M.quotes.length + " of " + M.quotes_total + " quotes and " + M.trades.length + " of " + M.trades_total + " trades kept" : "")),
     M ? chartBox : h("div", { "class": "mute" }, "There is no market data to chart for this trade."),

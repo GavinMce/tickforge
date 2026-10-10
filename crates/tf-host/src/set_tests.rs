@@ -153,7 +153,7 @@ fn a_set_that_is_not_well_formed_is_refused_with_the_line() {
         ),
         (
             "balance 1000\nstrategy 1 a t99 universe=u\n",
-            "not a template (known: t04, t14, t25)",
+            "not a template (known: t04, t14, t25, t26)",
         ),
         (
             "balance 1000\nstrategy 1 a t04 universe=u wat=3\n",
@@ -331,7 +331,7 @@ fn the_definitions_have_their_universe_priority_and_parameters_and_each_variant_
     let t = templates();
     assert_eq!(
         t.iter().map(|x| x.0).collect::<Vec<_>>(),
-        ["t04", "t14", "t25"]
+        ["t04", "t14", "t25", "t26"]
     );
     assert!(t[0].1.contains("names=20") && t[1].1.contains("seed="));
     assert!(t[2].1.contains("spike_x10=30") && t[2].1.contains("max_pullback_permille=300"));
@@ -423,7 +423,7 @@ fn the_premarket_template_is_a_template_with_its_parameters_checked_when_the_set
 fn the_sets_the_cluster_is_deployed_with_read_and_build() {
     // The files of deploy/k8s/config, as the jobs read them: a typo in one is found here and not on the cluster.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/k8s/config");
-    for (file, strategies) in [("month.set", 4), ("premarket.set", 4)] {
+    for (file, strategies) in [("month.set", 4), ("premarket.set", 10)] {
         let (_, defs) =
             StrategySet::load(&dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert_eq!(defs.len(), strategies, "{file}");
@@ -433,6 +433,6 @@ fn the_sets_the_cluster_is_deployed_with_read_and_build() {
     let mut params: Vec<&str> = defs.iter().map(|d| d.params.as_str()).collect();
     params.sort_unstable();
     params.dedup();
-    assert_eq!(params.len(), 4);
+    assert_eq!(params.len(), 10);
     assert!(defs.iter().all(|d| d.name.starts_with("pm-")));
 }

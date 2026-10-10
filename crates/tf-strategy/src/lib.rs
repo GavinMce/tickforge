@@ -28,6 +28,7 @@ pub mod exits;
 pub mod intent;
 pub mod lifecycle;
 pub mod momentum;
+pub mod premarket_null;
 pub mod premarket_pullback;
 pub mod random_entries;
 pub mod report;
@@ -52,6 +53,7 @@ pub use lifecycle::{
 pub use momentum::{
     Decline, DeclineReason, EntryTrace, MomentumLong, MomentumParams, MomentumStats, tunable_specs,
 };
+pub use premarket_null::{PremarketNull, PremarketNullParams, PremarketNullStats};
 pub use premarket_pullback::{PremarketPullback, PremarketPullbackParams, PremarketPullbackStats};
 pub use random_entries::{RandomEntries, RandomEntriesParams, RandomEntriesStats};
 pub use report::{Report, ReportBuilder, Stats};
@@ -78,6 +80,8 @@ mod exits_tests;
 mod momentum_tests;
 #[cfg(test)]
 mod params_tests;
+#[cfg(test)]
+mod premarket_null_tests;
 #[cfg(test)]
 mod premarket_tests;
 #[cfg(test)]

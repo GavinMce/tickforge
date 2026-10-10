@@ -71,8 +71,8 @@ scripts/backtest-dev.sh sept-reversal 2026-09-08 2026-10-08     # pulls what is 
 ```
 
 The days come from `EQUS.MINI` `tbbo`, which the plan includes for the last twelve months (about 220 MB a day stored on the history
-volume, 60 Gi in all); a pull that would cost over a dollar a day is refused. The set run is the deployed `month.set`; a scenario is one
-configuration, so a changed set needs a new name. `--detach` starts it and returns; `--dry-run NAME FROM TO` prints the Job.
+volume, 60 Gi in all); a pull that would cost over a dollar a day is refused. The set run is the deployed `month.set`, or the file of the config that `--set FILE` names (`--set premarket.set` runs the premarket
+strategy's variants, which the live day does not read); a scenario is one configuration, so a changed set needs a new name. `--detach` starts it and returns; `--dry-run NAME FROM TO` prints the Job.
 Closed days and weekends are left out and said. The workspace is on `10.0.30.43:8787` over plain HTTP (the sign-in token crosses the
 LAN unencrypted) and on `https://tickforge.homelab.lan` through Traefik.
 

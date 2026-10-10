@@ -153,7 +153,7 @@ fn a_set_that_is_not_well_formed_is_refused_with_the_line() {
         ),
         (
             "balance 1000\nstrategy 1 a t99 universe=u\n",
-            "not a template (known: t04, t14, t25, t26)",
+            "not a template (known: t04, t14, t25, t26, t03)",
         ),
         (
             "balance 1000\nstrategy 1 a t04 universe=u wat=3\n",
@@ -331,7 +331,7 @@ fn the_definitions_have_their_universe_priority_and_parameters_and_each_variant_
     let t = templates();
     assert_eq!(
         t.iter().map(|x| x.0).collect::<Vec<_>>(),
-        ["t04", "t14", "t25", "t26"]
+        ["t04", "t14", "t25", "t26", "t03"]
     );
     assert!(t[0].1.contains("names=20") && t[1].1.contains("seed="));
     assert!(t[2].1.contains("spike_x10=30") && t[2].1.contains("max_pullback_permille=300"));
@@ -435,4 +435,40 @@ fn the_sets_the_cluster_is_deployed_with_read_and_build() {
     params.dedup();
     assert_eq!(params.len(), 10);
     assert!(defs.iter().all(|d| d.name.starts_with("pm-")));
+}
+
+#[test]
+fn a_set_can_ask_for_the_shared_bars_and_the_host_built_from_it_has_them() {
+    let with = |bars: &str| {
+        StrategySet::parse(&text(&format!(
+            "balance 100000\n{bars}strategy 1 a t04 universe=u.txt\n"
+        )))
+    };
+    // Without the line there are none, as before: a host built from an old set is the host it was.
+    let none = with("").unwrap();
+    assert_eq!(none.bars, None);
+    assert!(none.host_config(16).unwrap().bars.is_none());
+    // With it, aligned to the sessions, bounded as asked.
+    let set = with("bars 500\n").unwrap();
+    assert_eq!(set.bars, Some(500));
+    let b = set.host_config(16).unwrap().bars.unwrap();
+    assert_eq!(b.max_tracked, 500);
+    assert_eq!(b.mtf, tf_engine::MtfConfig::session());
+    // Its edges, and what is refused.
+    assert!(with("bars 1\n").is_ok() && with("bars 100000\n").is_ok());
+    for bad in [
+        "bars 0\n",
+        "bars 100001\n",
+        "bars\n",
+        "bars x\n",
+        "bars 5 6\n",
+        "bars 5\nbars 6\n",
+    ] {
+        let e = with(bad).unwrap_err().0;
+        assert!(e.contains("bars"), "{bad}: {e}");
+    }
+    // The configuration of a run says it, so a scenario made with bars is not the same configuration as one made without.
+    let (a, b) = (none.host_config(16).unwrap(), set.host_config(16).unwrap());
+    let fp = |h: &crate::HostConfig| format!("{:?}", h.bars);
+    assert_ne!(fp(&a), fp(&b));
 }

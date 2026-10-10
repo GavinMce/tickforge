@@ -35,6 +35,8 @@ use crate::strategy::{Ctx, Request, TimerId};
 pub const REASON_STOP: u16 = 0xE501;
 pub const REASON_TARGET: u16 = 0xE502;
 pub const REASON_TIME: u16 = 0xE503;
+/// An exit the strategy decided on its own signal (a bar closing the wrong side of a level), sent by [`ExitBook::exit_now`].
+pub const REASON_SIGNAL: u16 = 0xE504;
 
 /// Why an exit was sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +44,7 @@ pub enum ExitReason {
     Stop,
     Target,
     Time,
+    Signal,
 }
 
 impl ExitReason {
@@ -50,6 +53,7 @@ impl ExitReason {
             ExitReason::Stop => REASON_STOP,
             ExitReason::Target => REASON_TARGET,
             ExitReason::Time => REASON_TIME,
+            ExitReason::Signal => REASON_SIGNAL,
         }
     }
 }
@@ -116,6 +120,7 @@ pub struct ExitStats {
     pub stops: u64,
     pub targets: u64,
     pub time_exits: u64,
+    pub signal_exits: u64,
     /// Exits the strategy's own checks (`submit`) refused.
     pub refused: u64,
     /// Positions closed.
@@ -242,6 +247,16 @@ impl ExitBook {
         self.send(ctx, id, px, reason).then_some(reason)
     }
 
+    /// Close what is held in `id` now, on the strategy's own signal, with a collar around `px`: for an exit that is a decision
+    /// about a bar and not a price a trade can touch. Sent if nothing is out and the last exit was at least `retry_after` ago;
+    /// the same one-at-a-time and retry rules as every other exit. False if it was not sent.
+    pub fn exit_now(&mut self, ctx: &mut Ctx<'_>, id: InstrumentId, px: Px) -> bool {
+        match self.held.get(&id) {
+            Some(h) if h.working.is_none() => self.send(ctx, id, px, ExitReason::Signal),
+            _ => false,
+        }
+    }
+
     /// A timer fired. If it is the time exit of an instrument held, the closing order is sent at the last trade
     /// price (or, with no trade yet, the timer is set again for later). `None` for a timer that is not the book's.
     pub fn on_timer(
@@ -326,6 +341,7 @@ impl ExitBook {
                     ExitReason::Stop => self.stats.stops += 1,
                     ExitReason::Target => self.stats.targets += 1,
                     ExitReason::Time => self.stats.time_exits += 1,
+                    ExitReason::Signal => self.stats.signal_exits += 1,
                 }
                 true
             }

@@ -40,6 +40,7 @@ pub mod strategy;
 pub mod testing;
 pub mod trace;
 pub mod trend;
+pub mod vwap_reclaim;
 
 pub use closing_reversal::{ClosingReversal, ClosingReversalParams, ClosingReversalStats};
 pub use cross::{CrossRunner, CrossStrategy, Market, MemberView, Members};
@@ -67,6 +68,7 @@ pub use tf_engine::{MtfBars, MtfConfig, SymbolBars, TfBar, Timeframe};
 pub use tf_params::{ParamStore, Proposal, Target};
 pub use trace::{Trace, TraceError};
 pub use trend::{TrendLong, TrendParams, TrendStats};
+pub use vwap_reclaim::{VwapReclaim, VwapReclaimParams, VwapReclaimStats};
 
 #[cfg(test)]
 mod broker_tests;
@@ -102,3 +104,5 @@ mod tests;
 mod trace_tests;
 #[cfg(test)]
 mod trend_tests;
+#[cfg(test)]
+mod vwap_tests;

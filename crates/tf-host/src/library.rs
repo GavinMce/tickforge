@@ -8,7 +8,8 @@ use tf_strategy::closing_reversal::{ClosingReversalParams, ParamError};
 use tf_strategy::premarket_null::PremarketNullParams;
 use tf_strategy::premarket_pullback::PremarketPullbackParams;
 use tf_strategy::random_entries::RandomEntriesParams;
-use tf_strategy::{ClosingReversal, PremarketNull, PremarketPullback, RandomEntries};
+use tf_strategy::vwap_reclaim::VwapReclaimParams;
+use tf_strategy::{ClosingReversal, PremarketNull, PremarketPullback, RandomEntries, VwapReclaim};
 use tf_universe::Spec;
 
 use crate::def::{Route, StrategyDef};
@@ -100,6 +101,29 @@ pub fn premarket_null(
         route: Route::Sim,
         build: Box::new(move || {
             runner(PremarketNull::new(id, params).expect("the parameters were validated"))
+        }),
+    })
+}
+
+/// T03, the premarket VWAP reclaim ([`VwapReclaim`], ADR 0078): a gapping name on real volume that dips under its premarket VWAP and
+/// closes a one-minute bar back above it is bought, over `universe`, on the simulated broker. It reads the shared bars, so the set that
+/// runs it needs a `bars` line.
+pub fn vwap_reclaim(
+    id: u16,
+    name: &str,
+    universe: Spec,
+    params: VwapReclaimParams,
+) -> Result<StrategyDef, ParamError> {
+    params.validate()?;
+    Ok(StrategyDef {
+        id,
+        name: name.to_owned(),
+        params: params.render(),
+        universe,
+        priority: 1,
+        route: Route::Sim,
+        build: Box::new(move || {
+            runner(VwapReclaim::new(id, params).expect("the parameters were validated"))
         }),
     })
 }

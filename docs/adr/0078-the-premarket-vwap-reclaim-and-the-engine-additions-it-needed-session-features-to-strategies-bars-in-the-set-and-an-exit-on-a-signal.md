@@ -25,8 +25,11 @@ which the exit book (stop, target, time) could not send.
   `min_dollars` of premarket dollars traded and a last price `gap_bp` over the prior close, in the price band, becomes a candidate and its one-minute bars are
   claimed (bounded; a refusal is counted, and the claims are let go when a name is finished and at a new day). From `start_minutes` a closed bar whose low is
   `dip_bp` under the premarket VWAP is a dip; a *later* bar that closes strictly above it is the reclaim and the entry (`dollars` at the ask, a collar, a day
-  order, no protective order, a fair quote, room under `names`, not after `last_entry_minutes` before the open). Exits: the target `target_bp` over the VWAP at the
+  order, no protective order, a fair quote, an ask still under the target, room under `names`, not after `last_entry_minutes` before the open). Exits: the target `target_bp` over the VWAP at the
   entry, a bar closing `exit_below_bp` under the VWAP (the signal exit), a disaster stop `stop_permille` under the fill, and a time exit `flat_minutes` before the open.
+- **A reclaim that has already run past the target is not bought.** The first run over 1 to 8 October (scenario pm-vwap1) held most T03 trades under six seconds and
+  sold them by the target at a loss, 1 winner in 16: a bar that closes more than the target margin over the VWAP has an ask over the target, so the exit fires on the first trade,
+  below the entry. The research rule never meant that; such a reclaim is dropped and counted missed (`no_room_to_target`), and the tests no longer enter above the target.
 - **The regular-session variants (first touch, wick) are not built.** They need the in-play baseline columns of E19-S52, which the daily snapshots do not carry yet.
   The strategy is the premarket variant and says so; the variants are the rest of E19-S17.
 

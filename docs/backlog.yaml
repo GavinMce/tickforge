@@ -1970,9 +1970,9 @@ epics:
         progress: >-
           ADR 0078. Done: the premarket variant (docs/research 8a): `VwapReclaim`, template `t03`, over the shared one-minute bars and the premarket VWAP Tier 0 keeps;
           candidates by premarket dollars and gap, a dip under the VWAP and a later bar closing above it, exits at a target over the VWAP, on a bar closing under it,
-          a disaster stop and before the open. 28 tests from scripted events with the VWAP held exact to the raw unit for the boundaries, and the strategy through the host
-          over a scripted premarket tape (with the bars on it buys and sells before the open; without them it buys nothing). Mutation run: 161 mutants, 54 compile errors,
-          100 killed, 5 survivors that are equivalent or unreachable (an event exactly at 04:00 or at the open, a price of exactly zero). Not done: the regular-session first-touch and wick variants
+          a disaster stop and before the open; a reclaim whose ask is already over the target is dropped (found on the first real run: 1 winner in 16, trades sold by target within seconds below the entry). 29 tests from scripted events with the VWAP held exact to the raw unit for the boundaries, and the strategy through the host
+          over a scripted premarket tape (with the bars on it buys and sells before the open; without them it buys nothing). Mutation run: 163 mutants, 54 compile errors,
+          104 killed, 5 survivors that are equivalent or unreachable (an event exactly at 04:00 or at the open, a price of exactly zero). Not done: the regular-session first-touch and wick variants
           (they need the in-play baseline of E19-S52) and the run over stored days.
         deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S48, E19-S49, E19-S52]
         ac:

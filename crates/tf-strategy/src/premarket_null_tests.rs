@@ -524,3 +524,58 @@ fn recording_the_draw_changes_nothing_it_decides() {
     assert_eq!(tb[1].value("result"), Some("entered"));
     assert_eq!(tb[1].value("pool"), Some("12"));
 }
+
+#[test]
+fn a_spread_cap_of_nothing_means_no_cap_and_a_draw_that_buys_no_share_is_skipped() {
+    // A spread of 10% with the cap off is bought.
+    let wide = |cap: u32| {
+        let p = p_with(|p| {
+            p.names = 1;
+            p.window_start_minutes = 29;
+            p.window_end_minutes = 29;
+            p.spread_cap_bp = cap;
+        });
+        let mut rig = Rig::new(p, 1);
+        rig.active_to(&[0], 28);
+        rig.quote(0, 28, 59, 950, 1050);
+        rig.tick(29, 1);
+        rig.out().len()
+    };
+    assert_eq!((wide(0), wide(100)), (1, 0));
+    // $5 does not buy a share at $10.01: skipped, with a trace that says why.
+    let p = p_with(|p| {
+        p.names = 1;
+        p.dollars = 5;
+        p.window_start_minutes = 28;
+        p.window_end_minutes = 28;
+    });
+    let mut rig = Rig::build(p, 1, day(1), true);
+    rig.active_to(&[0], 29);
+    assert!(rig.out().is_empty());
+    assert_eq!((rig.stats().entries, rig.stats().skipped), (0, 1));
+    let traces = rig.runner.drain_traces();
+    assert_eq!(traces[1].value("result"), Some("no_share"));
+}
+
+#[test]
+fn a_first_stop_tighter_than_the_trail_is_the_one_that_holds() {
+    // 1% under the fill of $10.01 is $9.91; the trail at 5% under the high would be $9.51.
+    let p = p_with(|p| {
+        p.names = 1;
+        p.window_start_minutes = 28;
+        p.window_end_minutes = 28;
+        p.stop_permille = 10;
+        p.trail_permille = 50;
+    });
+    let mut rig = Rig::new(p, 1);
+    rig.active_to(&[0], 28);
+    let entry = rig.out().remove(0);
+    rig.update(fill(&entry, entry.qty, 1001, rig.at(28, 2)));
+    rig.trade(0, 28, 10, 995, 100);
+    rig.tick(28, 20);
+    assert!(rig.out().is_empty());
+    rig.trade(0, 28, 30, 990, 100);
+    let out = rig.out();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].reason, REASON_STOP);
+}

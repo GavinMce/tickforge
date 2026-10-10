@@ -62,6 +62,8 @@ struct Holder {
     /// For [`Extra::Raise`]: the stops to try to raise to, last first, and what came of each.
     raises: Vec<i64>,
     raised: Vec<bool>,
+    /// For [`Extra::Signal`]: what each try to exit on a signal came to.
+    signalled: Vec<bool>,
 }
 
 /// What else a test makes the strategy do with its book.
@@ -76,6 +78,8 @@ enum Extra {
     StrayTimer,
     /// At each review while the position is held, try to raise the stop to the next of `raises`.
     Raise,
+    /// At each review while the position is held, exit on a signal at the last price.
+    Signal,
 }
 
 impl Holder {
@@ -91,6 +95,7 @@ impl Holder {
             extra: Extra::Nothing,
             raises: Vec::new(),
             raised: Vec::new(),
+            signalled: Vec::new(),
         }
     }
 
@@ -112,6 +117,13 @@ impl CrossStrategy for Holder {
     fn on_review(&mut self, ctx: &mut Ctx<'_>, view: &MemberView<'_>) {
         if self.extra == Extra::ArmZero {
             self.book.arm(ctx, 5, true, 0, self.plan);
+        }
+        if self.extra == Extra::Signal && self.book.is_held(0) {
+            if let Some(last) = view.state(0).and_then(|s| s.last_px) {
+                // Twice in one review: the second finds the first still out.
+                self.signalled.push(self.book.exit_now(ctx, 0, last));
+                self.signalled.push(self.book.exit_now(ctx, 0, last));
+            }
         }
         if self.extra == Extra::Raise && self.book.is_held(0) {
             if let Some(c) = self.raises.pop() {
@@ -719,4 +731,41 @@ fn a_longs_stop_can_be_raised_and_never_lowered_and_a_shorts_is_not_moved() {
         1,
         "the original stop of 10.50 still holds"
     );
+}
+
+#[test]
+fn an_exit_on_the_strategys_own_signal_is_sent_once_at_a_time_with_its_own_reason() {
+    use crate::exits::REASON_SIGNAL;
+    let mut r = Rig::new(Holder::new(true, ExitPlan::new()).with(Extra::Signal));
+    enter(&mut r, true);
+    // The first review that finds the position held sends the exit, at the last price with the plan's collar.
+    r.feed(&quote(4, 999, 1000, 500));
+    assert_eq!(
+        r.h().signalled,
+        [true, false],
+        "the second try found the first still out"
+    );
+    let c = r.closes();
+    assert_eq!(c.len(), 1);
+    assert_eq!(
+        (c[0].side, c[0].qty, c[0].reason, c[0].tif),
+        (Side::Sell, 100, REASON_SIGNAL, Tif::Day)
+    );
+    // It fills: the position is closed, forgotten, and counted as a signal exit; nothing more is tried.
+    r.feed(&quote(5, 999, 1000, 500));
+    assert_eq!(r.closes().len(), 1, "no second order went");
+    assert_eq!(r.sim.position(0), 0);
+    assert!(!r.h().book.is_held(0));
+    let tries = r.h().signalled.len();
+    r.feed(&quote(7, 999, 1000, 500));
+    assert_eq!(r.h().signalled.len(), tries);
+    let s = r.h().book.stats();
+    assert_eq!(
+        (s.signal_exits, s.stops, s.time_exits, s.closed),
+        (1, 0, 0, 1)
+    );
+    // A name that is not held cannot be exited.
+    let mut r = Rig::new(Holder::new(true, ExitPlan::new()).with(Extra::Signal));
+    r.feed(&quote(1, 999, 1000, 500));
+    assert!(r.h().signalled.is_empty());
 }

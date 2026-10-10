@@ -22,17 +22,20 @@ use std::path::Path;
 
 use tf_budget::{Group, LossLimits, Strategy as BudgetStrategy, Tree};
 use tf_core::Nanos;
-use tf_engine::{PromoterConfig, ScannerConfig};
+use tf_engine::{MtfConfig, PromoterConfig, ScannerConfig};
 use tf_risk::{Budgets, Limits};
 use tf_strategy::closing_reversal::ClosingReversalParams;
 use tf_strategy::premarket_null::PremarketNullParams;
 use tf_strategy::premarket_pullback::PremarketPullbackParams;
 use tf_strategy::random_entries::RandomEntriesParams;
+use tf_strategy::vwap_reclaim::VwapReclaimParams;
 use tf_universe::Spec;
 
 use crate::def::{Route, StrategyDef};
-use crate::host::HostConfig;
-use crate::library::{closing_reversal, premarket_null, premarket_pullback, random_entries};
+use crate::host::{BarsConfig, HostConfig};
+use crate::library::{
+    closing_reversal, premarket_null, premarket_pullback, random_entries, vwap_reclaim,
+};
 
 const HEADER: &str = "strategy set v1";
 const DOLLAR: u128 = 1_000_000_000;
@@ -54,6 +57,9 @@ fn err<T>(line: usize, why: impl std::fmt::Display) -> Result<T, SetError> {
     Err(SetError(format!("line {line}: {why}")))
 }
 
+/// The most symbols a set may ask the shared bars to track (about 40 KB each).
+const MAX_BARS: usize = 100_000;
+
 /// The templates a strategy line can name, with their parameters (and defaults) as text.
 pub fn templates() -> Vec<(&'static str, String)> {
     vec![
@@ -61,6 +67,7 @@ pub fn templates() -> Vec<(&'static str, String)> {
         ("t14", RandomEntriesParams::default().render()),
         ("t25", PremarketPullbackParams::default().render()),
         ("t26", PremarketNullParams::default().render()),
+        ("t03", VwapReclaimParams::default().render()),
     ]
 }
 
@@ -121,6 +128,8 @@ pub struct StrategySet {
     pub loss_soft: u32,
     pub loss_hard: u32,
     pub limits: SetLimits,
+    /// The most symbols the shared bars (one minute to one day, aligned to the sessions) may track, if the set asks for them (E19-S49).
+    pub bars: Option<usize>,
     pub strategies: Vec<SetStrategy>,
 }
 
@@ -149,6 +158,7 @@ impl StrategySet {
         let mut balance: Option<u64> = None;
         let (mut soft, mut hard) = (300u32, 600u32);
         let mut limits: Option<SetLimits> = None;
+        let mut bars: Option<usize> = None;
         let mut strategies: Vec<SetStrategy> = Vec::new();
         for (n, line) in lines {
             let w: Vec<&str> = line.split_whitespace().collect();
@@ -183,6 +193,21 @@ impl StrategySet {
                     }
                     limits = Some(parse_limits(n, &w[1..], balance)?);
                 }
+                "bars" => {
+                    if bars.is_some() {
+                        return err(n, "`bars` is given once");
+                    }
+                    bars = Some(
+                        w.get(1)
+                            .filter(|_| w.len() == 2)
+                            .and_then(|x| x.parse::<usize>().ok())
+                            .filter(|n| (1..=MAX_BARS).contains(n))
+                            .map_or_else(
+                                || err(n, format!("`bars SYMBOLS`: the most symbols tracked, from 1 to {MAX_BARS}")),
+                                Ok,
+                            )?,
+                    );
+                }
                 "strategy" => strategies.push(parse_strategy(n, &w[1..])?),
                 other => return err(n, format!("`{other}` is not a line of a strategy set")),
             }
@@ -213,6 +238,7 @@ impl StrategySet {
             loss_soft: soft,
             loss_hard: hard,
             limits,
+            bars,
             strategies,
         };
         set.tree()?;
@@ -303,7 +329,10 @@ impl StrategySet {
             sim: crate::research::CostModel::published().sim(),
             min_certified_events: 1_000,
             start_ts: 0,
-            bars: None,
+            bars: self.bars.map(|max_tracked| BarsConfig {
+                mtf: MtfConfig::session(),
+                max_tracked,
+            }),
             day: None,
         })
     }
@@ -347,6 +376,13 @@ impl StrategySet {
                         &s.name,
                         universe,
                         PremarketNullParams::parse(&s.params).map_err(|e| SetError(e.0))?,
+                    )
+                    .map_err(|e| SetError(e.0))?,
+                    "t03" => vwap_reclaim(
+                        s.id,
+                        &s.name,
+                        universe,
+                        VwapReclaimParams::parse(&s.params).map_err(|e| SetError(e.0))?,
                     )
                     .map_err(|e| SetError(e.0))?,
                     other => return Err(SetError(format!("`{other}` is not a template"))),
@@ -483,6 +519,7 @@ fn parse_strategy(n: usize, w: &[&str]) -> Result<SetStrategy, SetError> {
         "t04" => ClosingReversalParams::parse(&params).map(|_| ()),
         "t25" => PremarketPullbackParams::parse(&params).map(|_| ()),
         "t26" => PremarketNullParams::parse(&params).map(|_| ()),
+        "t03" => VwapReclaimParams::parse(&params).map(|_| ()),
         _ => RandomEntriesParams::parse(&params).map(|_| ()),
     };
     check.map_err(|e| SetError(format!("line {n}: {}", e.0)))?;

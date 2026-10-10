@@ -137,6 +137,11 @@ Build order: S01 to S06; then the harness (S07, S13, S14) with T04 and T14, the 
 baseline, as its first customers; then T01 and T02, T05, T09, T03, T06, T07, T08, T10; then S08, S09 and S10 and what
 they open. S11 and S12 wait for a reason.
 
+## Running the library at once
+
+[engine-for-the-library.md](engine-for-the-library.md) says what each strategy needs from the engine, what is missing (E19-S46 to
+S57), and what running them together costs, measured on a real day.
+
 ## The five things that matter most
 
 1. **A month of live data cannot validate an edge.** The best-documented idea here (opening range breakout on

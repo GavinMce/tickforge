@@ -194,6 +194,8 @@ pub struct SimBroker {
     books: Vec<Book>,
     /// Signed shares per instrument (negative = short).
     pos: Vec<i64>,
+    /// The instruments with a short position, so that borrow accrues over them and not over every slot at every event.
+    shorts: std::collections::BTreeSet<usize>,
     /// Sum of shares x price x bps x ns, divided by [`YEAR_NS`] x 10,000 on read.
     borrow_num: Vec<u128>,
     last_accrue: Option<Nanos>,
@@ -222,6 +224,7 @@ impl SimBroker {
             cfg,
             books: vec![Book::default(); instruments],
             pos: vec![0; instruments],
+            shorts: std::collections::BTreeSet::new(),
             borrow_num: vec![0; instruments],
             last_accrue: None,
             live: Vec::new(),
@@ -525,11 +528,14 @@ impl SimBroker {
             reference - px.raw()
         };
         self.accrue(ts);
-        self.pos[intent.instrument as usize] += if intent.side.is_buy() {
-            i64::from(qty)
-        } else {
-            -i64::from(qty)
-        };
+        self.move_pos(
+            intent.instrument as usize,
+            if intent.side.is_buy() {
+                i64::from(qty)
+            } else {
+                -i64::from(qty)
+            },
+        );
         self.fills.push(Fill {
             order: o.id,
             intent: intent.id,
@@ -653,11 +659,14 @@ impl SimBroker {
         let px = Px::from_raw(best);
         self.accrue(ts);
         let side = if long { Side::Sell } else { Side::Buy };
-        self.pos[l.intent.instrument as usize] += if long {
-            -i64::from(qty)
-        } else {
-            i64::from(qty)
-        };
+        self.move_pos(
+            l.intent.instrument as usize,
+            if long {
+                -i64::from(qty)
+            } else {
+                i64::from(qty)
+            },
+        );
         self.legs[i].exited += qty;
         self.fills.push(Fill {
             order: l.order,
@@ -682,6 +691,16 @@ impl SimBroker {
     }
 
     /// Charge borrow on short positions for the time since the last call.
+    /// Change the position in `i` by `delta` shares, keeping the set of short positions.
+    fn move_pos(&mut self, i: usize, delta: i64) {
+        self.pos[i] += delta;
+        if self.pos[i] < 0 {
+            self.shorts.insert(i);
+        } else {
+            self.shorts.remove(&i);
+        }
+    }
+
     fn accrue(&mut self, ts: Nanos) {
         let Some(last) = self.last_accrue else {
             self.last_accrue = Some(ts);
@@ -692,7 +711,8 @@ impl SimBroker {
         }
         let dt = u128::from(ts - last);
         let bps = u128::from(self.cfg.borrow_bps_per_year);
-        for (i, &p) in self.pos.iter().enumerate() {
+        for &i in &self.shorts {
+            let p = self.pos[i];
             // The broker charges nothing on an easy-to-borrow name (when its rules are in force).
             let free = self
                 .borrow

@@ -2486,3 +2486,24 @@ epics:
           - "Exits are the strategy's own (the broker takes no stop in the premarket): a stop under the pullback low raised to trail the high since the entry, and a time exit before the open; a position is flat before the regular session"
           - "Every decision has a test from scripted events, a mutation run on the decision code leaves no unexplained survivor, and the strategy runs through the host over a scripted premarket tape"
           - "Run over stored days of EQUS.MINI and XNAS.BASIC premarket against the null strategy, with the number of setups said (about one a day on EQUS.MINI, about seven on XNAS.BASIC on 8 October 2026)"
+
+      - id: E19-S45
+        jira: TIC-200
+        title: "T26 null of the premarket strategy: active names at random times with the same exits"
+        status: done
+        evidence: >-
+          ADR 0077. `PremarketNull` (template `t26`): per day it draws `names` entry times uniform between two minutes of the premarket
+          from the seed and the day; at each it buys one name drawn at random from those that have traded the dollars and trades so far,
+          in the price band, with a fair quote and not halted (none: a skipped time, counted); one trade a name; a collar at the ask, no
+          protective order; the exits of T25 (a stop under the fill raised to trail the high since the entry, a time exit before the open).
+          Tests: the draw (inside the window, distinct names, a seed repeats and another seed and another day draw again, the window as one
+          instant), who may be bought (the dollar and trade floors and the price band at their edges, the spread cap at its edge with 0 as no
+          cap, locked, crossed and missing quotes, a halt, no share), the stop, the trail and the time exit, the parameters, and recording
+          the draw changing nothing; and through the host over the scripted premarket tape (bought at the $10.66 ask at 04:26, sold before
+          the open). Mutation run: 104 mutants, 39 compile errors, 62 killed, 3 survivors that are equivalent or unreachable (a price of
+          exactly zero, the trail's review period, a timer number past the last draw). `premarket.set` runs six seeds beside the four
+          variants of T25.
+        deps: [E19-S44, E19-S28]
+        ac:
+          - "A null for the premarket strategy draws active names at random times in the premarket and exits as the strategy does, so its mean after costs is what the exits and the spread alone earn"
+          - "Every decision has a test from scripted events, a mutation run on its code leaves no unexplained survivor, and it runs through the host over a scripted premarket tape"

@@ -93,3 +93,4 @@ How:
 | [0074](0074-a-stored-days-instruments-are-named-from-the-vendors-symbology-kept-beside-the-days-file.md) | A stored day's instruments are named from the vendor's symbology, kept beside the day's file | Accepted |
 | [0075](0075-a-range-of-days-is-run-by-one-job-that-pulls-what-is-missing-and-the-workspace-has-a-fixed-lan-address.md) | A range of days is run by one job that pulls what is missing, and the workspace has a fixed LAN address | Accepted |
 | [0076](0076-a-premarket-volume-spike-and-the-first-small-pullback-in-its-run-is-bought-long-with-exits-the-strategy-holds.md) | A premarket volume spike, and the first small pullback in its run, is bought long with exits the strategy holds | Accepted |
+| [0077](0077-the-null-of-the-premarket-strategy-buys-active-names-at-random-times-with-the-same-exits.md) | The null of the premarket strategy buys active names at random times with the same exits | Accepted |

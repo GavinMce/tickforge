@@ -4,6 +4,8 @@ strategy set v1
 # names bought at random times with the same exits, which is what the spike and the pullback have to beat.
 balance 100000
 loss 300 600
+# The shared one-minute bars the VWAP reclaim reads, for at most this many names (about 40 KB each).
+bars 500
 # The defaults: a window of five minutes at three times the premarket average, a pullback of ten to thirty percent of the run.
 strategy 1 pm-default t25 universe=universe-premarket.spec
 # A bigger spike is wanted.
@@ -20,3 +22,7 @@ strategy 7 pm-null-3 t26 universe=universe-premarket.spec seed=3
 strategy 8 pm-null-4 t26 universe=universe-premarket.spec seed=4
 strategy 9 pm-null-5 t26 universe=universe-premarket.spec seed=5
 strategy 10 pm-null-6 t26 universe=universe-premarket.spec seed=6
+# The premarket VWAP reclaim (T03, ADR 0078): a gapping name on volume that dips under its premarket VWAP and closes a minute bar back above it.
+strategy 11 vwap-default t03 universe=universe-premarket.spec
+# The same with a deeper dip required, and a smaller gap and volume (the defaults ask for $500,000 and 3 percent by 08:00).
+strategy 12 vwap-deep t03 universe=universe-premarket.spec dip_bp=200 min_dollars=250000

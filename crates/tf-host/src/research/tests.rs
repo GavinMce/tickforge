@@ -1398,6 +1398,102 @@ fn the_premarket_null_runs_through_the_host_buys_an_active_name_at_its_time_and_
     let _ = fs::remove_dir_all(&root);
 }
 
+/// S00 gaps up 3.5 percent on $20.00 and trades at $20.70 (a premarket VWAP of exactly that), dips to $20.40 in minute 2 (a pair of
+/// shares at 20.40 and 21.00 keeps the VWAP where it is), closes minute 3 at $20.80, and then trades a share a minute at $20.80 to the open.
+fn vwap_tape(open: u64) -> Vec<u8> {
+    use crate::replay_tests::{dbn_script, quote_rec, trade_rec};
+    const ID: u32 = 20_000;
+    let pre = open - 330 * 60 * SEC;
+    let px = |c: i64| c * 10_000_000;
+    let mut recs: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut seq = 0u32;
+    let mut at = |recs: &mut Vec<(u64, Vec<u8>)>,
+                  min: u64,
+                  sec: u64,
+                  bid: i64,
+                  ask: i64,
+                  trade: Option<(i64, u32)>| {
+        let ts = pre + (min * 60 + sec) * SEC;
+        recs.push((ts, dbn_bytes(&quote_rec(ID, ts, px(bid), px(ask)))));
+        if let Some((c, size)) = trade {
+            seq += 1;
+            recs.push((
+                ts + 1_000_000,
+                dbn_bytes(&trade_rec(ID, ts + 1_000_000, px(c), size, seq)),
+            ));
+        }
+    };
+    let mut last = (2069, 2071);
+    for step in 0..(335 * 10) {
+        let (min, sec) = (step / 10, (step % 10) * 6);
+        let print = match (min, sec) {
+            (0, 12) | (0, 24) => Some((2070, 1000)),
+            (1, 12) => Some((2070, 1)),
+            (2, 12) => Some((2040, 1)),
+            (2, 24) => Some((2100, 1)),
+            (3, 12) => Some((2080, 1)),
+            (m, 6) if m >= 4 => Some((2080, 1)),
+            _ => None,
+        };
+        if let Some((c, _)) = print {
+            last = (c - 1, c + 1);
+        }
+        if !(min < 8 || (322..=327).contains(&min)) && sec != 0 && sec != 6 {
+            continue;
+        }
+        at(&mut recs, min, sec, last.0, last.1, print);
+    }
+    dbn_script(pre, &[(ID, "S00")], recs)
+}
+
+#[test]
+fn the_vwap_reclaim_runs_through_the_host_with_shared_bars_buys_the_reclaim_and_is_flat_before_the_open()
+ {
+    use crate::host::BarsConfig;
+    use crate::library::vwap_reclaim;
+    use tf_strategy::vwap_reclaim::VwapReclaimParams;
+    let open = OPENS[0].1 * SEC;
+    let root = scratch("vwap-tape");
+    write_capture(&root, &vwap_tape(open));
+    let files: Vec<PathBuf> = tf_capture::list(&root)
+        .unwrap()
+        .iter()
+        .map(|e| root.join(&e.file))
+        .collect();
+    let params = VwapReclaimParams {
+        start_minutes: 1,
+        min_dollars: 20_000,
+        ..VwapReclaimParams::default()
+    };
+    let defs = [vwap_reclaim(1, "vwap", tf_universe::Spec::parse(LOW).unwrap(), params).unwrap()];
+    let cost = CostModel::published();
+    let input = DayInput {
+        files,
+        snapshot: snapshot(),
+    };
+    // Without the shared bars the strategy has nothing to read: no trade, and the day says so in the strategy's counts.
+    let none = run_day("2026-05-01", &input, &setup(&host_cfg(), &cost, &defs)).unwrap();
+    assert!(none.trips.is_empty());
+    // With them: bought at the ask of the quote at the bar's close, sold by the time exit against the bid.
+    let host = HostConfig {
+        bars: Some(BarsConfig {
+            mtf: tf_engine::MtfConfig::session(),
+            max_tracked: 8,
+        }),
+        ..host_cfg()
+    };
+    let out = run_day("2026-05-01", &input, &setup(&host, &cost, &defs)).unwrap();
+    assert_eq!(out.trips.len(), 1, "{:?}", out.anomalies);
+    let t = &out.trips[0];
+    assert_eq!((t.symbol.as_str(), t.strategy, t.long), ("S00", 1, true));
+    assert_eq!((t.qty, t.entry_px, t.entry_reason), (48, 20_810_000_000, 1));
+    assert_eq!(t.exit_reason, 0xE503);
+    assert!(t.exit_ts >= open - 5 * 60 * SEC && t.exit_ts < open && !t.open_at_end);
+    assert_eq!(t.exit_px, 20_790_000_000);
+    assert_eq!(out.rejected + out.refused, 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn data_that_cannot_be_read_is_an_error_not_a_shorter_day() {
     let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());

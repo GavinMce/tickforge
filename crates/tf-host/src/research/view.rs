@@ -123,6 +123,7 @@ pub(crate) fn reason_text(code: u16) -> String {
         0xE501 => "stop".to_owned(),
         0xE502 => "target".to_owned(),
         0xE503 => "time exit".to_owned(),
+        0xE504 => "signal exit".to_owned(),
         OPEN_AT_END => "still open at the end of the day".to_owned(),
         c => format!("strategy code {c}"),
     }

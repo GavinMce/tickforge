@@ -172,6 +172,16 @@ impl<'a> MemberView<'a> {
             .flatten()
     }
 
+    /// What Tier 0 keeps of a member by session (E19-S02): the premarket's and the regular session's high, low, volume and VWAP, the
+    /// open (the first regular-session trade), the first minute's and first five minutes' volume and the 5 and 15 minute ranges.
+    /// `None` for a symbol that is not a member, or when the host has not told Tier 0 the day.
+    pub fn session(&self, id: InstrumentId) -> Option<&'a tf_engine::SessionState> {
+        self.members
+            .contains(id)
+            .then(|| self.market.tier0.session(id))
+            .flatten()
+    }
+
     /// What the reference snapshot says about a member: the prior close, average volume and, from one-minute
     /// history, the previous session's high, low and close, the ATR, the volume baselines and the hourly EMA state
     /// (`None` for a symbol that is not a member; a column the snapshot lacks reads as unknown in it).

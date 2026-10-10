@@ -176,6 +176,75 @@ fn the_view_shows_only_members() {
     assert_eq!(v.top_by(LiveFeature::Trades, 5, true), [(2, 0), (0, 3)]);
 }
 
+#[test]
+fn the_view_gives_a_members_session_state_and_nothing_for_others_and_nothing_is_kept_before_a_day_is_set()
+ {
+    use tf_calendar::{Calendar, Date};
+    let day = Calendar::us_equities()
+        .times(Date::new(2026, 5, 1).unwrap())
+        .unwrap()
+        .unwrap();
+    let mut tier0 = Tier0::new(3);
+    let refs = vec![RefInfo::default(); 3];
+    let members = Members::from_ids([0, 2]);
+    let sized = |id: u32, ts: u64, px: i64, size: u32| match trade(id, ts, px) {
+        Event::Trade(mut t) => {
+            t.size = size;
+            Event::Trade(t)
+        }
+        e => e,
+    };
+    // Before the day is set nothing is kept.
+    tier0.on_event(&sized(0, day.premarket + SEC, 10 * D, 100));
+    {
+        let v = MemberView::new(
+            Market {
+                tier0: &tier0,
+                refs: &refs,
+            },
+            &members,
+        );
+        let s = v.session(0).expect("a member's slot exists");
+        assert_eq!((s.premarket.volume, s.regular.volume, s.open), (0, 0, None));
+    }
+    tier0.set_day(day);
+    // Premarket: 100 at $10 and 300 at $12; the open: 200 at $11, then 100 at $11.50 a minute in.
+    for ev in [
+        sized(0, day.premarket + 10 * SEC, 10 * D, 100),
+        sized(0, day.premarket + 20 * SEC, 12 * D, 300),
+        sized(0, day.open + SEC, 11 * D, 200),
+        sized(0, day.open + 70 * SEC, 23 * D / 2, 100),
+        sized(1, day.premarket + 10 * SEC, 5 * D, 50),
+    ] {
+        tier0.on_event(&ev);
+    }
+    let v = MemberView::new(
+        Market {
+            tier0: &tier0,
+            refs: &refs,
+        },
+        &members,
+    );
+    let s = v.session(0).expect("a member that traded");
+    assert_eq!(
+        (s.premarket.high, s.premarket.low, s.premarket.volume),
+        (Some(Px::from_raw(12 * D)), Some(Px::from_raw(10 * D)), 400)
+    );
+    // The premarket VWAP is (100 x 10 + 300 x 12) / 400 = 11.50 and the regular one starts at the open: (200 x 11 + 100 x 11.5) / 300.
+    assert_eq!(s.premarket.vwap(), Some(Px::from_raw(23 * D / 2)));
+    assert_eq!(s.regular.volume, 300);
+    assert_eq!(s.regular.vwap(), Some(Px::from_raw(11_166_666_666)));
+    assert_eq!(s.open, Some((Px::from_raw(11 * D), day.open + SEC)));
+    assert_eq!(s.first_minute_volume, 200);
+    assert_eq!(s.first_5m_volume, 300);
+    // A non-member, and a member that has not traded, give nothing useful.
+    assert!(
+        v.session(1).is_none(),
+        "a non-member's session is not visible"
+    );
+    assert_eq!(v.session(2).unwrap().regular.volume, 0);
+}
+
 /// Sells one share of its top-1 by trades at each review; sets a timer; records what it was shown.
 struct Probe {
     id: u16,

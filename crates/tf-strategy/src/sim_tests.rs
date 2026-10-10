@@ -359,6 +359,43 @@ fn borrow_cost_accrues_on_shorts_only_for_as_long_as_they_are_held() {
 }
 
 #[test]
+fn borrow_stops_when_a_buy_takes_a_short_through_flat_and_starts_again_when_it_goes_short_again() {
+    // The broker keeps the set of names held short, so a position that crosses zero must leave it and come back.
+    let mut b = broker(0, 1000);
+    b.on_event(&quote(0, 1000, 1001, 5000, 5000));
+    b.on_event(&trade(0, 1000));
+    let short = |b: &mut SimBroker, seq, ts, side, qty, px| {
+        b.submit(&intent(
+            seq,
+            ts,
+            side,
+            qty,
+            Pricing::Limit(Px::from_cents(px)),
+            Tif::Ioc,
+        ));
+    };
+    short(&mut b, 0, 0, Side::SellShort, 1000, 1000);
+    b.on_event(&trade(1, 1000));
+    assert_eq!(b.position(0), -1000);
+    b.on_event(&trade(DAY, 1000));
+    let one_day = b.borrow_fee(0);
+    assert_eq!(one_day, 2_739_726_028);
+    // Buy 1,500: long 500, no longer short. Time passes and the fee does not grow.
+    short(&mut b, 1, DAY, Side::Buy, 1500, 1001);
+    b.on_event(&trade(DAY + 1, 1000));
+    assert_eq!(b.position(0), 500);
+    let after_flip = b.borrow_fee(0);
+    b.on_event(&trade(5 * DAY, 1000));
+    assert_eq!(b.borrow_fee(0), after_flip);
+    // Sell 1,000 (500 long and 500 short): short again, and the fee grows again.
+    short(&mut b, 2, 5 * DAY, Side::SellShort, 1000, 1000);
+    b.on_event(&trade(5 * DAY + 1, 1000));
+    assert_eq!(b.position(0), -500);
+    b.on_event(&trade(6 * DAY, 1000));
+    assert!(b.borrow_fee(0) > after_flip);
+}
+
+#[test]
 fn longs_pay_no_borrow_and_zero_rate_pays_none() {
     let mut b = broker(0, 1000);
     b.on_event(&quote(0, 1000, 1001, 5000, 5000));

@@ -3,7 +3,8 @@
 #
 #   scripts/prepare-day.sh [YYYY-MM-DD]        # the day to prepare, default today in New York
 #
-#   1. the reference: Databento daily bars up to the day before, and one snapshot for the day (`tf research snapshots`)
+#   1. the reference: Databento daily bars up to the day before, the one-minute sessions of the Nasdaq feed (the days not kept yet: one
+#      a morning, the 60 before it the first time; scripts/prepare_minutes.sh), and one snapshot for the day (`tf research snapshots`)
 #   2. the certificates, if they are missing or the strategy set (or a universe beside it) has changed since they were made: a
 #      stored day of the dataset to certify on (the last one stored, or the last session before the day, pulled now, with the
 #      names of its instruments from the vendor's symbology) and `tf live certify` over it
@@ -17,6 +18,7 @@ SET=${SET:-/config/month.set}
 STORE=${STORE:-/data/history/store}
 REF=${REF:-/data/live/ref}
 SNAPS=${SNAPS:-/data/live/snapshots}
+MINUTES=${MINUTES:-/data/history/minutes}
 CERTS=${CERTS:-/data/live/certificates.txt}
 DATASET=${DATASET:-EQUS.MINI}
 SCHEMA=${SCHEMA:-tbbo}
@@ -35,9 +37,17 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # 1. The reference, as of the last session before the day.
 start=$(date -d "$day - 75 days" +%F)
 "$here/fetch_reference.sh" "$REF" "$start" "$day"
+# The minute sessions. If they cannot be had the snapshot is made without the columns that come from them, said here and not
+# stopped on: the strategies that need those columns trade nothing today, the others are not held back.
+minutes=()
+if "$here/prepare_minutes.sh" "$MINUTES" "$(date -d "$day - ${MINUTES_BACK_DAYS:-90} days" +%F)" "$(date -d "$day - 1 day" +%F)"; then
+  minutes=(--minutes-dir "$MINUTES")
+else
+  echo "WARNING: the minute sessions could not all be had: today's snapshot has no minute-history columns" >&2
+fi
 assets=()
 [ -s "$REF/assets.json" ] && assets=(--assets "$REF/assets.json")
-tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$day" --to "$day" "${assets[@]}" --out "$SNAPS"
+tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$day" --to "$day" "${assets[@]}" "${minutes[@]}" --out "$SNAPS"
 if [ ! -f "$SNAPS/$day.snapshot" ]; then
   echo "no session on $day (a market holiday): nothing more to prepare"
   exit 0
@@ -68,7 +78,7 @@ done
 [ -n "$tape" ] || { echo "no stored or pullable day of $DATASET $SCHEMA in the week before $day to certify on" >&2; exit 1; }
 echo "certifying on $tape"
 "$here/store_names.sh" "$STORE" "$DATASET" "$SCHEMA" "$tape"
-tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$tape" --to "$tape" "${assets[@]}" --out "$SNAPS"
+tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$tape" --to "$tape" "${assets[@]}" "${minutes[@]}" --out "$SNAPS"
 tf history index "$STORE" --dataset "$DATASET" --schema "$SCHEMA"
 tf live certify --set "$SET" --store "$STORE" --dataset "$DATASET" --schema "$SCHEMA" --date "$tape" \
   --snapshots "$SNAPS" --out "$CERTS.new"

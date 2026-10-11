@@ -6,7 +6,9 @@
 #
 #   1. each weekday of the range that is not stored is pulled (the cost of each pull is asked first and refused above $MAX_COST),
 #      and given the names of its instruments from the vendor's symbology
-#   2. the reference (daily bars from 75 days before the range) and one snapshot per trading day, as of the session before it
+#   2. the reference (daily bars from 75 days before the range), the one-minute sessions of the Nasdaq feed for the 90 days before the
+#      range and the range itself (scripts/prepare_minutes.sh: what is kept already is not fetched again), and one snapshot per
+#      trading day, as of the session before it, with the minute-history columns (E19-S52)
 #   3. `tf history index`, then `tf research run` into $RESEARCH/NAME, which the workspace lists as a scenario
 #
 # Nothing here is the live day's: the reference and the snapshots are the history's own directories, so this can run while the
@@ -19,6 +21,7 @@ STORE=${STORE:-/data/history/store}
 REF=${REF:-/data/history/ref}
 SNAPS=${SNAPS:-/data/history/snapshots}
 RESEARCH=${RESEARCH:-/data/history/research}
+MINUTES=${MINUTES:-/data/history/minutes}
 DATASET=${DATASET:-EQUS.MINI}
 SCHEMA=${SCHEMA:-tbbo}
 # The plan includes the last year of this dataset's history, so a pull should cost nothing; a dollar a day is the line.
@@ -65,7 +68,11 @@ done
 "$here/fetch_reference.sh" "$REF" "$(date -d "$from - 75 days" +%F)" "$to"
 assets=()
 [ -s "$REF/assets.json" ] && assets=(--assets "$REF/assets.json")
-tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$from" --to "$to" "${assets[@]}" --out "$SNAPS"
+# The snapshot of a day is as of the session before it, so the sessions run to the day before the last day. A day that cannot be had
+# stops the run: snapshots without the columns would make the strategies that need them trade nothing, and say nothing.
+"$here/prepare_minutes.sh" "$MINUTES" "$(date -d "$from - ${MINUTES_BACK_DAYS:-90} days" +%F)" "$(date -d "$to - 1 day" +%F)"
+tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$from" --to "$to" "${assets[@]}" \
+  --minutes-dir "$MINUTES" --out "$SNAPS"
 
 # 3. The run.
 tf history index "$STORE" --dataset "$DATASET" --schema "$SCHEMA"

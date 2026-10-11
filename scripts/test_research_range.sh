@@ -24,6 +24,12 @@ STUB
 #!/usr/bin/env bash
 echo "fetch_reference $*" >> "$STUB_LOG"
 STUB
+  cat > "$work/scripts/prepare_minutes.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "prepare_minutes $*" >> "$STUB_LOG"
+[ "${STUB_MINUTES_FAIL:-0}" = 1 ] && exit 1
+exit 0
+STUB
   # pull: stores the day unless it is in STUB_NO_TAPE (a space-separated list of dates).
   cat > "$work/scripts/pull_history.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -42,7 +48,7 @@ STUB
 
 range() { # script name from to (extra env goes before the call: VAR=x range ...)
   env PATH="$work/bin:$PATH" STUB_LOG="$work/log" DATABENTO_API_KEY=k MAX_COST=1.00 \
-    SET="$work/set" STORE="$work/data/store" REF="$work/data/ref" SNAPS="$work/data/snaps" RESEARCH="$work/data/research" \
+    SET="$work/set" STORE="$work/data/store" REF="$work/data/ref" SNAPS="$work/data/snaps" MINUTES="$work/data/minutes" RESEARCH="$work/data/research" \
     "$@" > "$work/out" 2>&1
 }
 
@@ -54,10 +60,12 @@ range "$work/scripts/research-range.sh" oct 2026-10-08 2026-10-13; code=$?
 grep -q "pull_history $work/data/store EQUS.MINI tbbo ALL_SYMBOLS 2026-10-09 2026-10-10" "$work/log" && ok "pulls a day alone" || no "pulls a day alone"
 [ "$(grep -c '^store_names' "$work/log")" = 4 ] && ok "names each day pulled" || no "names each day pulled"
 grep -q "fetch_reference $work/data/ref 2026-07-25 2026-10-13" "$work/log" && ok "fetches the bars from 75 days before the range" || no "fetches the bars from 75 days before the range: $(grep fetch_ "$work/log")"
-grep -q "tf research snapshots .*--from 2026-10-08 --to 2026-10-13 --out $work/data/snaps" "$work/log" && ok "makes the snapshots for the range" || no "makes the snapshots for the range"
+grep -q "tf research snapshots .*--from 2026-10-08 --to 2026-10-13 .*--out $work/data/snaps" "$work/log" && ok "makes the snapshots for the range" || no "makes the snapshots for the range"
+grep -q "prepare_minutes $work/data/minutes 2026-07-10 2026-10-12" "$work/log" && ok "keeps the minute sessions from 90 days before the range to the day before its last" || no "keeps the minute sessions from 90 days before the range to the day before its last: $(grep prepare_minutes "$work/log")"
+grep -q "tf research snapshots .*--minutes-dir $work/data/minutes" "$work/log" && ok "the snapshots are built with them" || no "the snapshots are built with them"
 grep -q "tf research run .*--out $work/data/research/oct --from 2026-10-08 --to 2026-10-13 --evidence" "$work/log" && ok "runs the set into the scenario" || no "runs the set into the scenario: $(grep 'research run' "$work/log")"
-order=$(grep -n "pull_history\|store_names\|fetch_reference\|research snapshots\|history index\|research run\|research show" "$work/log" | sed -E 's/^[0-9]+://; s/ .*//' | uniq | tr '\n' ' ')
-case "$order" in "pull_history store_names pull_history store_names pull_history store_names pull_history store_names fetch_reference tf ") ok "in the right order";; *) no "in the right order: $order";; esac
+order=$(grep -n "pull_history\|store_names\|fetch_reference\|prepare_minutes\|research snapshots\|history index\|research run\|research show" "$work/log" | sed -E 's/^[0-9]+://; s/ .*//' | uniq | tr '\n' ' ')
+case "$order" in "pull_history store_names pull_history store_names pull_history store_names pull_history store_names fetch_reference prepare_minutes tf ") ok "in the right order";; *) no "in the right order: $order";; esac
 
 # Days already stored are not pulled again or named again.
 range "$work/scripts/research-range.sh" oct 2026-10-08 2026-10-13; code=$?
@@ -72,6 +80,12 @@ STUB_NO_TAPE=2026-10-09 range "$work/scripts/research-range.sh" oct 2026-10-08 2
 new_world
 STUB_NO_TAPE=2026-10-08 range "$work/scripts/research-range.sh" oct 2026-10-08 2026-10-08; code=$?
 [ "$code" = 1 ] && ! grep -q "research run" "$work/log" && ok "no stored day is an error and runs nothing" || no "no stored day is an error and runs nothing: exit $code"
+
+# Minute sessions that cannot be had stop the run before the snapshots: they would be made without the columns and the strategies that
+# need them would trade nothing, unsaid.
+new_world
+STUB_MINUTES_FAIL=1 range "$work/scripts/research-range.sh" oct 2026-10-08 2026-10-08; code=$?
+[ "$code" != 0 ] && ! grep -q "research snapshots\|research run" "$work/log" && ok "no minute sessions, no run" || no "no minute sessions, no run: exit $code"
 
 # A failing run is a failing script.
 new_world

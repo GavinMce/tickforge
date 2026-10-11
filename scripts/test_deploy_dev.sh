@@ -68,7 +68,7 @@ if grep -qF "$(cat "$work/token")" "$work/out" "$work/log"; then no "never print
 
 # Secrets that are there already are left alone, and a missing key file is said, not fatal.
 rm -f "$work/token"; rm -f "$work/key"
-run "leaves existing secrets alone" 0 STUB_CONTEXTS="admin@homelab" STUB_NODE=1 STUB_SECRETS="tickforge-token tickforge-databento" "$here/deploy-dev.sh" abc123
+run "leaves existing secrets alone" 0 STUB_CONTEXTS="admin@homelab" STUB_NODE=1 STUB_SECRETS="tickforge-token tickforge-databento tickforge-alpaca" "$here/deploy-dev.sh" abc123
 grep -q "create secret" "$work/log" && no "created a secret that was there" || ok "created no secret that was there"
 run "says when there is no Databento key" 0 STUB_CONTEXTS="admin@homelab" STUB_NODE=1 STUB_SECRETS="tickforge-token" "$here/deploy-dev.sh" abc123
 grep -q "no Databento key" "$work/out" && ok "says there is no Databento key" || no "says there is no Databento key"

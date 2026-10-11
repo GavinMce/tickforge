@@ -21,6 +21,6 @@ pub use bars::{Bar, ReadError, Symbology, date_days, date_text, read_bars};
 pub use build::{BAR_COLUMNS, BuildError, Params, Report, build};
 pub use history::{
     ATR_PERIOD, DEFAULT_WICK_CLIP_PERMILLE, EMA_PERIOD, HISTORY_COLUMNS, HistoryError,
-    HistoryParams, HistoryReport, HistoryRow, MinuteHistory, merge_history, read_minute_bars,
-    read_minute_bars_by_id,
+    HistoryParams, HistoryReport, HistoryRow, MinuteHistory, SESSIONS_MAGIC, merge_history,
+    profile_columns, read_minute_bars, read_minute_bars_by_id,
 };

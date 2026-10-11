@@ -2602,6 +2602,11 @@ epics:
         jira: TIC-208
         title: "Time-of-day volume and volatility profiles finer than seven checkpoints, for relative volume and the 60-minute move"
         status: todo
+        progress: >-
+          ADR 0080. Done: 48 quarter-hour volume columns (qvol_0400 to qvol_1545) and 23 sixty-minute move columns (qmove_0930 to qmove_1500) over the last 20 sessions, unknown where
+          short, in the kept days (file version 2, days of version 1 are fetched again) and in the snapshots; `Profile::volume_between` adds quarter hours (exact for whole ones, in
+          proportion for part) and `Profile::move_from`; tested against hand-computed days (a two-session window with a loud session outside it, an early close, a carried price, a
+          short history). Not done: the cluster fill in the new version and a range run showing the columns.
         deps: [E19-S52]
         ac:
           - "The snapshot carries average volume per quarter hour of the regular session and the premarket, and the normal absolute 60-minute move per quarter hour, over the last 20 sessions, unknown where short"

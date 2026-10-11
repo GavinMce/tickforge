@@ -40,6 +40,8 @@ pub struct HistInfo {
     /// Average cumulative volume at 09:35, 10:00, 10:30, 11:00, 12:00, 14:00 and 15:30
     /// ([`crate::CUMVOL_CHECKPOINTS`] order).
     pub cumvol: [Option<i64>; 7],
+    /// The time-of-day profile (E19-S53): volume in each quarter hour and the normal 60-minute move.
+    pub profile: crate::Profile,
 }
 
 impl HistInfo {
@@ -67,6 +69,7 @@ impl RefInfo {
                 vol_first5: row.vol_first5,
                 vol_pre: row.vol_pre,
                 cumvol: row.cumvol,
+                profile: row.profile,
             },
         }
     }
@@ -89,7 +92,8 @@ fn ratio(num: i128, den: i128) -> Option<i64> {
 impl LiveView for Tier0View<'_> {
     fn value(&self, id: InstrumentId, f: LiveFeature) -> Option<i64> {
         let s = self.tier0.symbol(id)?;
-        let r = self.refs.get(id as usize).copied().unwrap_or_default();
+        let default = RefInfo::default();
+        let r = self.refs.get(id as usize).unwrap_or(&default);
         match f {
             LiveFeature::Trades => Some(i64::from(s.trades)),
             LiveFeature::DollarVolume => i64::try_from(s.notional / 1_000_000_000)

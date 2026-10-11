@@ -15,7 +15,7 @@ use tf_host::set::StrategySet;
 use tf_reference::{
     ASSET_COLUMNS, BAR_COLUMNS, DEFAULT_WICK_CLIP_PERMILLE, HISTORY_COLUMNS, HistoryError,
     HistoryParams, MinuteHistory, Params, Symbology, build, date_days, date_text, merge_assets,
-    merge_etf_list, merge_history, parse_assets, read_bars,
+    merge_etf_list, merge_history, parse_assets, profile_columns, read_bars,
 };
 use tf_universe::{Snapshot, StaticFeature};
 
@@ -341,6 +341,7 @@ fn snapshots(args: &[String]) -> Result<String, String> {
                 }
                 let (matched, only) = merge_history(&mut rows, &hist);
                 columns.extend(HISTORY_COLUMNS);
+                columns.extend(profile_columns());
                 minute_notes.push(format!(
                     "{date}: minute history of {} sessions ({} to {}), {matched} of {} symbols matched ({only} in the history only)",
                     hrep.sessions,
@@ -669,6 +670,13 @@ mod tests {
             (Some((100 + 200) / 2), Some((200 + 300) / 2))
         );
         assert_eq!(r5.prev_close, Some(10_500_000_000));
+        // The time-of-day profile is in them too: the open's quarter hour (22) holds the first minute's volume, an hour on (26) the 40 shares.
+        assert!(second.columns.contains(&StaticFeature::QVol(22)));
+        assert_eq!(
+            (r2.profile.vol_quarter(22), r2.profile.vol_quarter(26)),
+            (Some((100 + 200) / 2), Some(40))
+        );
+        assert_eq!(r5.profile.vol_quarter(22), Some((200 + 300) / 2));
         // A strategy that requires the columns can use the snapshot.
         let need =
             tf_universe::Spec::parse("universe v1\nrequires prev_high vol_first1\n").unwrap();

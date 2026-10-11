@@ -11,8 +11,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use crate::feature::{
-    CUMVOL_CHECKPOINTS, Kind, STATIC_FEATURES, StaticFeature, parse_value, render_value,
+    CUMVOL_CHECKPOINTS, Kind, STATIC_FEATURES, StaticFeature, parse_value, profile_features,
+    render_value,
 };
+use crate::profile::Profile;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RefRow {
@@ -40,6 +42,8 @@ pub struct RefRow {
     pub vol_first5: Option<i64>,
     pub vol_pre: Option<i64>,
     pub cumvol: [Option<i64>; 7],
+    /// The time-of-day profile (E19-S53).
+    pub profile: Profile,
 }
 
 impl RefRow {
@@ -60,6 +64,8 @@ impl RefRow {
             StaticFeature::VolFirst1 => self.vol_first1,
             StaticFeature::VolFirst5 => self.vol_first5,
             StaticFeature::VolPremarket => self.vol_pre,
+            StaticFeature::QVol(k) => self.profile.vol_quarter(usize::from(k)),
+            StaticFeature::QMove(j) => self.profile.move_quarter(usize::from(j)),
             f => CUMVOL_CHECKPOINTS
                 .iter()
                 .position(|c| c.0 == f)
@@ -85,6 +91,8 @@ impl RefRow {
             StaticFeature::VolFirst1 => self.vol_first1 = v,
             StaticFeature::VolFirst5 => self.vol_first5 = v,
             StaticFeature::VolPremarket => self.vol_pre = v,
+            StaticFeature::QVol(k) => self.profile.set_vol_quarter(usize::from(k), v),
+            StaticFeature::QMove(j) => self.profile.set_move_quarter(usize::from(j), v),
             f => {
                 if let Some(i) = CUMVOL_CHECKPOINTS.iter().position(|c| c.0 == f) {
                     self.cumvol[i] = v;
@@ -269,6 +277,7 @@ impl Snapshot {
         let cols: Vec<StaticFeature> = STATIC_FEATURES
             .iter()
             .map(|f| f.0)
+            .chain(profile_features())
             .filter(|f| self.columns.contains(f))
             .collect();
         let mut s = format!("# as_of {}\nsymbol", self.as_of);

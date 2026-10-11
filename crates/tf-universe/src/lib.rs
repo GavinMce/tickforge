@@ -7,6 +7,7 @@
 
 mod dynamic;
 mod feature;
+mod profile;
 mod reference;
 mod select;
 mod spec;
@@ -16,9 +17,11 @@ mod tests;
 
 pub use dynamic::{Change, HistInfo, LiveView, RefInfo, Selector, Tier0View};
 pub use feature::{
-    CUMVOL_CHECKPOINTS, HISTORY_FEATURES, Kind, LIVE_FEATURES, LiveFeature, STATIC_FEATURES,
-    StaticFeature,
+    CLOSE_MIN, CUMVOL_CHECKPOINTS, HISTORY_FEATURES, Kind, LIVE_FEATURES, LiveFeature, OPEN_MIN,
+    PREMARKET_START_MIN, QMOVE_COUNT, QVOL_COUNT, QVOL_FIRST_REGULAR, STATIC_FEATURES,
+    StaticFeature, profile_features,
 };
+pub use profile::Profile;
 pub use reference::{RefRow, Snapshot, SnapshotError, valid_name};
 pub use select::{Diff, SelectError, Selection, diff, passes, select};
 pub use spec::{Cmp, Dynamic, LiveCond, Operand, Param, Spec, SpecError, StaticCond, Test};

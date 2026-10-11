@@ -5,7 +5,7 @@
 #
 #   scripts/prepare_minutes.sh DIR START END        # START and END are dates, both included
 #
-# Each weekday of the range with no DIR/DATE.sessions is fetched (scripts/fetch_minutes.sh: the cost is asked first and refused
+# Each weekday of the range with no DIR/DATE.sessions (or one of another version of the file) is fetched (scripts/fetch_minutes.sh: the cost is asked first and refused
 # above $MAX_COST; a day is 2.7 million bars, a quarter of a gigabyte of text), turned into its file by `tf reference minutes`, and
 # the bars thrown away: what is kept is a few hundred kilobytes a day, so 60 sessions are a few tens of megabytes and the daily
 # prepare job fetches one day. A weekday with no bars (a market holiday) leaves no file and is asked about again next time. Days
@@ -28,11 +28,15 @@ mkdir -p "$dir"
 work="$dir/.fetch"
 trap 'rm -rf "$work"' EXIT
 
+# The first line of a kept day names the version of the file (tf-reference's SESSIONS_MAGIC, checked by a test against this line); a day kept
+# in another version is fetched again, so a change to what is kept replaces the days by itself.
+magic="# tf minute sessions 2"
+
 kept=0 fetched=0 holidays=0
 day=$from
 while [[ ! "$day" > "$to" ]]; do
   if [ "$(date -d "$day" +%u)" -le 5 ]; then
-    if [ -s "$dir/$day.sessions" ]; then
+    if [ -s "$dir/$day.sessions" ] && [ "$(head -n 1 "$dir/$day.sessions")" = "$magic" ]; then
       kept=$((kept + 1))
     else
       rm -rf "$work"

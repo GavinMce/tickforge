@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use tf_calendar::{Calendar, Date};
-use tf_universe::{CUMVOL_CHECKPOINTS, HISTORY_FEATURES, RefRow, StaticFeature};
+use tf_universe::{CUMVOL_CHECKPOINTS, HISTORY_FEATURES, Profile, RefRow, StaticFeature};
 
 use crate::history::*;
 use crate::{date_days, date_text};
@@ -790,7 +790,7 @@ fn a_kept_day_loads_into_a_new_history_and_gives_the_same_columns() {
         .map(|l| l.split(',').next().unwrap())
         .collect();
     assert_eq!(names, ["A", "B", "PRE"]);
-    assert!(text.starts_with("# tf minute sessions 1\nday,2026-10-01,normal,1,bars,"));
+    assert!(text.starts_with("# tf minute sessions 2\nday,2026-10-01,normal,1,bars,"));
     assert!(text.lines().nth(1).unwrap().ends_with(",clip,5"));
     // A day with no bars has nothing to keep, and so does a day nobody asked about.
     assert_eq!(whole.export_day(day_of("2026-10-03")), None);
@@ -870,8 +870,9 @@ fn a_kept_day_that_does_not_fit_is_refused_and_says_why() {
     let load = |h: &mut MinuteHistory, text: &str| h.load_day(text).unwrap_err().to_string();
     let mut h = MinuteHistory::new(i64::MAX, 5);
     assert!(load(&mut h, "").contains("not a kept day"));
-    assert!(load(&mut h, "# tf minute sessions 2\n").contains("not a kept day"));
-    assert!(load(&mut h, "# tf minute sessions 1\nday,2026-10-01\n").contains("second line"));
+    assert!(load(&mut h, "# tf minute sessions 1\nday,2026-10-01\n").contains("another version"));
+    assert!(load(&mut h, "# tf minute sessions 2\n").contains("second line"));
+    assert!(load(&mut h, "# tf minute sessions 2\nday,2026-10-01\n").contains("second line"));
     // Another wick cap: the columns would mix two rules.
     let mut other = MinuteHistory::new(i64::MAX, 7);
     assert!(load(&mut other, &good).contains("wick cap of 5 permille and this history uses 7"));
@@ -958,4 +959,304 @@ fn bars_without_symbols_are_named_by_the_symbology_and_an_unnamed_one_is_counted
             .to_string()
             .contains("3 fields, expected 9")
     );
+}
+
+// --- E19-S53: the time-of-day profile ---
+
+fn bar(h: &mut MinuteHistory, d: &str, minute: i64, sym: &str, px: i64, vol: u64) {
+    add(h, at(d, minute), sym, px, px, px, vol);
+}
+
+/// A symbol whose two sessions in the window (1 and 2 October) have bars worked out by hand in the tests below; 30 September is outside the
+/// window of two sessions and loud, to show it is.
+fn profile_fixture() -> MinuteHistory {
+    let mut h = MinuteHistory::new(i64::MAX, u32::MAX);
+    bar(&mut h, "2026-09-30", 0, "P", 1, 1_000_000);
+    bar(&mut h, "2026-09-30", -300, "P", 1, 1_000_000);
+    // 1 October. Premarket: 04:00 (quarter 0), 04:30 (2) and 09:29 (21). Regular: quarter 0 has two bars (the later one closes it at 101), 1 has
+    // one, 2 none, 3 one at 09:30 + 59, 4 two bars (10:30 and 10:44), 5 one, and the last minute of the day.
+    bar(&mut h, "2026-10-01", -330, "P", 50, 10);
+    bar(&mut h, "2026-10-01", -300, "P", 50, 20);
+    bar(&mut h, "2026-10-01", -1, "P", 50, 7);
+    bar(&mut h, "2026-10-01", 0, "P", 100, 100);
+    bar(&mut h, "2026-10-01", 14, "P", 101, 50);
+    bar(&mut h, "2026-10-01", 15, "P", 102, 30);
+    bar(&mut h, "2026-10-01", 59, "P", 104, 5);
+    bar(&mut h, "2026-10-01", 60, "P", 110, 40);
+    bar(&mut h, "2026-10-01", 74, "P", 111, 1);
+    bar(&mut h, "2026-10-01", 75, "P", 112, 2);
+    bar(&mut h, "2026-10-01", 389, "P", 120, 9);
+    // 2 October.
+    bar(&mut h, "2026-10-02", -330, "P", 50, 6);
+    bar(&mut h, "2026-10-02", 0, "P", 200, 1000);
+    bar(&mut h, "2026-10-02", 15, "P", 205, 8);
+    bar(&mut h, "2026-10-02", 30, "P", 210, 4);
+    bar(&mut h, "2026-10-02", 45, "P", 190, 6);
+    bar(&mut h, "2026-10-02", 60, "P", 180, 12);
+    // A symbol with one session only.
+    bar(&mut h, "2026-10-02", 0, "Q", 10, 5);
+    h
+}
+
+fn row<'a>(rows: &'a [HistoryRow], sym: &str) -> &'a HistoryRow {
+    rows.iter().find(|r| r.symbol == sym).unwrap()
+}
+
+#[test]
+fn quarter_hour_volumes_are_the_hand_averages_of_the_window_and_the_open_is_quarter_22() {
+    let (rows, _) = profile_fixture().build(small()).unwrap();
+    let p = &row(&rows, "P").profile;
+    // Premarket quarters 0 to 21 average over both sessions (a session without a bar counts as zero): 04:00 had 10 and 6, 04:30 had 20 and none,
+    // 09:15 to 09:30 had 7 and none.
+    assert_eq!(p.vol_quarter(0), Some((10 + 6) / 2));
+    assert_eq!(p.vol_quarter(2), Some(20 / 2));
+    assert_eq!(p.vol_quarter(21), Some(7 / 2));
+    assert_eq!(
+        p.vol_quarter(1),
+        Some(0),
+        "traded in the window, nothing in this quarter hour"
+    );
+    // Regular quarters 22 + q: 1 October then 2 October, divided by the two sessions.
+    assert_eq!(p.vol_quarter(22), Some((100 + 50 + 1000) / 2));
+    assert_eq!(p.vol_quarter(23), Some((30 + 8) / 2));
+    assert_eq!(p.vol_quarter(24), Some(4 / 2));
+    assert_eq!(p.vol_quarter(25), Some((5 + 6) / 2));
+    assert_eq!(p.vol_quarter(26), Some((40 + 1 + 12) / 2));
+    assert_eq!(p.vol_quarter(27), Some(2 / 2));
+    assert_eq!(
+        p.vol_quarter(47),
+        Some(9 / 2),
+        "the last quarter hour, 15:45 to 16:00"
+    );
+    assert_eq!(p.vol_quarter(48), None);
+    // The 30th, a million shares in the first and an earlier premarket quarter, is outside the window of two sessions.
+    // The sum of all the quarters is the day's volume averaged (one session's bars are all in some quarter).
+    let total: i64 = (0..48).map(|k| p.vol_quarter(k).unwrap()).sum();
+    assert!(
+        (total
+            - ((10 + 20 + 7 + 100 + 50 + 30 + 5 + 40 + 1 + 2 + 9) + (6 + 1000 + 8 + 4 + 6 + 12))
+                / 2)
+        .abs()
+            <= 12,
+        "{total}"
+    );
+}
+
+#[test]
+fn the_normal_60_minute_move_is_the_mean_absolute_move_from_each_quarter_hour_to_an_hour_later() {
+    let (rows, _) = profile_fixture().build(small()).unwrap();
+    let p = &row(&rows, "P").profile;
+    // 1 October: the price at 09:30 is the first bar's open (100); at each later boundary it is the close of the last bar that started before
+    // it: 09:45 101, 10:00 102, 10:15 102 (no bar in quarter 2: carried), 10:30 104, 10:45 111.
+    // Move from 09:30 to 10:30: 4 on 100 = 4%, which is 4000 hundred-thousandths. From 09:45 to 10:45: 10 on 101 = 9900 (floored).
+    // 2 October: 09:30 200, 09:45 200, 10:00 205, 10:15 210, 10:30 190, 10:45 180. From 09:30: 10 on 200 = 5000. From 09:45: 20 on 200 = 10000.
+    assert_eq!(p.move_quarter(0), Some((4000 + 5000) / 2));
+    assert_eq!(p.move_quarter(1), Some((9900 + 10000) / 2));
+    assert_eq!(p.move_from(570), p.move_quarter(0));
+    assert_eq!(p.move_from(585), p.move_quarter(1));
+    assert_eq!(p.move_from(571), None, "only the quarter hours");
+    assert_eq!(p.move_from(555), None, "not before the open");
+    // The last one that has an hour after it starts at 15:00 (22); the table has no 23.
+    assert!(p.move_quarter(22).is_some());
+    assert_eq!(p.move_quarter(23), None);
+}
+
+#[test]
+fn the_volume_of_any_run_of_minutes_is_the_quarter_hours_added_in_proportion() {
+    let (rows, _) = profile_fixture().build(small()).unwrap();
+    let p = &row(&rows, "P").profile;
+    let q = |k| p.vol_quarter(k).unwrap();
+    // Whole quarter hours are exact sums: 09:30 to 10:00 is quarters 22 and 23.
+    assert_eq!(p.volume_between(570, 600), Some(q(22) + q(23)));
+    assert_eq!(p.volume_between(570, 585), Some(q(22)));
+    // Across the open, premarket and regular: 09:00 to 10:00 is quarters 20 to 23.
+    assert_eq!(
+        p.volume_between(540, 600),
+        Some(q(20) + q(21) + q(22) + q(23))
+    );
+    // Part of a quarter is in proportion (volume is taken as even within it): 09:30 to 09:40 is ten of fifteen minutes of quarter 22.
+    assert_eq!(p.volume_between(570, 580), Some(q(22) * 10 / 15));
+    // A run starting and ending inside quarters: 09:25 to 09:35 is five minutes of quarter 21 and five of 22.
+    assert_eq!(
+        p.volume_between(565, 575),
+        Some((q(21) * 5 + q(22) * 5) / 15)
+    );
+    // One minute.
+    assert_eq!(p.volume_between(570, 571), Some(q(22) / 15));
+    // The whole day, 04:00 to 16:00, is every quarter.
+    assert_eq!(p.volume_between(240, 960), Some((0..48).map(q).sum()));
+    // Nothing for an empty run, a run backwards, or one outside the day.
+    assert_eq!(p.volume_between(600, 600), None);
+    assert_eq!(p.volume_between(600, 570), None);
+    assert_eq!(p.volume_between(239, 300), None);
+    assert_eq!(p.volume_between(900, 961), None);
+}
+
+#[test]
+fn a_short_history_has_no_profile_and_a_run_touching_an_unknown_quarter_has_no_volume() {
+    // Q traded in one of the two sessions; the profile needs two (min_days).
+    let two = HistoryParams {
+        min_days: 2,
+        ..small()
+    };
+    let (rows, _) = profile_fixture().build(two).unwrap();
+    let q = &row(&rows, "Q").profile;
+    assert!((0..48).all(|k| q.vol_quarter(k).is_none()), "volume");
+    assert!((0..23).all(|j| q.move_quarter(j).is_none()), "move");
+    assert_eq!(q.volume_between(570, 600), None);
+    // P traded in both sessions: known.
+    let p = &row(&rows, "P").profile;
+    assert!(p.vol_quarter(22).is_some() && p.move_quarter(0).is_some());
+    // With one session enough, Q has a profile too.
+    let three = HistoryParams {
+        min_days: 1,
+        ..small()
+    };
+    let (rows, _) = profile_fixture().build(three).unwrap();
+    assert_eq!(
+        row(&rows, "Q").profile.move_quarter(0),
+        Some(0),
+        "one session, one bar: the price at both ends is that bar's close"
+    );
+    let mut m = Profile::default();
+    m.set_vol_quarter(26, Some(10));
+    assert_eq!(
+        m.volume_between(600, 630),
+        None,
+        "quarter 24 is unknown even if its neighbour is not"
+    );
+    assert_eq!(m.volume_between(630, 645), Some(10), "quarter 26 alone");
+}
+
+#[test]
+fn an_early_close_adds_to_the_premarket_quarters_and_to_nothing_of_the_regular_session() {
+    let mut h = MinuteHistory::new(i64::MAX, u32::MAX);
+    // 25 November is a normal day and 27 November closes at 13:00.
+    bar(&mut h, "2026-11-25", -330, "E", 30, 20);
+    bar(&mut h, "2026-11-25", 0, "E", 30, 100);
+    bar(&mut h, "2026-11-25", 100, "E", 40, 11);
+    bar(&mut h, "2026-11-27", -330, "E", 30, 40);
+    bar(&mut h, "2026-11-27", 0, "E", 30, 500);
+    bar(&mut h, "2026-11-27", 100, "E", 90, 77);
+    let (rows, rep) = h.build(small()).unwrap();
+    assert_eq!(rep.early_closes, 1);
+    let p = &rows[0].profile;
+    assert_eq!(
+        p.vol_quarter(0),
+        Some((20 + 40) / 2),
+        "the premarket keeps both days"
+    );
+    assert_eq!(
+        p.vol_quarter(22),
+        Some(100),
+        "the regular session is the normal day's alone"
+    );
+    assert_eq!(
+        p.vol_quarter(22 + 6),
+        Some(11),
+        "100 minutes in is quarter 6 of the normal day"
+    );
+    // The move from 09:30 and 09:45 etc. comes from the normal day alone: from 09:30 to 10:30, the bar at +100 is not before 10:30, so the
+    // price at 10:30 is the open's (30) and the move is zero.
+    assert_eq!(p.move_quarter(0), Some(0));
+}
+
+#[test]
+fn the_profile_survives_a_kept_day_and_merges_into_a_snapshot_row() {
+    let whole = profile_fixture();
+    let mut loaded = MinuteHistory::new(i64::MAX, u32::MAX);
+    for d in ["2026-09-30", "2026-10-01", "2026-10-02"] {
+        loaded
+            .load_day(&whole.export_day(day_of(d)).unwrap())
+            .unwrap();
+    }
+    let (want, _) = whole.build(small()).unwrap();
+    let (got, _) = loaded.build(small()).unwrap();
+    assert_eq!(got, want);
+    assert!(
+        row(&got, "P").profile.vol_quarter(22).is_some()
+            && row(&got, "P").profile.move_quarter(0).is_some()
+    );
+    // The columns reach a row by name, so a universe could use them.
+    let mut rows = vec![RefRow {
+        symbol: "P".into(),
+        ..RefRow::default()
+    }];
+    merge_history(&mut rows, &want);
+    assert_eq!(
+        rows[0].num(StaticFeature::QVol(22)),
+        row(&want, "P").profile.vol_quarter(22)
+    );
+    assert_eq!(
+        rows[0].num(StaticFeature::QMove(1)),
+        row(&want, "P").profile.move_quarter(1)
+    );
+    assert_eq!(
+        StaticFeature::parse("qvol_0930"),
+        Some(StaticFeature::QVol(22))
+    );
+    assert_eq!(
+        StaticFeature::parse("qmove_1500"),
+        Some(StaticFeature::QMove(22))
+    );
+    assert_eq!(StaticFeature::QVol(0).name(), "qvol_0400");
+    assert_eq!(StaticFeature::QVol(47).name(), "qvol_1545");
+    assert_eq!(profile_columns().count(), 48 + 23);
+}
+
+#[test]
+fn the_script_that_keeps_the_days_knows_the_version_of_the_file_it_keeps() {
+    // prepare_minutes.sh fetches a day again whose file is of another version; it must name this one.
+    let script = include_str!("../../../scripts/prepare_minutes.sh");
+    assert!(
+        script.contains(SESSIONS_MAGIC),
+        "scripts/prepare_minutes.sh must name `{SESSIONS_MAGIC}`"
+    );
+}
+
+#[test]
+fn the_quarter_hours_add_up_to_the_checkpoints_and_the_premarket_the_older_columns_have() {
+    // One session, averaged over itself: every older volume column is a sum of the new quarter hours.
+    let mut h = MinuteHistory::new(i64::MAX, u32::MAX);
+    for (m, v) in [
+        (-330, 3),
+        (-200, 5),
+        (-1, 7),
+        (0, 11),
+        (4, 13),
+        (5, 17),
+        (29, 19),
+        (30, 23),
+        (89, 29),
+        (269, 31),
+        (359, 37),
+        (360, 41),
+        (389, 43),
+    ] {
+        bar(&mut h, "2026-10-02", m, "S", 50, v);
+    }
+    let one = HistoryParams {
+        sessions: 60,
+        average_over: 1,
+        min_days: 1,
+    };
+    let (rows, _) = h.build(one).unwrap();
+    let r = &rows[0];
+    let q = |k: usize| r.profile.vol_quarter(k).unwrap();
+    let to = |last: usize| (22..=last).map(q).sum::<i64>();
+    assert_eq!(
+        Some((0..22).map(q).sum::<i64>()),
+        col(r, StaticFeature::VolPremarket)
+    );
+    // The checkpoints count the bars that start before them (09:35 is minute 5: the bars at 0 and 4); the quarter hours that end on a checkpoint
+    // give the same sum: 10:00 is 30 minutes in (quarters 22 and 23), 10:30 60 (to 25), 11:00 90 (to 27), 12:00 150 (to 31), 14:00 270 (to 39), 15:30 360 (to 45).
+    assert_eq!(Some(to(23)), col(r, StaticFeature::CumVol1000));
+    assert_eq!(Some(to(25)), col(r, StaticFeature::CumVol1030));
+    assert_eq!(Some(to(27)), col(r, StaticFeature::CumVol1100));
+    assert_eq!(Some(to(31)), col(r, StaticFeature::CumVol1200));
+    assert_eq!(Some(to(39)), col(r, StaticFeature::CumVol1400));
+    assert_eq!(Some(to(45)), col(r, StaticFeature::CumVol1530));
+    // The whole run from the open to the close adds the last quarter too.
+    assert_eq!(r.profile.volume_between(570, 960), Some(to(47)));
+    assert_eq!(to(47) - to(45), 41 + 43, "the bars at 360 and 389 minutes");
 }

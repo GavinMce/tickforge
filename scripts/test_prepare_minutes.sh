@@ -32,7 +32,7 @@ csv=""; out=""
 while [ $# -gt 0 ]; do case "$1" in --csv) csv=$2;; --out) out=$2;; esac; shift; done
 [ -s "$csv" ] || exit 1
 day=$(tail -n 1 "$csv" | cut -d, -f1)
-echo "sessions" > "$out/$day.sessions"
+printf '# tf minute sessions 2\n' > "$out/$day.sessions"
 STUB
   chmod +x "$work/bin/tf" "$work/scripts/"*.sh
   : > "$work/log"
@@ -54,6 +54,13 @@ grep -q "4 fetched" "$work/out" && ok "says what it did" || no "says what it did
 : > "$work/log"
 prep "$work/scripts/prepare_minutes.sh" "$work/m" 2026-10-08 2026-10-13; code=$?
 [ "$code" = 0 ] && [ ! -s "$work/log" ] && grep -q "4 kept, 0 fetched" "$work/out" && ok "kept days are not fetched again" || no "kept days are not fetched again: $(cat "$work/log")"
+
+# A day kept in another version of the file is fetched again; its neighbours are not.
+printf '# tf minute sessions 1\n' > "$work/m/2026-10-09.sessions"
+: > "$work/log"
+prep "$work/scripts/prepare_minutes.sh" "$work/m" 2026-10-08 2026-10-13; code=$?
+[ "$code" = 0 ] && [ "$(grep -c '^fetch_minutes' "$work/log")" = 1 ] && grep -q "fetch_minutes .* 2026-10-09 2026-10-10" "$work/log" && ok "a day kept in another version is fetched again, and only that day" || no "a day kept in another version is fetched again: $(grep fetch_minutes "$work/log")"
+[ "$(head -n 1 "$work/m/2026-10-09.sessions")" = "# tf minute sessions 2" ] && ok "and replaced" || no "and replaced"
 
 # A holiday leaves no file and is not an error; it is asked about again next time.
 new_world

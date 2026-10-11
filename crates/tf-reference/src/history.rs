@@ -34,6 +34,13 @@
 //!   below the smaller: by default 0.5%. A real wick is kept up to that; the number of bars changed is reported. Zero
 //!   sets the high and low to the body. Trade flags (E19-S08) are the real fix; until then the cap is.
 //! - **Zero-share prints** are counted by the bars in highs and lows (ADR 0053); the cap limits their reach too.
+//! - **The time-of-day profile** (E19-S53) is the volume in each quarter hour of the day, 04:00 to 16:00 (48 columns, the open's is the 23rd), and the
+//!   normal absolute move over the hour from each regular-session quarter hour from 09:30 to 15:00 (23 columns). A quarter hour's volume is averaged
+//!   as the cumulative columns are: the premarket's over every session of the window, the regular session's over the normal ones, a session that did not
+//!   trade counting as zero, the symbol needing `min_days` sessions in which it traded. The move is the mean of `|P(t+60) - P(t)| / P(t)` over the
+//!   normal sessions with a price at both ends, in hundred-thousandths (0.1 basis points), where `P(09:30)` is the open of the first regular bar and any other
+//!   `P(t)` is the close of the last bar that started before `t`, carried from an earlier quarter hour if the symbol had no bar in the last one; at least
+//!   `min_days` such sessions are needed. Unknown, never zero, when short.
 //! - Integer arithmetic only; averages divide down.
 
 use std::collections::HashMap;
@@ -41,7 +48,10 @@ use std::io::BufRead;
 
 use tf_calendar::{Calendar, CalendarError, Date, SessionTimes};
 use tf_engine::{Ema, Seed};
-use tf_universe::{CUMVOL_CHECKPOINTS, HISTORY_FEATURES, RefRow, StaticFeature, valid_name};
+use tf_universe::{
+    CUMVOL_CHECKPOINTS, HISTORY_FEATURES, Profile, QMOVE_COUNT, QVOL_COUNT, QVOL_FIRST_REGULAR,
+    RefRow, StaticFeature, profile_features, valid_name,
+};
 
 use crate::bars::{ReadError, Symbology, date_days, date_text};
 
@@ -49,7 +59,7 @@ use crate::bars::{ReadError, Symbology, date_days, date_text};
 const HOURS: usize = 7;
 const NANOS: u64 = 1_000_000_000;
 /// The first line of a kept day of sessions.
-const SESSIONS_MAGIC: &str = "# tf minute sessions 1";
+pub const SESSIONS_MAGIC: &str = "# tf minute sessions 2";
 /// How far a bar's high may stand above its body, and its low below, in permille of the body's price.
 pub const DEFAULT_WICK_CLIP_PERMILLE: u32 = 5;
 /// Periods the columns are defined with.
@@ -76,7 +86,15 @@ impl Default for HistoryParams {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// Fields of a symbol's line in a kept day: the name, the flag, the high, low and close, the premarket and opening volumes, the seven cumulative
+/// volumes, the seven hourly closes, then (E19-S53) the 48 quarter-hour volumes, the 26 closes of regular quarter hours and the open.
+const FIELDS: usize = 15 + HOURS + QVOL_COUNT + QUARTERS + 1;
+/// A quarter hour not seen.
+const UNSEEN: u32 = u32::MAX;
+/// Regular-session quarter hours.
+const QUARTERS: usize = QVOL_COUNT - QVOL_FIRST_REGULAR;
+
+#[derive(Clone, Copy, Debug)]
 struct Session {
     has_regular: bool,
     high: i64,
@@ -88,6 +106,50 @@ struct Session {
     first5: u64,
     cum: [u64; 7],
     hours: [Option<(u64, i64)>; HOURS],
+    /// Volume in each quarter hour from 04:00 (E19-S53), saturating.
+    qvol: [u32; QVOL_COUNT],
+    /// For each regular-session quarter hour, the seconds after the open at which its last bar started and that bar's close
+    /// (`UNSEEN` when it had none): the price at a quarter hour's end is the last close at or before it.
+    qc_t: [u32; QUARTERS],
+    qc: [i64; QUARTERS],
+    /// Seconds after the open at which the first regular bar started and its open (`UNSEEN` for none): the price at 09:30.
+    open_t: u32,
+    open_px: i64,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Session {
+            has_regular: false,
+            high: 0,
+            low: 0,
+            close: None,
+            pre: 0,
+            first1: 0,
+            first5: 0,
+            cum: [0; 7],
+            hours: [None; HOURS],
+            qvol: [0; QVOL_COUNT],
+            qc_t: [UNSEEN; QUARTERS],
+            qc: [0; QUARTERS],
+            open_t: UNSEEN,
+            open_px: 0,
+        }
+    }
+}
+
+impl Session {
+    /// The price at quarter-hour boundary `m` of the regular session (0 is 09:30, 26 is 16:00): the open's price for 0, then the close of the
+    /// last bar that started before it. Unknown if the symbol had no bar yet.
+    fn boundary(&self, m: usize) -> Option<i64> {
+        if m == 0 {
+            return (self.open_t != UNSEEN).then_some(self.open_px);
+        }
+        (0..m.min(QUARTERS))
+            .rev()
+            .find(|q| self.qc_t[*q] != UNSEEN)
+            .map(|q| self.qc[q])
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -153,6 +215,8 @@ impl std::error::Error for HistoryError {}
 pub struct HistoryRow {
     pub symbol: String,
     pub values: [Option<i64>; 16],
+    /// The time-of-day profile (E19-S53).
+    pub profile: Profile,
 }
 
 /// Accumulates one-minute bars; [`MinuteHistory::build`] makes the columns.
@@ -243,6 +307,8 @@ impl MinuteHistory {
             .or_default();
         if sec < f.open {
             s.pre += volume;
+            let k = (((sec - f.pre) / 900) as usize).min(QVOL_FIRST_REGULAR - 1);
+            s.qvol[k] = s.qvol[k].saturating_add(u32::try_from(volume).unwrap_or(u32::MAX));
             return Ok(());
         }
         // Cap the wick: an off-market print leaves the bar's open and close alone.
@@ -270,6 +336,20 @@ impl MinuteHistory {
             s.close = Some((ts, close));
         }
         let since = sec - f.open;
+        let q = (since / 900) as usize;
+        if q < QUARTERS {
+            let k = QVOL_FIRST_REGULAR + q;
+            s.qvol[k] = s.qvol[k].saturating_add(u32::try_from(volume).unwrap_or(u32::MAX));
+            let t = since as u32;
+            if s.qc_t[q] == UNSEEN || t >= s.qc_t[q] {
+                s.qc_t[q] = t;
+                s.qc[q] = close;
+            }
+        }
+        if s.open_t == UNSEEN || (since as u32) < s.open_t {
+            s.open_t = since as u32;
+            s.open_px = open;
+        }
         if since < 60 {
             s.first1 += volume;
         }
@@ -343,6 +423,19 @@ impl MinuteHistory {
             for h in s.hours {
                 out.push_str(&format!(",{}", cell(h.map(|x| x.1))));
             }
+            for v in s.qvol {
+                out.push_str(&format!(",{v}"));
+            }
+            for q in 0..QUARTERS {
+                out.push_str(&format!(
+                    ",{}",
+                    cell((s.qc_t[q] != UNSEEN).then_some(s.qc[q]))
+                ));
+            }
+            out.push_str(&format!(
+                ",{}",
+                cell((s.open_t != UNSEEN).then_some(s.open_px))
+            ));
             out.push('\n');
         }
         Some(out)
@@ -353,10 +446,18 @@ impl MinuteHistory {
     pub fn load_day(&mut self, text: &str) -> Result<(), HistoryError> {
         let bad = |why: String| HistoryError::Sessions(why);
         let mut lines = text.lines();
-        if lines.next() != Some(SESSIONS_MAGIC) {
-            return Err(bad(format!(
-                "not a kept day of sessions: expected `{SESSIONS_MAGIC}`"
-            )));
+        match lines.next() {
+            Some(SESSIONS_MAGIC) => {}
+            Some(l) if l.starts_with("# tf minute sessions ") => {
+                return Err(bad(format!(
+                    "a kept day of another version (`{l}`; this reads `{SESSIONS_MAGIC}`): fetch it again"
+                )));
+            }
+            _ => {
+                return Err(bad(format!(
+                    "not a kept day of sessions: expected `{SESSIONS_MAGIC}`"
+                )));
+            }
         }
         let head: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
         let ["day", day, "normal", normal, "bars", bars, "clip", clip] = head[..] else {
@@ -399,12 +500,8 @@ impl MinuteHistory {
         for (i, line) in lines.enumerate() {
             let at = |why: String| bad(format!("{day} line {}: {why}", i + 3));
             let c: Vec<&str> = line.split(',').collect();
-            if c.len() != 8 + 7 + HOURS {
-                return Err(at(format!(
-                    "{} fields, expected {}",
-                    c.len(),
-                    8 + 7 + HOURS
-                )));
+            if c.len() != FIELDS {
+                return Err(at(format!("{} fields, expected {FIELDS}", c.len())));
             }
             if !valid_name(c[0]) {
                 return Err(at(format!("`{}` is not a symbol", c[0])));
@@ -444,6 +541,22 @@ impl MinuteHistory {
             }
             for (k, slot) in s.hours.iter_mut().enumerate() {
                 *slot = opt(15 + k)?.map(|v| (0, v));
+            }
+            for (k, slot) in s.qvol.iter_mut().enumerate() {
+                *slot = c[15 + HOURS + k]
+                    .parse::<u32>()
+                    .map_err(|_| at(format!("`{}` is not a volume", c[15 + HOURS + k])))?;
+            }
+            for q in 0..QUARTERS {
+                if let Some(v) = opt(15 + HOURS + QVOL_COUNT + q)? {
+                    // The bar's own time is not kept either: nothing is added to a kept day.
+                    s.qc_t[q] = 0;
+                    s.qc[q] = v;
+                }
+            }
+            if let Some(v) = opt(15 + HOURS + QVOL_COUNT + QUARTERS)? {
+                s.open_t = 0;
+                s.open_px = v;
             }
             if sessions.insert(c[0].to_owned(), s).is_some() {
                 return Err(at(format!("{} twice", c[0])));
@@ -585,9 +698,40 @@ impl MinuteHistory {
             for i in 0..7 {
                 v[9 + i] = average(&avg_normal, &|s| s.cum[i]);
             }
+            // The time-of-day profile: volume per quarter hour, the premarket over every session of the window and the regular session over
+            // the normal ones (as the cumulative columns), and the mean absolute 60-minute move over the normal sessions that traded at
+            // both ends of it.
+            let mut profile = Profile::default();
+            for k in 0..QVOL_COUNT {
+                let days = if k < QVOL_FIRST_REGULAR {
+                    &avg_days
+                } else {
+                    &avg_normal
+                };
+                profile.set_vol_quarter(k, average(days, &|s| u64::from(s.qvol[k])));
+            }
+            for j in 0..QMOVE_COUNT {
+                let (mut n, mut sum) = (0usize, 0u128);
+                for d in &avg_normal {
+                    let Some(s) = regular(*d) else { continue };
+                    let (Some(a), Some(b)) = (s.boundary(j), s.boundary(j + 4)) else {
+                        continue;
+                    };
+                    if a <= 0 {
+                        continue;
+                    }
+                    n += 1;
+                    sum += (i128::from(b) - i128::from(a)).unsigned_abs() * 100_000
+                        / u128::from(a.unsigned_abs());
+                }
+                if n >= p.min_days.max(1) {
+                    profile.set_move_quarter(j, i64::try_from(sum / n as u128).ok());
+                }
+            }
             rows.push(HistoryRow {
                 symbol: name.clone(),
                 values: v,
+                profile,
             });
         }
         Ok((rows, rep))
@@ -697,6 +841,7 @@ pub fn merge_history(rows: &mut [RefRow], hist: &[HistoryRow]) -> (usize, usize)
             for (f, v) in HISTORY_FEATURES.iter().zip(h.values) {
                 r.set_num(*f, v);
             }
+            r.profile = h.profile;
         }
     }
     (matched, hist.len() - matched)
@@ -704,3 +849,8 @@ pub fn merge_history(rows: &mut [RefRow], hist: &[HistoryRow]) -> (usize, usize)
 
 /// The columns [`merge_history`] fills in.
 pub const HISTORY_COLUMNS: [StaticFeature; 16] = HISTORY_FEATURES;
+
+/// The columns of the time-of-day profile [`merge_history`] fills in as well (E19-S53).
+pub fn profile_columns() -> impl Iterator<Item = StaticFeature> {
+    profile_features()
+}

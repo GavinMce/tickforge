@@ -601,6 +601,7 @@ fn the_history_columns_read_render_and_stay_unknown_where_the_cell_is_empty() {
                 Some(150_000),
                 Some(190_000)
             ],
+            profile: crate::Profile::default(),
         }
     );
     assert_eq!(info.hist.ema100h(), Some(10_000_000));
@@ -674,4 +675,80 @@ fn a_spec_can_require_columns_it_does_not_filter_on_and_a_snapshot_without_them_
         let e = Spec::parse(text).unwrap_err().to_string();
         assert!(e.contains(want), "{text}: {e}");
     }
+}
+
+const PROFILE: &str = "# as_of 2026-10-02
+symbol,price,qvol_0400,qvol_0930,qvol_1545,qmove_0930,qmove_1500
+AAA,10.00,50,1150,9,4500,310
+BBB,5.00,,7,,,12
+";
+
+#[test]
+fn the_time_of_day_profile_columns_read_render_and_stay_unknown_where_the_cell_is_empty() {
+    let s = Snapshot::parse(PROFILE).unwrap();
+    for name in [
+        "qvol_0400",
+        "qvol_0930",
+        "qvol_1545",
+        "qmove_0930",
+        "qmove_1500",
+    ] {
+        assert!(
+            s.columns.contains(&StaticFeature::parse(name).unwrap()),
+            "{name}"
+        );
+    }
+    let a = s.row("AAA").unwrap();
+    assert_eq!(a.num(StaticFeature::QVol(0)), Some(50));
+    assert_eq!(a.num(StaticFeature::QVol(22)), Some(1150));
+    assert_eq!(a.num(StaticFeature::QVol(47)), Some(9));
+    assert_eq!(a.num(StaticFeature::QMove(0)), Some(4500));
+    assert_eq!(a.num(StaticFeature::QMove(22)), Some(310));
+    assert_eq!(
+        a.num(StaticFeature::QVol(5)),
+        None,
+        "a column the snapshot lacks reads as unknown"
+    );
+    let b = s.row("BBB").unwrap();
+    assert_eq!(
+        (
+            b.num(StaticFeature::QVol(0)),
+            b.num(StaticFeature::QVol(22))
+        ),
+        (None, Some(7))
+    );
+    // Columns come out in the fixed order whatever order they went in, and the text comes back whole.
+    assert_eq!(s.render(), PROFILE);
+    let shuffled = "# as_of 2026-10-02\nsymbol,qmove_1500,price,qvol_1545\nAAA,310,10.00,9\n";
+    let t = Snapshot::parse(shuffled).unwrap();
+    assert_eq!(
+        t.render(),
+        "# as_of 2026-10-02\nsymbol,price,qvol_1545,qmove_1500\nAAA,10.00,9,310\n"
+    );
+    assert_eq!(
+        Snapshot::parse(&s.render()).unwrap().fingerprint(),
+        s.fingerprint()
+    );
+    // The reference a host holds carries the profile; a strategy adds the quarter hours.
+    let info = RefInfo::from_row(a);
+    assert_eq!(info.hist.profile.vol_quarter(22), Some(1150));
+    assert_eq!(info.hist.profile.move_from(570), Some(4500));
+    assert_eq!(RefInfo::from_row(b).hist.profile.vol_quarter(0), None);
+    // A universe can require them and filter on them like any other column.
+    let sel = select(
+        &spec("universe v1\nrequires qvol_0930\nstatic qvol_0930 >= 1000\n"),
+        &s,
+    )
+    .unwrap();
+    assert_eq!(sel.symbols, ["AAA"]);
+    // Damaged cells and unknown names are refused with the column named; a quarter that does not exist is not a column.
+    assert!(
+        Snapshot::parse(&PROFILE.replacen(",1150,", ",x,", 1))
+            .unwrap_err()
+            .to_string()
+            .contains("qvol_0930")
+    );
+    assert!(Snapshot::parse("# as_of 2026-10-02\nsymbol,qvol_1600\nAAA,1\n").is_err());
+    assert!(Snapshot::parse("# as_of 2026-10-02\nsymbol,qmove_1515\nAAA,1\n").is_err());
+    assert!(Snapshot::parse("# as_of 2026-10-02\nsymbol,qvol_0400,qvol_0400\nAAA,1,1\n").is_err());
 }

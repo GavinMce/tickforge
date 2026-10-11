@@ -7,7 +7,8 @@ use std::fs;
 use tf_reference::{
     ASSET_COLUMNS, BAR_COLUMNS, DEFAULT_WICK_CLIP_PERMILLE, HISTORY_COLUMNS, HistoryParams,
     MinuteHistory, Params, Symbology, build, date_days, merge_assets, merge_etf_list,
-    merge_history, parse_assets, read_bars, read_minute_bars, read_minute_bars_by_id,
+    merge_history, parse_assets, profile_columns, read_bars, read_minute_bars,
+    read_minute_bars_by_id,
 };
 use tf_universe::{Snapshot, StaticFeature};
 
@@ -114,6 +115,7 @@ pub(crate) fn run(args: &[String]) -> Result<String, String> {
         }
         let (matched, only) = merge_history(&mut rows, &hist);
         columns.extend(HISTORY_COLUMNS);
+        columns.extend(profile_columns());
         let _ = writeln!(
             text,
             "minute history: {} bars read, {} sessions ({} to {}, {} early closes), {matched} of {} symbols matched ({only} in the history only); {} bars after the date, {} on closed days, {} outside the sessions, {} with names not listable; {} regular-session bars had a high or low capped at {wick_clip} permille beyond their open and close",

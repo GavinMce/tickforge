@@ -22,4 +22,5 @@ pub use build::{BAR_COLUMNS, BuildError, Params, Report, build};
 pub use history::{
     ATR_PERIOD, DEFAULT_WICK_CLIP_PERMILLE, EMA_PERIOD, HISTORY_COLUMNS, HistoryError,
     HistoryParams, HistoryReport, HistoryRow, MinuteHistory, merge_history, read_minute_bars,
+    read_minute_bars_by_id,
 };

@@ -7,13 +7,14 @@ use std::fs;
 use tf_reference::{
     ASSET_COLUMNS, BAR_COLUMNS, DEFAULT_WICK_CLIP_PERMILLE, HISTORY_COLUMNS, HistoryParams,
     MinuteHistory, Params, Symbology, build, date_days, merge_assets, merge_etf_list,
-    merge_history, parse_assets, read_bars, read_minute_bars,
+    merge_history, parse_assets, read_bars, read_minute_bars, read_minute_bars_by_id,
 };
 use tf_universe::{Snapshot, StaticFeature};
 
 const USAGE: &str = "usage:
     tf reference build --bars FILE --symbology FILE --out FILE [--assets FILE] [--etf-list FILE]
-                       [--minutes FILE [--history-sessions N] [--wick-clip PERMILLE]] [--up-to YYYY-MM-DD] [--window N] [--min-days N]";
+                       [--minutes FILE [--history-sessions N] [--wick-clip PERMILLE]] [--up-to YYYY-MM-DD] [--window N] [--min-days N]
+    tf reference minutes --csv FILE --out DIR [--symbology FILE] [--wick-clip PERMILLE]";
 
 pub(crate) fn reference(args: &[String]) -> Result<(), String> {
     print!("{}", run(args)?);
@@ -25,8 +26,10 @@ fn read(path: &str) -> Result<String, String> {
 }
 
 pub(crate) fn run(args: &[String]) -> Result<String, String> {
-    if args.first().map(String::as_str) != Some("build") {
-        return Err(USAGE.to_owned());
+    match args.first().map(String::as_str) {
+        Some("build") => {}
+        Some("minutes") => return minutes_cmd(&args[1..]),
+        _ => return Err(USAGE.to_owned()),
     }
     let (mut bars, mut sym, mut out, mut assets, mut etf, mut up_to) =
         (None, None, None, None, None, None);
@@ -163,6 +166,78 @@ pub(crate) fn run(args: &[String]) -> Result<String, String> {
     Ok(s)
 }
 
+/// `tf reference minutes`: one-minute bars (a CSV from `scripts/fetch_minutes.sh`) kept as one file of sessions per day in DIR,
+/// `DATE.sessions`, which `tf research snapshots --minutes-dir` reads. With --symbology the bars carry instrument numbers and no
+/// symbols (the only form Databento gives for every symbol at once); without it the symbol is in each line.
+fn minutes_cmd(args: &[String]) -> Result<String, String> {
+    let (mut csv, mut out, mut sym) = (None, None, None);
+    let mut wick_clip = DEFAULT_WICK_CLIP_PERMILLE;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut v = |what: &str| it.next().cloned().ok_or(format!("{what} needs a value"));
+        match a.as_str() {
+            "--csv" => csv = Some(v("--csv")?),
+            "--out" => out = Some(v("--out")?),
+            "--symbology" => sym = Some(v("--symbology")?),
+            "--wick-clip" => {
+                let c = v("--wick-clip")?;
+                wick_clip = c
+                    .parse::<u32>()
+                    .map_err(|_| format!("--wick-clip {c}: not a whole number of permille"))?;
+            }
+            o => return Err(format!("unknown argument {o}\n{USAGE}")),
+        }
+    }
+    let (Some(csv), Some(out)) = (csv, out) else {
+        return Err(USAGE.to_owned());
+    };
+    let names = match &sym {
+        Some(f) => Some(Symbology::parse(&read(f)?).map_err(|e| format!("{f}: {e}"))?),
+        None => None,
+    };
+    let file = fs::File::open(&csv).map_err(|e| format!("{csv}: {e}"))?;
+    // Streamed: a day of the whole market is millions of lines.
+    let mut h = MinuteHistory::new(i64::MAX, wick_clip);
+    let input = std::io::BufReader::new(file);
+    match &names {
+        Some(n) => read_minute_bars_by_id(input, n, &mut h),
+        None => read_minute_bars(input, &mut h),
+    }
+    .map_err(|e| format!("{csv}: {e}"))?;
+    let dir = std::path::Path::new(&out);
+    fs::create_dir_all(dir).map_err(|e| format!("{out}: {e}"))?;
+    let (rep, days) = h.report_and_days();
+    let mut written = Vec::new();
+    for day in days {
+        let Some(text) = h.export_day(day) else {
+            continue;
+        };
+        let date = tf_reference::date_text(day);
+        let path = dir.join(format!("{date}.sessions"));
+        let part = dir.join(format!("{date}.sessions.part"));
+        fs::write(&part, text).map_err(|e| format!("{}: {e}", part.display()))?;
+        fs::rename(&part, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+        written.push(date);
+    }
+    if written.is_empty() {
+        return Err(format!(
+            "{csv}: no regular-session or premarket bars on a trading day: nothing kept ({} bars read, {} on closed days, {} outside the sessions, {} with names not listable)",
+            rep.bars_read, rep.bars_closed_day, rep.bars_outside_sessions, rep.bars_bad_symbol
+        ));
+    }
+    Ok(format!(
+        "{} bars read; kept {} day(s) in {out}: {} to {}\n{} on closed days, {} outside the sessions, {} with names not listable; {} regular-session bars had a high or low capped at {wick_clip} permille beyond their open and close\n",
+        rep.bars_read,
+        written.len(),
+        written[0],
+        written[written.len() - 1],
+        rep.bars_closed_day,
+        rep.bars_outside_sessions,
+        rep.bars_bad_symbol,
+        rep.bars_clipped,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +323,48 @@ mod tests {
             ]))
             .is_err()
         );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn kept_minutes_are_asked_for_rightly_and_a_file_with_no_session_is_an_error() {
+        let e = |a: &[&str]| run(&args(a)).unwrap_err();
+        assert!(e(&["minutes"]).starts_with("usage:"));
+        assert!(
+            e(&["minutes", "--csv", "x"]).starts_with("usage:"),
+            "--out is required"
+        );
+        assert!(e(&["minutes", "--wat"]).contains("unknown argument --wat"));
+        assert!(e(&["minutes", "--csv"]).contains("--csv needs a value"));
+        assert!(
+            e(&["minutes", "--csv", "x", "--out", "o", "--wick-clip", "a"])
+                .contains("not a whole number")
+        );
+        assert!(e(&["minutes", "--csv", "/no/such", "--out", "o"]).contains("/no/such"));
+        // A Saturday's bars only: nothing to keep, and the directory is not made a mess of.
+        let d = std::env::temp_dir().join(format!("tf-ref-minutes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let csv = d.join("m.csv");
+        let ts = (20_729u64 * 86_400 + 15 * 3600) * 1_000_000_000;
+        fs::write(
+            &csv,
+            format!("ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume,symbol\n{ts},33,90,1,1,1,1,1,5,AAA\n"),
+        )
+        .unwrap();
+        let out = d.join("out");
+        let err = e(&[
+            "minutes",
+            "--csv",
+            csv.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ]);
+        assert!(
+            err.contains("nothing kept") && err.contains("1 on closed days"),
+            "{err}"
+        );
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -13,8 +13,9 @@ use tf_host::research::{
 };
 use tf_host::set::StrategySet;
 use tf_reference::{
-    ASSET_COLUMNS, BAR_COLUMNS, Params, Symbology, build, date_days, merge_assets, merge_etf_list,
-    parse_assets, read_bars,
+    ASSET_COLUMNS, BAR_COLUMNS, DEFAULT_WICK_CLIP_PERMILLE, HISTORY_COLUMNS, HistoryError,
+    HistoryParams, MinuteHistory, Params, Symbology, build, date_days, date_text, merge_assets,
+    merge_etf_list, merge_history, parse_assets, read_bars,
 };
 use tf_universe::{Snapshot, StaticFeature};
 
@@ -24,7 +25,8 @@ pub(crate) const USAGE: &str = "usage:
                     [--id-space N] [--latency-ms N]
     tf research show DIR
     tf research snapshots --bars FILE --symbology FILE --from DATE --to DATE --out DIR
-                          [--assets FILE] [--etf-list FILE] [--window N] [--min-days N]";
+                          [--assets FILE] [--etf-list FILE] [--window N] [--min-days N]
+                          [--minutes-dir DIR [--history-sessions N] [--wick-clip PERMILLE]]";
 
 pub(crate) fn research(args: &[String]) -> Result<(), String> {
     print!("{}", run(args)?);
@@ -235,6 +237,9 @@ fn snapshots(args: &[String]) -> Result<String, String> {
             "--etf-list",
             "--window",
             "--min-days",
+            "--minutes-dir",
+            "--history-sessions",
+            "--wick-clip",
         ],
         &[],
     )?;
@@ -256,6 +261,17 @@ fn snapshots(args: &[String]) -> Result<String, String> {
     let (Some(from), Some(to)) = (date_arg(&f, "--from")?, date_arg(&f, "--to")?) else {
         return Err(format!("--from and --to are required\n{USAGE}"));
     };
+    let hist_params = HistoryParams {
+        sessions: num("--history-sessions", HistoryParams::default().sessions)?,
+        average_over: p.window,
+        min_days: p.min_days,
+    };
+    let wick_clip = match f.get("--wick-clip") {
+        None => DEFAULT_WICK_CLIP_PERMILLE,
+        Some(c) => c
+            .parse::<u32>()
+            .map_err(|_| format!("--wick-clip {c}: not a whole number of permille"))?,
+    };
     let bars_path = f.need("--bars")?;
     let sym_path = f.need("--symbology")?;
     let out = Path::new(f.need("--out")?);
@@ -272,6 +288,20 @@ fn snapshots(args: &[String]) -> Result<String, String> {
     fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     // Each trading day from `from` to `to`, with what was known before it.
     let (a, b) = (parse_date(&from)?, parse_date(&to)?);
+    let minutes = match f.get("--minutes-dir") {
+        Some(d) => Some((
+            d,
+            kept_minutes(
+                Path::new(d),
+                a.days(),
+                b.days(),
+                hist_params.sessions,
+                wick_clip,
+            )?,
+        )),
+        None => None,
+    };
+    let mut minute_notes: Vec<String> = Vec::new();
     let cal = Calendar::us_equities();
     let mut day = a;
     let mut made = Vec::new();
@@ -293,6 +323,31 @@ fn snapshots(args: &[String]) -> Result<String, String> {
             if let Some(text) = &etf {
                 merge_etf_list(&mut rows, text).map_err(|m| format!("--etf-list: {m}"))?;
                 columns.insert(StaticFeature::Etf);
+            }
+            if let Some((dir, h)) = &minutes {
+                // As of the session before the day: the day's own bars (they may be in the directory, for a day already
+                // stored) are never looked at.
+                let (hist, hrep) = h.build_as_of(before, hist_params).map_err(|e| match e {
+                    HistoryError::NoBars => format!(
+                        "{date}: no minute sessions before it in {dir}: pull them (scripts/prepare_minutes.sh)"
+                    ),
+                    e => format!("{date}: {dir}: {e} (scripts/prepare_minutes.sh pulls what is missing)"),
+                })?;
+                if hrep.as_of != rep.as_of {
+                    return Err(format!(
+                        "{date}: the minute sessions end on {} but the daily bars on {}: pull both to the same day (scripts/prepare_minutes.sh pulls what is missing)",
+                        hrep.as_of, rep.as_of
+                    ));
+                }
+                let (matched, only) = merge_history(&mut rows, &hist);
+                columns.extend(HISTORY_COLUMNS);
+                minute_notes.push(format!(
+                    "{date}: minute history of {} sessions ({} to {}), {matched} of {} symbols matched ({only} in the history only)",
+                    hrep.sessions,
+                    hrep.first_session,
+                    hrep.as_of,
+                    rows.len()
+                ));
             }
             let snap = Snapshot {
                 as_of: rep.as_of.clone(),
@@ -322,8 +377,61 @@ fn snapshots(args: &[String]) -> Result<String, String> {
     if etf.is_none() {
         s.push_str("no etf list: etf is absent\n");
     }
-    s.push_str("no minute history: the columns a strategy needs from it (previous high and low, ATR, volume baselines) are absent\n");
+    match (minute_notes.first(), minute_notes.last()) {
+        (Some(first), Some(last)) => {
+            s.push_str(first);
+            s.push('\n');
+            if first != last {
+                s.push_str(last);
+                s.push('\n');
+            }
+        }
+        _ => s.push_str("no minute history: the columns a strategy needs from it (previous high and low, ATR, volume baselines) are absent\n"),
+    }
     Ok(s)
+}
+
+/// The kept days of sessions (`tf reference minutes`) a range of snapshots needs: from `history_sessions` before the first day
+/// to the day before the last, in one history, so each day is built from it as of the session before.
+fn kept_minutes(
+    dir: &Path,
+    from: i64,
+    to: i64,
+    history_sessions: usize,
+    wick_clip: u32,
+) -> Result<MinuteHistory, String> {
+    let mut files: Vec<(i64, PathBuf)> = Vec::new();
+    for e in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let path = e.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        let day = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".sessions"))
+            .and_then(date_days);
+        if let Some(d) = day {
+            files.push((d, path));
+        }
+    }
+    files.sort();
+    let first_needed = files
+        .partition_point(|(d, _)| *d < from)
+        .saturating_sub(history_sessions);
+    let mut h = MinuteHistory::new(i64::MAX, wick_clip);
+    let mut loaded = 0;
+    for (d, path) in files.iter().skip(first_needed).take_while(|(d, _)| *d < to) {
+        let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        h.load_day(&text)
+            .map_err(|e| format!("{} ({}): {e}", path.display(), date_text(*d)))?;
+        loaded += 1;
+    }
+    if loaded == 0 {
+        return Err(format!(
+            "{}: no kept minute sessions before {}: pull them (scripts/prepare_minutes.sh)",
+            dir.display(),
+            date_text(to)
+        ));
+    }
+    Ok(h)
 }
 
 fn parse_date(s: &str) -> Result<Date, String> {
@@ -435,6 +543,171 @@ mod tests {
                 .unwrap_err()
                 .contains("not both")
         );
+    }
+
+    #[test]
+    fn minute_sessions_kept_by_day_give_each_snapshot_the_columns_as_of_the_session_before_it() {
+        let d = scratch("minutes-dir");
+        let p = |n: &str| d.join(n).to_string_lossy().into_owned();
+        // Daily bars Wednesday 30 September to Monday 5 October 2026 (the 3rd and 4th are a weekend), one symbol.
+        let mut bars =
+            String::from("ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume\n");
+        for day in ["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-05"] {
+            let ts = date_days(day).unwrap() as u64 * 86_400_000_000_000;
+            bars.push_str(&format!(
+                "{ts},35,90,1,10000000000,11000000000,9000000000,10000000000,1000\n"
+            ));
+        }
+        fs::write(p("bars.csv"), bars).unwrap();
+        fs::write(
+            p("sym.json"),
+            r#"{"result":{"AAA":[{"d0":"2026-01-01","d1":"2027-01-01","s":"1"}]}}"#,
+        )
+        .unwrap();
+        // Minute bars with no symbols, as Databento gives them for every symbol at once: at the open (13:30 UTC in
+        // October) and an hour later; the first volume and the high are different on every day.
+        let mut min =
+            String::from("ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume\n");
+        for (day, vol, high) in [
+            (20_726u64, 100u64, 11u64),
+            (20_727, 200, 12),
+            (20_728, 300, 13),
+            (20_731, 400, 14),
+        ] {
+            for (m, v) in [(0u64, vol), (60, 40)] {
+                let ts = (day * 86_400 + 13 * 3600 + 1800 + m * 60) * 1_000_000_000;
+                min.push_str(&format!(
+                    "{ts},33,90,1,10000000000,{}000000000,9000000000,10500000000,{v}\n",
+                    high
+                ));
+            }
+        }
+        fs::write(p("min.csv"), min).unwrap();
+        let (pbars, psym, psessions, pmin) =
+            (p("bars.csv"), p("sym.json"), p("sessions"), p("min.csv"));
+        let none = "4294967295"; // no wick cap: the raw highs
+        let kept = run_ref(&[
+            "minutes",
+            "--csv",
+            &pmin,
+            "--symbology",
+            &psym,
+            "--out",
+            &psessions,
+            "--wick-clip",
+            none,
+        ]);
+        assert!(
+            kept.contains("kept 4 day(s)") && kept.contains("2026-09-30 to 2026-10-05"),
+            "{kept}"
+        );
+        let mut files: Vec<String> = fs::read_dir(p("sessions"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                "2026-09-30.sessions",
+                "2026-10-01.sessions",
+                "2026-10-02.sessions",
+                "2026-10-05.sessions"
+            ],
+            "one file a day, no half-written one left"
+        );
+
+        let out = p("snaps");
+        let make_from = |from: &str, extra: &[&str]| {
+            let mut a = vec![
+                "snapshots",
+                "--bars",
+                &pbars,
+                "--symbology",
+                &psym,
+                "--min-days",
+                "1",
+                "--window",
+                "2",
+                "--out",
+                &out,
+                "--from",
+                from,
+                "--to",
+                "2026-10-05",
+            ];
+            a.extend_from_slice(extra);
+            run(&args(&a))
+        };
+        let make = |extra: &[&str]| make_from("2026-10-02", extra);
+        let text = make(&["--minutes-dir", &psessions, "--wick-clip", none]).unwrap();
+        assert!(
+            text.contains("minute history of 2 sessions (2026-09-30 to 2026-10-01)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("minute history of 3 sessions (2026-09-30 to 2026-10-02)"),
+            "{text}"
+        );
+        assert!(!text.contains("no minute history"), "{text}");
+        let snap = |date: &str| {
+            Snapshot::parse(&fs::read_to_string(format!("{out}/{date}.snapshot")).unwrap()).unwrap()
+        };
+        // The 2nd is as of the 1st: its own file is in the directory and is not looked at. The 5th is as of the 2nd.
+        let (second, fifth) = (snap("2026-10-02"), snap("2026-10-05"));
+        let (r2, r5) = (second.row("AAA").unwrap(), fifth.row("AAA").unwrap());
+        assert_eq!(
+            (second.as_of.as_str(), fifth.as_of.as_str()),
+            ("2026-10-01", "2026-10-02")
+        );
+        assert_eq!(
+            (r2.prev_high, r5.prev_high),
+            (Some(12_000_000_000), Some(13_000_000_000))
+        );
+        assert_eq!(
+            (r2.vol_first1, r5.vol_first1),
+            (Some((100 + 200) / 2), Some((200 + 300) / 2))
+        );
+        assert_eq!(r5.prev_close, Some(10_500_000_000));
+        // A strategy that requires the columns can use the snapshot.
+        let need =
+            tf_universe::Spec::parse("universe v1\nrequires prev_high vol_first1\n").unwrap();
+        assert!(tf_universe::select(&need, &second).is_ok());
+
+        // A wick cap other than the one the days were kept with is refused, not mixed.
+        let e = make(&["--minutes-dir", &psessions]).unwrap_err();
+        assert!(
+            e.contains("wick cap of 4294967295 permille and this history uses 5"),
+            "{e}"
+        );
+        // A missing session in the middle is an error naming the day; so is a directory with nothing before the range.
+        fs::remove_file(p("sessions/2026-10-01.sessions")).unwrap();
+        let e = make(&["--minutes-dir", &psessions, "--wick-clip", none]).unwrap_err();
+        assert!(
+            e.contains("end on 2026-09-30 but the daily bars on 2026-10-01")
+                && e.contains("prepare_minutes.sh"),
+            "{e}"
+        );
+        let e = make_from(
+            "2026-10-05",
+            &["--minutes-dir", &psessions, "--wick-clip", none],
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("no bar at all on 2026-10-01") && e.contains("prepare_minutes.sh"),
+            "{e}"
+        );
+        fs::create_dir_all(p("empty")).unwrap();
+        let e = make(&["--minutes-dir", &p("empty")]).unwrap_err();
+        assert!(
+            e.contains("no kept minute sessions before 2026-10-05"),
+            "{e}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn run_ref(a: &[&str]) -> String {
+        crate::reference_cmd::run(&args(a)).unwrap()
     }
 
     #[test]

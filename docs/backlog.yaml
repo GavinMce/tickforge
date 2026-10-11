@@ -2586,10 +2586,17 @@ epics:
         jira: TIC-207
         title: "Minute-history columns in each day's snapshot, in the research command and the daily prepare job"
         status: todo
+        progress: >-
+          ADR 0079. Done: minute bars are reduced once a day to a small file of sessions (`tf reference minutes`, 2 MB for the whole market) and `tf research snapshots --minutes-dir`
+          builds each day as of the session before it (`MinuteHistory::build_as_of`; a test that a day's columns do not use that day's bars, with the day's own file in the directory);
+          `scripts/prepare_minutes.sh` keeps the days (the range runner stops without them, the prepare job goes on with a warning); `fetch_minutes.sh` can now pull the whole market
+          (Databento refuses mapped symbols for it: bars by instrument number named by the symbology); cost and size stated (63 sessions: $0, 171 million bars, 9.6 GB dbn, about 17 GB as CSV,
+          so a file a day and not one CSV); real day compared with the consolidated daily bars (`scripts/check_minutes.py`: close within 2% for 99.1% of 5,982 names). Not done: the cluster fill
+          of the first 60 sessions and a range run over it.
         deps: [E19-S04, E19-S31]
         ac:
-          - "`tf research snapshots --minutes FILE` builds each day's snapshot with the columns as of the session before it, from one pass over the minute bars, and a column is unknown, never zero, where the history is short"
-          - "scripts/fetch_minutes.sh runs in the prepare job and the range runner under a stated cost cap, and the cost and size of 60 sessions of the whole market are stated first"
+          - "`tf research snapshots --minutes-dir DIR` builds each day's snapshot with the columns as of the session before it, from the kept sessions (one file a day, made by `tf reference minutes` from one pass over that day's minute bars), and a column is unknown, never zero, where the history is short"
+          - "scripts/prepare_minutes.sh runs in the prepare job and the range runner under a stated cost cap, and the cost and size of 60 sessions of the whole market are stated first"
           - "A test that a day's columns do not use that day's bars, and one on real data compared with Databento's daily bars"
       - id: E19-S53
         jira: TIC-208

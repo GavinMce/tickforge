@@ -43,11 +43,13 @@ use tf_calendar::{Calendar, CalendarError, Date, SessionTimes};
 use tf_engine::{Ema, Seed};
 use tf_universe::{CUMVOL_CHECKPOINTS, HISTORY_FEATURES, RefRow, StaticFeature, valid_name};
 
-use crate::bars::{ReadError, date_text};
+use crate::bars::{ReadError, Symbology, date_days, date_text};
 
 /// Hourly buckets of a regular session (09:30 to 16:00 is seven, the last a half hour).
 const HOURS: usize = 7;
 const NANOS: u64 = 1_000_000_000;
+/// The first line of a kept day of sessions.
+const SESSIONS_MAGIC: &str = "# tf minute sessions 1";
 /// How far a bar's high may stand above its body, and its low below, in permille of the body's price.
 pub const DEFAULT_WICK_CLIP_PERMILLE: u32 = 5;
 /// Periods the columns are defined with.
@@ -125,6 +127,8 @@ pub enum HistoryError {
     MissingSession(String),
     /// The calendar cannot answer for a bar's date (it is outside its table).
     Calendar(String),
+    /// A kept day of sessions that cannot be read back, or does not fit this history.
+    Sessions(String),
 }
 
 impl std::fmt::Display for HistoryError {
@@ -137,7 +141,7 @@ impl std::fmt::Display for HistoryError {
                 f,
                 "the file has no bar at all on {d}, a trading day between its first and last: pull it again (a missing day would shrink every average)"
             ),
-            HistoryError::Calendar(e) => write!(f, "{e}"),
+            HistoryError::Calendar(e) | HistoryError::Sessions(e) => write!(f, "{e}"),
         }
     }
 }
@@ -284,9 +288,190 @@ impl MinuteHistory {
         Ok(())
     }
 
+    /// What reading left out so far, and the days (since 1970-01-01, oldest first) that have bars.
+    pub fn report_and_days(&self) -> (HistoryReport, Vec<i64>) {
+        let mut days: Vec<i64> = self
+            .days
+            .iter()
+            .filter(|(_, f)| f.is_some_and(|f| f.bars > 0))
+            .map(|(d, _)| *d)
+            .collect();
+        days.sort_unstable();
+        (self.report.clone(), days)
+    }
+
+    /// One day's sessions of every symbol as text, to keep beside the other days: what [`MinuteHistory::add`] made
+    /// of the day's bars, a few numbers per symbol, small against the bars they came from. `None` when the day has
+    /// no bars. Read back with [`MinuteHistory::load_day`]. The wick cap it was built with is in the header.
+    pub fn export_day(&self, day: i64) -> Option<String> {
+        let f = self
+            .days
+            .get(&day)
+            .copied()
+            .flatten()
+            .filter(|f| f.bars > 0)?;
+        let mut names: Vec<&String> = self
+            .symbols
+            .iter()
+            .filter(|(_, by_day)| by_day.contains_key(&day))
+            .map(|(n, _)| n)
+            .collect();
+        names.sort();
+        let mut out = format!(
+            "{SESSIONS_MAGIC}\nday,{},normal,{},bars,{},clip,{}\n",
+            date_text(day),
+            u8::from(f.normal),
+            f.bars,
+            self.clip_permille
+        );
+        let cell = |v: Option<i64>| v.map_or(String::new(), |x| x.to_string());
+        for n in names {
+            let s = &self.symbols[n][&day];
+            out.push_str(&format!(
+                "{n},{},{},{},{},{},{},{}",
+                u8::from(s.has_regular),
+                s.high,
+                s.low,
+                cell(s.close.map(|c| c.1)),
+                s.pre,
+                s.first1,
+                s.first5
+            ));
+            for c in s.cum {
+                out.push_str(&format!(",{c}"));
+            }
+            for h in s.hours {
+                out.push_str(&format!(",{}", cell(h.map(|x| x.1))));
+            }
+            out.push('\n');
+        }
+        Some(out)
+    }
+
+    /// Take in a day kept by [`MinuteHistory::export_day`]. Refused: text that is not a kept day, a day that has bars
+    /// already, a day the market was closed, and a day made with another wick cap (the columns would mix two rules).
+    pub fn load_day(&mut self, text: &str) -> Result<(), HistoryError> {
+        let bad = |why: String| HistoryError::Sessions(why);
+        let mut lines = text.lines();
+        if lines.next() != Some(SESSIONS_MAGIC) {
+            return Err(bad(format!(
+                "not a kept day of sessions: expected `{SESSIONS_MAGIC}`"
+            )));
+        }
+        let head: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+        let ["day", day, "normal", normal, "bars", bars, "clip", clip] = head[..] else {
+            return Err(bad(
+                "the second line is not `day,DATE,normal,N,bars,N,clip,N`".to_owned(),
+            ));
+        };
+        let days = date_days(day).ok_or_else(|| bad(format!("`{day}` is not a date")))?;
+        let bars: u64 = bars
+            .parse()
+            .map_err(|_| bad(format!("`{bars}` is not a count")))?;
+        let clip: u32 = clip
+            .parse()
+            .map_err(|_| bad(format!("`{clip}` is not a wick cap")))?;
+        if clip != self.clip_permille {
+            return Err(bad(format!(
+                "{day} was made with a wick cap of {clip} permille and this history uses {}",
+                self.clip_permille
+            )));
+        }
+        let facts = self
+            .facts(Date::from_days(days))
+            .map_err(|e| HistoryError::Calendar(format!("{day}: {e:?}")))?
+            .ok_or_else(|| bad(format!("{day} is a day the market was closed")))?;
+        if self
+            .days
+            .get(&days)
+            .copied()
+            .flatten()
+            .is_some_and(|f| f.bars > 0)
+        {
+            return Err(bad(format!("{day} has bars already")));
+        }
+        if (normal == "1") != facts.normal || !matches!(normal, "0" | "1") {
+            return Err(bad(format!(
+                "{day}: the session length is not the calendar's"
+            )));
+        }
+        let mut sessions = HashMap::new();
+        for (i, line) in lines.enumerate() {
+            let at = |why: String| bad(format!("{day} line {}: {why}", i + 3));
+            let c: Vec<&str> = line.split(',').collect();
+            if c.len() != 8 + 7 + HOURS {
+                return Err(at(format!(
+                    "{} fields, expected {}",
+                    c.len(),
+                    8 + 7 + HOURS
+                )));
+            }
+            if !valid_name(c[0]) {
+                return Err(at(format!("`{}` is not a symbol", c[0])));
+            }
+            let num = |k: usize| {
+                c[k].parse::<u64>()
+                    .map_err(|_| at(format!("`{}` is not a number", c[k])))
+            };
+            let px = |k: usize| {
+                c[k].parse::<i64>()
+                    .map_err(|_| at(format!("`{}` is not a price", c[k])))
+            };
+            let opt = |k: usize| -> Result<Option<i64>, HistoryError> {
+                if c[k].is_empty() {
+                    Ok(None)
+                } else {
+                    px(k).map(Some)
+                }
+            };
+            let mut s = Session {
+                has_regular: match c[1] {
+                    "0" => false,
+                    "1" => true,
+                    o => return Err(at(format!("`{o}` is not 0 or 1"))),
+                },
+                high: px(2)?,
+                low: px(3)?,
+                // The bar's own time is not kept: nothing is added to a kept day.
+                close: opt(4)?.map(|v| (0, v)),
+                pre: num(5)?,
+                first1: num(6)?,
+                first5: num(7)?,
+                ..Session::default()
+            };
+            for (k, slot) in s.cum.iter_mut().enumerate() {
+                *slot = num(8 + k)?;
+            }
+            for (k, slot) in s.hours.iter_mut().enumerate() {
+                *slot = opt(15 + k)?.map(|v| (0, v));
+            }
+            if sessions.insert(c[0].to_owned(), s).is_some() {
+                return Err(at(format!("{} twice", c[0])));
+            }
+        }
+        for (name, s) in sessions {
+            self.symbols.entry(name).or_default().insert(days, s);
+        }
+        if let Some(Some(f)) = self.days.get_mut(&days) {
+            f.bars = bars;
+        }
+        Ok(())
+    }
+
     /// The columns for every symbol, sorted by symbol.
     pub fn build(
         &self,
+        p: HistoryParams,
+    ) -> Result<(Vec<HistoryRow>, HistoryReport), HistoryError> {
+        self.build_as_of(i64::MAX, p)
+    }
+
+    /// The columns as they were known after the session on or before `last_day` (days since 1970-01-01): bars of
+    /// a later day are not looked at, so one history serves every day of a range, each as of the session before it
+    /// (E19-S52). `NoBars` when there is no session on or before `last_day`.
+    pub fn build_as_of(
+        &self,
+        last_day: i64,
         p: HistoryParams,
     ) -> Result<(Vec<HistoryRow>, HistoryReport), HistoryError> {
         let mut rep = self.report.clone();
@@ -294,7 +479,7 @@ impl MinuteHistory {
             let mut v: Vec<i64> = self
                 .days
                 .iter()
-                .filter(|(_, f)| f.is_some_and(|f| f.bars > 0))
+                .filter(|(d, f)| **d <= last_day && f.is_some_and(|f| f.bars > 0))
                 .map(|(d, _)| *d)
                 .collect();
             v.sort_unstable();
@@ -334,7 +519,12 @@ impl MinuteHistory {
         rep.sessions = days.len();
         rep.early_closes = days.iter().filter(|d| !normal(**d)).count();
 
-        let mut names: Vec<&String> = self.symbols.keys().collect();
+        let mut names: Vec<&String> = self
+            .symbols
+            .iter()
+            .filter(|(_, by_day)| by_day.keys().any(|d| *d <= as_of))
+            .map(|(n, _)| n)
+            .collect();
         names.sort();
         rep.symbols = names.len();
         let mut rows = Vec::with_capacity(names.len());
@@ -408,26 +598,59 @@ impl MinuteHistory {
 /// (`pretty_px=false`, `pretty_ts=false`, `map_symbols=true`), as a stream into `h`. A line that does not parse
 /// is an error: a skipped bar would change an average.
 pub fn read_minute_bars(input: impl BufRead, h: &mut MinuteHistory) -> Result<(), ReadError> {
+    read_bars_with(input, None, h)
+}
+
+/// The same for a CSV without symbols (`map_symbols=false`, the only form Databento gives for every symbol at
+/// once): each bar's instrument number is named by `names` (a `symbology.resolve` answer for the same dataset and
+/// day), and a bar whose number it does not name is counted under the names not listable.
+pub fn read_minute_bars_by_id(
+    input: impl BufRead,
+    names: &Symbology,
+    h: &mut MinuteHistory,
+) -> Result<(), ReadError> {
+    read_bars_with(input, Some(names), h)
+}
+
+fn read_bars_with(
+    input: impl BufRead,
+    names: Option<&Symbology>,
+    h: &mut MinuteHistory,
+) -> Result<(), ReadError> {
     const HEADER: &str =
         "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume,symbol";
+    const HEADER_BY_ID: &str =
+        "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume";
+    let want = if names.is_some() {
+        HEADER_BY_ID
+    } else {
+        HEADER
+    };
     let mut lines = input.lines().enumerate();
     match lines.next() {
-        Some((_, Ok(l))) if l == HEADER => {}
+        Some((_, Ok(l))) if l == want => {}
         _ => {
             return Err(ReadError {
                 line: 1,
-                why: format!(
-                    "expected the header `{HEADER}` (fixed-point prices, integer times, symbols mapped)"
-                ),
+                why: if names.is_some() {
+                    format!(
+                        "expected the header `{want}` (fixed-point prices, integer times, no symbols)"
+                    )
+                } else {
+                    format!(
+                        "expected the header `{want}` (fixed-point prices, integer times, symbols mapped)"
+                    )
+                },
             });
         }
     }
+    let fields = if names.is_some() { 9 } else { 10 };
     for (i, line) in lines {
         let err = |why: String| ReadError { line: i + 1, why };
         let line = line.map_err(|e| err(e.to_string()))?;
         let c: Vec<&str> = line.split(',').collect();
-        if c.len() != 10 {
-            return Err(err(format!("{} fields, expected 10", c.len())));
+        if c.len() != fields {
+            return Err(err(format!("{} fields, expected {fields}", c.len())));
         }
         let n = |k: usize| {
             c[k].parse::<u64>()
@@ -448,7 +671,16 @@ pub fn read_minute_bars(input: impl BufRead, h: &mut MinuteHistory) -> Result<()
                 "the bar's high and low do not contain its open and close".to_owned(),
             ));
         }
-        h.add(ts, c[9], open, high, low, close, n(8)?)
+        let symbol = match names {
+            None => c[9],
+            Some(names) => {
+                let id =
+                    u32::try_from(n(3)?).map_err(|_| err(format!("`{}` is too large", c[3])))?;
+                let day = i64::try_from(ts / (86_400 * NANOS)).unwrap_or(i64::MAX);
+                names.symbol(id, day).unwrap_or("")
+            }
+        };
+        h.add(ts, symbol, open, high, low, close, n(8)?)
             .map_err(|e| err(e.to_string()))?;
     }
     Ok(())

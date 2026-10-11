@@ -718,3 +718,244 @@ fn an_hour_ends_on_the_hour_the_last_minute_of_one_and_the_first_of_the_next_are
     let (rows, _) = h.build(small()).unwrap();
     assert_eq!(col(&rows[0], StaticFeature::Ema100hCount), Some(20 * 7));
 }
+
+// --- E19-S52: one history for every day of a range, kept day by day ---
+
+/// Three sessions of three symbols: A and B trade all three; PRE has premarket volume only on the second; LATE is first
+/// seen on the third. `third_volume` is the third session's first-minute volume of A, to show it never reaches an
+/// earlier day's columns.
+fn range(h: &mut MinuteHistory, third_volume: u64) {
+    for (i, d) in ["2026-09-30", "2026-10-01", "2026-10-02"]
+        .iter()
+        .enumerate()
+    {
+        let k = i as i64;
+        add(h, at(d, -300), "A", 50 + k, 49, 50, 11 + k as u64);
+        add(
+            h,
+            at(d, 0),
+            "A",
+            100 + k,
+            99,
+            100 + k,
+            if i == 2 { third_volume } else { 200 + k as u64 },
+        );
+        add(h, at(d, 61), "A", 105 + k, 98, 104, 30);
+        add(h, at(d, 389), "A", 101, 99, 100 + 2 * k, 7);
+        add(h, at(d, 0), "B", 20, 19, 20, 5);
+        add(h, at(d, 90), "B", 21, 19, 20 + k, 9);
+    }
+    add(h, at("2026-10-01", -100), "PRE", 7, 7, 7, 40);
+    add(h, at("2026-10-02", 3), "LATE", 9, 8, 9, 60);
+}
+
+fn day_of(d: &str) -> i64 {
+    date_days(d).unwrap()
+}
+
+#[test]
+fn a_kept_day_loads_into_a_new_history_and_gives_the_same_columns() {
+    let mut whole = MinuteHistory::new(i64::MAX, 5);
+    range(&mut whole, 300);
+    let (want, want_rep) = whole.build(small()).unwrap();
+
+    let mut loaded = MinuteHistory::new(i64::MAX, 5);
+    for d in ["2026-09-30", "2026-10-01", "2026-10-02"] {
+        let text = whole.export_day(day_of(d)).unwrap();
+        loaded.load_day(&text).unwrap();
+    }
+    let (got, got_rep) = loaded.build(small()).unwrap();
+    assert_eq!(got, want);
+    assert_eq!(
+        (
+            got_rep.as_of,
+            got_rep.first_session,
+            got_rep.sessions,
+            got_rep.early_closes,
+            got_rep.symbols
+        ),
+        (
+            want_rep.as_of,
+            want_rep.first_session,
+            want_rep.sessions,
+            want_rep.early_closes,
+            want_rep.symbols
+        )
+    );
+    // The kept text is small and sorted by symbol, one line a symbol under two header lines.
+    let text = whole.export_day(day_of("2026-10-01")).unwrap();
+    let names: Vec<&str> = text
+        .lines()
+        .skip(2)
+        .map(|l| l.split(',').next().unwrap())
+        .collect();
+    assert_eq!(names, ["A", "B", "PRE"]);
+    assert!(text.starts_with("# tf minute sessions 1\nday,2026-10-01,normal,1,bars,"));
+    assert!(text.lines().nth(1).unwrap().ends_with(",clip,5"));
+    // A day with no bars has nothing to keep, and so does a day nobody asked about.
+    assert_eq!(whole.export_day(day_of("2026-10-03")), None);
+    assert_eq!(whole.export_day(day_of("2026-10-05")), None);
+}
+
+#[test]
+fn an_early_close_keeps_its_length_through_a_kept_day() {
+    let mut h = MinuteHistory::new(i64::MAX, u32::MAX);
+    add(&mut h, at("2026-11-25", 0), "E", 30, 30, 30, 100);
+    add(&mut h, at("2026-11-27", 0), "E", 30, 30, 30, 200);
+    let mut back = MinuteHistory::new(i64::MAX, u32::MAX);
+    for d in ["2026-11-25", "2026-11-27"] {
+        let text = h.export_day(day_of(d)).unwrap();
+        assert!(text.contains(if d == "2026-11-25" {
+            ",normal,1,"
+        } else {
+            ",normal,0,"
+        }));
+        back.load_day(&text).unwrap();
+    }
+    let (rows, rep) = back.build(small()).unwrap();
+    assert_eq!((rep.sessions, rep.early_closes), (2, 1));
+    assert_eq!(rows, h.build(small()).unwrap().0);
+}
+
+#[test]
+fn a_day_is_known_as_of_the_session_before_it_and_never_by_its_own_bars() {
+    let mut a = MinuteHistory::new(i64::MAX, u32::MAX);
+    range(&mut a, 300);
+    let mut b = MinuteHistory::new(i64::MAX, u32::MAX);
+    range(&mut b, 999_999);
+    // As of 1 October: the same whatever the 2nd's bars were, and equal to a history that never saw the 2nd.
+    let before_third = day_of("2026-10-01");
+    let (ra, rep) = a.build_as_of(before_third, small()).unwrap();
+    let (rb, _) = b.build_as_of(before_third, small()).unwrap();
+    assert_eq!(ra, rb);
+    assert_eq!(rep.as_of, "2026-10-01");
+    assert_eq!(rep.sessions, 2);
+    let mut never = MinuteHistory::new(before_third, u32::MAX);
+    range(&mut never, 300);
+    assert_eq!(ra, never.build(small()).unwrap().0);
+    // The 2nd is in the next day's columns: A's previous high is the 2nd's.
+    let (rc, rep) = a.build_as_of(day_of("2026-10-02"), small()).unwrap();
+    assert_eq!(rep.as_of, "2026-10-02");
+    let a_row = |rows: &[HistoryRow]| rows.iter().find(|r| r.symbol == "A").unwrap().clone();
+    assert_eq!(col(&a_row(&rc), StaticFeature::PrevHigh), Some(107 * D));
+    assert_eq!(col(&a_row(&ra), StaticFeature::PrevHigh), Some(106 * D));
+    // The volume average moves with it: (201 + 300) / 2 against (200 + 201) / 2.
+    assert_eq!(
+        col(&a_row(&rc), StaticFeature::VolFirst1),
+        Some((201 + 300) / 2)
+    );
+    assert_eq!(
+        col(&a_row(&ra), StaticFeature::VolFirst1),
+        Some((200 + 201) / 2)
+    );
+    // A symbol first seen on the 2nd is not in the columns as of the 1st, and PRE (seen on the 1st) is.
+    assert!(ra.iter().all(|r| r.symbol != "LATE"));
+    assert!(ra.iter().any(|r| r.symbol == "PRE"));
+    assert!(rc.iter().any(|r| r.symbol == "LATE"));
+    // Before the first session there is nothing to know.
+    assert_eq!(
+        a.build_as_of(day_of("2026-09-29"), small()).unwrap_err(),
+        HistoryError::NoBars
+    );
+    // A weekend day is as of the Friday before it.
+    let (_, rep) = a.build_as_of(day_of("2026-10-04"), small()).unwrap();
+    assert_eq!(rep.as_of, "2026-10-02");
+}
+
+#[test]
+fn a_kept_day_that_does_not_fit_is_refused_and_says_why() {
+    let mut whole = MinuteHistory::new(i64::MAX, 5);
+    range(&mut whole, 300);
+    let good = whole.export_day(day_of("2026-10-01")).unwrap();
+    let load = |h: &mut MinuteHistory, text: &str| h.load_day(text).unwrap_err().to_string();
+    let mut h = MinuteHistory::new(i64::MAX, 5);
+    assert!(load(&mut h, "").contains("not a kept day"));
+    assert!(load(&mut h, "# tf minute sessions 2\n").contains("not a kept day"));
+    assert!(load(&mut h, "# tf minute sessions 1\nday,2026-10-01\n").contains("second line"));
+    // Another wick cap: the columns would mix two rules.
+    let mut other = MinuteHistory::new(i64::MAX, 7);
+    assert!(load(&mut other, &good).contains("wick cap of 5 permille and this history uses 7"));
+    // A day twice.
+    h.load_day(&good).unwrap();
+    assert!(load(&mut h, &good).contains("has bars already"));
+    // A day the market was closed (Saturday), a date that is not one.
+    let mut h = MinuteHistory::new(i64::MAX, 5);
+    assert!(load(&mut h, &good.replace("day,2026-10-01", "day,2026-10-03")).contains("closed"));
+    assert!(load(&mut h, &good.replace("day,2026-10-01", "day,soon")).contains("not a date"));
+    // A normal day marked short is not the calendar's.
+    assert!(load(&mut h, &good.replace(",normal,1,", ",normal,0,")).contains("session length"));
+    assert!(load(&mut h, &good.replace(",normal,1,", ",normal,2,")).contains("session length"));
+    // Lines: too few fields, a symbol twice, a bad flag, a bad number, a bad name.
+    let first_line = good.lines().nth(2).unwrap();
+    assert!(load(&mut h, &format!("{good}A,1,2\n")).contains("fields"));
+    assert!(load(&mut h, &format!("{good}{first_line}\n")).contains("twice"));
+    assert!(load(&mut h, &good.replacen(&format!("{}1,", "A,"), "A,9,", 1)).contains("not 0 or 1"));
+    assert!(load(&mut h, &good.replacen("A,1,", "A,1,x", 1)).contains("not a price"));
+    assert!(load(&mut h, &good.replacen("\nA,", "\na b,", 1)).contains("not a symbol"));
+    // None of the refusals left anything behind.
+    assert!(h.export_day(day_of("2026-10-01")).is_none());
+}
+
+fn names_json(entries: &[(&str, u32)]) -> String {
+    let body: Vec<String> = entries
+        .iter()
+        .map(|(s, id)| format!(r#""{s}":[{{"d0":"2026-10-01","d1":"2026-10-10","s":"{id}"}}]"#))
+        .collect();
+    format!(r#"{{"result":{{{}}}}}"#, body.join(","))
+}
+
+fn csv_by_id(rows: &[(u64, u32, &str)]) -> String {
+    let mut s =
+        String::from("ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume\n");
+    for (ts, id, tail) in rows {
+        s.push_str(&format!("{ts},33,93,{id},{tail}\n"));
+    }
+    s
+}
+
+#[test]
+fn bars_without_symbols_are_named_by_the_symbology_and_an_unnamed_one_is_counted() {
+    let names = crate::Symbology::parse(&names_json(&[("AAA", 7), ("BBB", 8)])).unwrap();
+    let ts = at("2026-10-02", 0);
+    let body = |v: u64| format!("{},{},{},{},{v}", 10 * D, 11 * D, 9 * D, 10 * D);
+    let text = csv_by_id(&[(ts, 7, &body(40)), (ts, 8, &body(50)), (ts, 99, &body(60))]);
+    let mut h = MinuteHistory::new(i64::MAX, u32::MAX);
+    read_minute_bars_by_id(Cursor::new(text.as_bytes()), &names, &mut h).unwrap();
+    let (rows, rep) = h.build(small()).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.symbol.as_str()).collect::<Vec<_>>(),
+        ["AAA", "BBB"]
+    );
+    assert_eq!(col(&rows[0], StaticFeature::VolFirst1), Some(40));
+    assert_eq!(col(&rows[1], StaticFeature::VolFirst1), Some(50));
+    assert_eq!(
+        (rep.bars_read, rep.bars_bad_symbol),
+        (3, 1),
+        "instrument 99 has no name"
+    );
+    // The id is read on its own day: a number named only for other days names nothing.
+    let late = csv_by_id(&[(at("2026-10-12", 0), 7, &body(1))]);
+    let mut h = MinuteHistory::new(i64::MAX, u32::MAX);
+    read_minute_bars_by_id(Cursor::new(late.as_bytes()), &names, &mut h).unwrap();
+    assert_eq!(h.build(small()).unwrap_err(), HistoryError::NoBars);
+    // The two forms are not mixed: each wants its own header, and a field count to match.
+    let mut h = MinuteHistory::new(i64::MAX, u32::MAX);
+    let e = read_minute_bars(Cursor::new(text.as_bytes()), &mut h)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("expected the header") && e.contains("symbols mapped"),
+        "{e}"
+    );
+    let e = read_minute_bars_by_id(Cursor::new(csv(&[]).as_bytes()), &names, &mut h)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no symbols"), "{e}");
+    let short = "ts_event,rtype,publisher_id,instrument_id,open,high,low,close,volume\n1,2,3\n";
+    assert!(
+        read_minute_bars_by_id(Cursor::new(short.as_bytes()), &names, &mut h)
+            .unwrap_err()
+            .to_string()
+            .contains("3 fields, expected 9")
+    );
+}

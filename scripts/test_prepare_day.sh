@@ -37,6 +37,13 @@ STUB
 echo "fetch_reference $*" >> "$STUB_LOG"
 mkdir -p "$1"; : > "$1/bars.csv"; : > "$1/symbology.json"
 STUB
+  # minutes: records itself; fails if STUB_MINUTES_FAIL=1 (a day that could not be fetched).
+  cat > "$work/scripts/prepare_minutes.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "prepare_minutes $*" >> "$STUB_LOG"
+[ "${STUB_MINUTES_FAIL:-0}" = 1 ] && exit 1
+exit 0
+STUB
   # pull: stores the day unless STUB_NO_TAPE=1.
   cat > "$work/scripts/pull_history.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -57,7 +64,7 @@ STUB
 
 prep() { # day (extra env as arguments before --)
   env PATH="$work/bin:$PATH" STUB_LOG="$work/log" DATABENTO_API_KEY=k MAX_COST=9.00 \
-    SET="$work/config/month.set" STORE="$work/data/store" REF="$work/data/ref" SNAPS="$work/data/snaps" CERTS="$work/data/certs.txt" \
+    SET="$work/config/month.set" STORE="$work/data/store" REF="$work/data/ref" SNAPS="$work/data/snaps" MINUTES="$work/data/minutes" CERTS="$work/data/certs.txt" \
     "$@" > "$work/out" 2>&1
 }
 steps() { sed -E 's/ .*//; s/^tf$//' "$work/log" | tr '\n' ' '; }
@@ -69,13 +76,16 @@ prep "$work/scripts/prepare-day.sh" 2026-10-08; code=$?
 [ "$code" = 0 ] && ok "a weekday is prepared" || no "a weekday is prepared: exit $code: $(cat "$work/out")"
 grep -q "fetch_reference $work/data/ref 2026-07-25 2026-10-08" "$work/log" && ok "fetches 75 days of bars up to the day" || no "fetches 75 days of bars up to the day: $(cat "$work/log")"
 grep -q "tf research snapshots .*--from 2026-10-08 --to 2026-10-08" "$work/log" && ok "makes the day's snapshot" || no "makes the day's snapshot"
+grep -q "prepare_minutes $work/data/minutes 2026-07-10 2026-10-07" "$work/log" && ok "keeps the minute sessions for the 90 days up to the day before" || no "keeps the minute sessions for the 90 days up to the day before: $(grep prepare_minutes "$work/log")"
+grep -q "tf research snapshots .*--from 2026-10-08 --to 2026-10-08 .*--minutes-dir $work/data/minutes" "$work/log" && ok "the day's snapshot is built with them" || no "the day's snapshot is built with them"
+grep -q "tf research snapshots .*--from 2026-10-07 --to 2026-10-07 .*--minutes-dir $work/data/minutes" "$work/log" && ok "and the tape's" || no "and the tape's"
 grep -q "pull_history $work/data/store EQUS.MINI tbbo ALL_SYMBOLS 2026-10-07 2026-10-08" "$work/log" && ok "pulls the day before to certify on" || no "pulls the day before to certify on"
 grep -q "tf research snapshots .*--from 2026-10-07 --to 2026-10-07" "$work/log" && ok "makes the tape's snapshot" || no "makes the tape's snapshot"
 grep -q "tf live certify .*--schema tbbo --date 2026-10-07" "$work/log" && ok "certifies on the tape" || no "certifies on the tape"
 [ -s "$work/data/certs.txt" ] && [ -s "$work/data/certs.txt.for" ] && ok "writes the certificates and their stamp" || no "writes the certificates and their stamp"
 [ ! -e "$work/data/certs.txt.new" ] && ok "leaves no half-written file" || no "leaves no half-written file"
-order=$(grep -n "fetch_reference\|snapshots.*2026-10-08\|pull_history\|store_names\|history index\|live certify" "$work/log" | sed -E 's/^[0-9]+://; s/ .*//' | tr '\n' ' ')
-case "$order" in "fetch_reference tf pull_history store_names tf tf ") ok "in the right order";; *) no "in the right order: $order";; esac
+order=$(grep -n "fetch_reference\|prepare_minutes\|snapshots.*2026-10-08\|pull_history\|store_names\|history index\|live certify" "$work/log" | sed -E 's/^[0-9]+://; s/ .*//' | tr '\n' ' ')
+case "$order" in "fetch_reference prepare_minutes tf pull_history store_names tf tf ") ok "in the right order";; *) no "in the right order: $order";; esac
 
 grep -q "store_names $work/data/store EQUS.MINI tbbo 2026-10-07" "$work/log" && ok "names the tape's instruments" || no "names the tape's instruments: $(cat "$work/log")"
 
@@ -94,6 +104,13 @@ prep "$work/scripts/prepare-day.sh" 2026-10-08
 rm -f "$work/data/certs.txt.for"; : > "$work/log"
 prep "$work/scripts/prepare-day.sh" 2026-10-08
 [ "$(lines 'live certify')" = 1 ] && ok "certifies again without the stamp" || no "certifies again without the stamp"
+
+# Minute sessions that cannot be had do not stop the day: the snapshot is made without the columns, and it is said.
+new_world
+prep STUB_MINUTES_FAIL=1 "$work/scripts/prepare-day.sh" 2026-10-08; code=$?
+[ "$code" = 0 ] && ok "a day without its minute sessions is still prepared" || no "a day without its minute sessions is still prepared: exit $code"
+grep -q "WARNING: the minute sessions could not all be had" "$work/out" && ok "and says so" || no "and says so"
+grep -q "tf research snapshots .*--minutes-dir" "$work/log" && no "no minute columns are asked for then" || ok "no minute columns are asked for then"
 
 # Names that cannot be had stop the certifying: a replay without symbols would refuse every strategy anyway.
 new_world

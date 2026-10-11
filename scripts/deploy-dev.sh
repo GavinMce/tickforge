@@ -14,6 +14,9 @@
 #                   created if missing and put in the cluster as a secret; it is never printed
 #   TF_DATABENTO_KEY_FILE  the Databento key (default ~/.config/tickforge/databento.key), put in the cluster as a secret if there
 #                   is one there already it is left alone; never printed. Without the file the jobs that need it cannot run.
+#   TF_ALPACA_KEY_FILE  the Alpaca paper key (default ~/alpaca.key): the key id on the first line and the secret on the second.
+#                   Put in the cluster as the secret tickforge-alpaca if there is none; never printed. Optional: without it the
+#                   snapshots carry no shortable / easy-to-borrow / tradable flags (the jobs run all the same).
 set -euo pipefail
 
 CONTEXT="admin@homelab"
@@ -22,6 +25,7 @@ NAMESPACE="tickforge"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOKEN_FILE="${TF_DEV_TOKEN_FILE:-$HOME/.config/tickforge/dev-token}"
 KEY_FILE="${TF_DATABENTO_KEY_FILE:-$HOME/.config/tickforge/databento.key}"
+ALPACA_FILE="${TF_ALPACA_KEY_FILE:-$HOME/alpaca.key}"
 
 dry=0
 if [ "${1:-}" = "--dry-run" ]; then dry=1; shift; fi
@@ -69,6 +73,20 @@ if ! kc -n "$NAMESPACE" get secret tickforge-databento >/dev/null 2>&1; then
     echo "created the Databento key secret (from $KEY_FILE)"
   else
     echo "no Databento key at $KEY_FILE: the prepare and live jobs cannot run until the secret tickforge-databento exists" >&2
+  fi
+fi
+
+if ! kc -n "$NAMESPACE" get secret tickforge-alpaca >/dev/null 2>&1; then
+  if [ "$(wc -l < "$ALPACA_FILE" 2>/dev/null || echo 0)" -ge 2 ]; then
+    parts="$(umask 077; mktemp -d)"
+    sed -n 1p "$ALPACA_FILE" | tr -d '\r\n ' > "$parts/key-id"
+    sed -n 2p "$ALPACA_FILE" | tr -d '\r\n ' > "$parts/secret-key"
+    kc -n "$NAMESPACE" create secret generic tickforge-alpaca --from-file=key-id="$parts/key-id" \
+      --from-file=secret-key="$parts/secret-key" >/dev/null
+    rm -rf "$parts"
+    echo "created the Alpaca key secret (from $ALPACA_FILE)"
+  else
+    echo "no Alpaca key id and secret (two lines) at $ALPACA_FILE: snapshots will carry no asset flags" >&2
   fi
 fi
 

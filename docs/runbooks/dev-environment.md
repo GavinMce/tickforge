@@ -14,7 +14,7 @@ Namespace `tickforge`:
 | `tickforge-live` | CronJob 03:50 ET, Mon-Fri | `tf live run` from 03:55 to the 20:00 close, on the simulated broker. |
 | `tickforge-live` and `tickforge-history` | PVCs (30 Gi, 60 Gi) | The ledger, each day's capture, log and report, snapshots and certificates; the history store and the research results. |
 | `tickforge-config` | ConfigMap | `live.cfg`, `month.set` (the variants) and the universe, from `deploy/k8s/config/`. |
-| `tickforge-token`, `tickforge-databento` | Secrets | The sign-in token and the Databento key. Made by the deploy script from files on this machine; never in the repository. |
+| `tickforge-token`, `tickforge-databento`, `tickforge-alpaca` | Secrets | The sign-in token, the Databento key, and the Alpaca paper key id and secret (optional: with it the snapshots carry the shortable, easy-to-borrow and tradable flags). Made by the deploy script from files on this machine; never in the repository. |
 
 Both jobs are kept on the workspace's node (it holds the volumes). The image is built by CI (`.github/workflows/image.yml`) and
 published to `ghcr.io/gavinmce/tickforge`; a pull request's branch is tagged with its commit so it can be tried before it is merged.
@@ -30,9 +30,9 @@ scripts/smoke-dev.sh                              # signs in through a port-forw
 ```
 
 The script names its cluster (`admin@homelab`) on every call, refuses unless the cluster behind that context has the node
-`talos-cp-1`, and never changes your current context (a work cluster is configured on this machine). It makes the two secrets
+`talos-cp-1`, and never changes your current context (a work cluster is configured on this machine). It makes the secrets
 if they are not there: the token in `~/.config/tickforge/dev-token` (made if missing, mode 600) and the Databento key from
-`~/.config/tickforge/databento.key`.
+`~/.config/tickforge/databento.key`; the Alpaca paper key is made from `~/alpaca.key` (key id on the first line, secret on the second) if that file has both.
 
 ## See it
 

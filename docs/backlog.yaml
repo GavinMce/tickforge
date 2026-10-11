@@ -2603,6 +2603,13 @@ epics:
         jira: TIC-209
         title: "Asset list without a person's credentials: shortable, easy to borrow, tradable and ETF flags for the shorts of T05 to T08"
         status: todo
+        progress: >-
+          Decided 2026-10-11: an Alpaca paper key (checked read-only: account active, shorting enabled, 14,393 active US equities of which 5,373 shortable and
+          5,374 easy to borrow) is in the cluster as the secret tickforge-alpaca (key id and secret, made by scripts/deploy-dev.sh from ~/alpaca.key). The prepare job and the
+          backtest Job take it as optional environment, fetch_reference.sh fetches assets.json, and prepare-day.sh and research-range.sh pass it to `tf research snapshots`
+          so each day's snapshot carries shortable, easy_to_borrow and tradable (13,452 symbols on 2026-10-08: 5,179 shortable, 12,695 tradable). Not done: the ETF flag
+          (Alpaca's list has none; it needs --etf-list), the list is the day it is fetched and not point in time for a past range (a bias for old days, to be said in the
+          reports), and the shorts staying off in the set when there is no key.
         deps: [E19-S06]
         ac:
           - "The decision is recorded (an Alpaca paper key for the cluster as a secret, or shorts off and these strategies long-side only); with a key, the prepare job and the range runner fetch assets.json and the snapshots carry the flags, kept per day with the snapshot so a replay is as it was"

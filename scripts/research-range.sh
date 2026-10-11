@@ -63,7 +63,9 @@ done
 
 # 2. The reference and the snapshots. The bars end the day before the last day (a snapshot is as of the session before its day).
 "$here/fetch_reference.sh" "$REF" "$(date -d "$from - 75 days" +%F)" "$to"
-tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$from" --to "$to" --out "$SNAPS"
+assets=()
+[ -s "$REF/assets.json" ] && assets=(--assets "$REF/assets.json")
+tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$from" --to "$to" "${assets[@]}" --out "$SNAPS"
 
 # 3. The run.
 tf history index "$STORE" --dataset "$DATASET" --schema "$SCHEMA"

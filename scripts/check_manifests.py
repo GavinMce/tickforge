@@ -16,7 +16,7 @@ import yaml
 DIR = sys.argv[1] if len(sys.argv) > 1 else "deploy/k8s"
 NAMESPACE = "tickforge"
 IMAGE = "ghcr.io/gavinmce/tickforge"
-SECRETS_OUTSIDE = {"tickforge-token", "tickforge-databento", "tickforge-tls"}
+SECRETS_OUTSIDE = {"tickforge-token", "tickforge-databento", "tickforge-alpaca", "tickforge-tls"}
 
 text = subprocess.run(["kubectl", "kustomize", DIR], check=True, capture_output=True, text=True).stdout
 docs = [d for d in yaml.safe_load_all(text) if d]

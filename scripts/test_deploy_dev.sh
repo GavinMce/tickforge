@@ -33,7 +33,7 @@ chmod +x "$work/bin/kubectl"
 run() { # name, expected exit, then env assignments and arguments
   local label=$1 want=$2; shift 2
   : > "$work/log"
-  env PATH="$work/bin:$PATH" STUB_LOG="$work/log" HOME="$work/home" TF_DEV_TOKEN_FILE="$work/token" TF_DATABENTO_KEY_FILE="$work/key" "$@" > "$work/out" 2>&1
+  env PATH="$work/bin:$PATH" STUB_LOG="$work/log" HOME="$work/home" TF_DEV_TOKEN_FILE="$work/token" TF_DATABENTO_KEY_FILE="$work/key" TF_ALPACA_KEY_FILE="$work/alpaca" "$@" > "$work/out" 2>&1
   local got=$?
   if [ "$got" = "$want" ]; then ok "$label"; else no "$label: wanted exit $want, got $got: $(head -c 300 "$work/out")"; fi
 }
@@ -53,22 +53,31 @@ run "refuses a missing tag" 1 STUB_CONTEXTS="admin@homelab" STUB_NODE=1 "$here/d
 
 # A deployment: every call to the cluster names the homelab context and none changes the current one.
 printf 'k' > "$work/key"
+printf 'PKALPACAKEYID\nthesecretvalue\n' > "$work/alpaca"
 run "deploys" 0 STUB_CONTEXTS="Platform admin@homelab" STUB_NODE=1 TF_K8S_SERVER=https://10.0.30.20:6443 "$here/deploy-dev.sh" abc123
 if grep -v "config get-contexts" "$work/log" | grep -v "kustomize" | grep -v -- "--context admin@homelab" | grep -q .; then no "every call names the context"; else ok "every call names the context"; fi
 grep -q "use-context" "$work/log" && no "never changes the current context" || ok "never changes the current context"
 grep -q -- "--server https://10.0.30.20:6443" "$work/log" && ok "uses the server override" || no "uses the server override"
 grep -q "create secret generic tickforge-token" "$work/log" && ok "makes the token secret" || no "makes the token secret"
 grep -q "create secret generic tickforge-databento" "$work/log" && ok "makes the key secret" || no "makes the key secret"
+grep -q "create secret generic tickforge-alpaca" "$work/log" && ok "makes the Alpaca secret from the two lines" || no "makes the Alpaca secret from the two lines"
+if grep -qF "thesecretvalue" "$work/out" "$work/log"; then no "never prints or passes the Alpaca secret"; else ok "never prints or passes the Alpaca secret"; fi
 grep -q "rollout status deployment/tickforge-workspace" "$work/log" && ok "waits for the workspace" || no "waits for the workspace"
 [ -s "$work/token" ] && [ "$(stat -c %a "$work/token")" = 600 ] && ok "keeps the token private (mode 600)" || no "keeps the token private"
 if grep -qF "$(cat "$work/token")" "$work/out" "$work/log"; then no "never prints or passes the token"; else ok "never prints or passes the token"; fi
 
 # Secrets that are there already are left alone, and a missing key file is said, not fatal.
 rm -f "$work/token"; rm -f "$work/key"
-run "leaves existing secrets alone" 0 STUB_CONTEXTS="admin@homelab" STUB_NODE=1 STUB_SECRETS="tickforge-token tickforge-databento" "$here/deploy-dev.sh" abc123
+run "leaves existing secrets alone" 0 STUB_CONTEXTS="admin@homelab" STUB_NODE=1 STUB_SECRETS="tickforge-token tickforge-databento tickforge-alpaca" "$here/deploy-dev.sh" abc123
 grep -q "create secret" "$work/log" && no "created a secret that was there" || ok "created no secret that was there"
 run "says when there is no Databento key" 0 STUB_CONTEXTS="admin@homelab" STUB_NODE=1 STUB_SECRETS="tickforge-token" "$here/deploy-dev.sh" abc123
 grep -q "no Databento key" "$work/out" && ok "says there is no Databento key" || no "says there is no Databento key"
+
+# The Alpaca key is optional: a file with one line makes no secret, and says so.
+printf 'PKONLYONELINE\n' > "$work/alpaca"
+run "says when the Alpaca key file has one line" 0 STUB_CONTEXTS="admin@homelab" STUB_NODE=1 STUB_SECRETS="tickforge-token tickforge-databento" "$here/deploy-dev.sh" abc123
+grep -q "create secret" "$work/log" && no "made an Alpaca secret from one line" || ok "makes no Alpaca secret from one line"
+grep -q "no Alpaca key id and secret" "$work/out" && ok "says there is no Alpaca key" || no "says there is no Alpaca key"
 
 # A dry run applies nothing and shows the manifests with the tag.
 if [ -n "$real_kubectl" ]; then

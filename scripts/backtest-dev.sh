@@ -100,6 +100,10 @@ spec:
               value: /config/$setfile
             - name: DATABENTO_API_KEY
               valueFrom: {secretKeyRef: {name: tickforge-databento, key: api-key}}
+            - name: APCA_API_KEY_ID
+              valueFrom: {secretKeyRef: {name: tickforge-alpaca, key: key-id, optional: true}}
+            - name: APCA_API_SECRET_KEY
+              valueFrom: {secretKeyRef: {name: tickforge-alpaca, key: secret-key, optional: true}}
           resources:
             requests: {cpu: 500m, memory: 1Gi}
             limits: {cpu: "3", memory: 4Gi}

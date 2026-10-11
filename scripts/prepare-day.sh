@@ -35,7 +35,9 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # 1. The reference, as of the last session before the day.
 start=$(date -d "$day - 75 days" +%F)
 "$here/fetch_reference.sh" "$REF" "$start" "$day"
-tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$day" --to "$day" --out "$SNAPS"
+assets=()
+[ -s "$REF/assets.json" ] && assets=(--assets "$REF/assets.json")
+tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$day" --to "$day" "${assets[@]}" --out "$SNAPS"
 if [ ! -f "$SNAPS/$day.snapshot" ]; then
   echo "no session on $day (a market holiday): nothing more to prepare"
   exit 0
@@ -66,7 +68,7 @@ done
 [ -n "$tape" ] || { echo "no stored or pullable day of $DATASET $SCHEMA in the week before $day to certify on" >&2; exit 1; }
 echo "certifying on $tape"
 "$here/store_names.sh" "$STORE" "$DATASET" "$SCHEMA" "$tape"
-tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$tape" --to "$tape" --out "$SNAPS"
+tf research snapshots --bars "$REF/bars.csv" --symbology "$REF/symbology.json" --from "$tape" --to "$tape" "${assets[@]}" --out "$SNAPS"
 tf history index "$STORE" --dataset "$DATASET" --schema "$SCHEMA"
 tf live certify --set "$SET" --store "$STORE" --dataset "$DATASET" --schema "$SCHEMA" --date "$tape" \
   --snapshots "$SNAPS" --out "$CERTS.new"

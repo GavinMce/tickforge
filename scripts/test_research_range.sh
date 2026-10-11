@@ -103,6 +103,7 @@ case "$job" in *"name: tickforge-live"*) no "the job does not touch the live vol
 case "$job" in *"name: backtest-oct-"*) ok "the job is named for the scenario";; *) no "the job is named for the scenario";; esac
 [ "$(printf '%s' "$job" | grep -c 'kind: Job')" = 1 ] && ok "one job" || no "one job"
 case "$job" in *"value: /config/month.set"*) ok "the job runs the deployed month.set unless told otherwise";; *) no "the job runs the deployed month.set unless told otherwise";; esac
+case "$job" in *"name: APCA_API_KEY_ID"*"name: tickforge-alpaca, key: key-id, optional: true"*|*"name: APCA_API_KEY_ID"*"tickforge-alpaca"*"optional: true"*) ok "the job takes the Alpaca key from the secret, and runs without it";; *) no "the job takes the Alpaca key from the secret, and runs without it";; esac
 job2=$("$here/backtest-dev.sh" --dry-run --set premarket.set pm 2026-10-01 2026-10-08 2>&1); code=$?
 [ "$code" = 0 ] && ok "a dry run with --set prints the job" || no "a dry run with --set prints the job: exit $code"
 case "$job2" in *"value: /config/premarket.set"*) ok "--set names the set the job runs";; *) no "--set names the set the job runs";; esac

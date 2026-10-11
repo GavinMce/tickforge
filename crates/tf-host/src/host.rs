@@ -9,7 +9,7 @@ use tf_strategy::broker::{Broker, BrokerEvent, CancelOutcome, Kind, Submission};
 use tf_strategy::intent::{Intent, IntentId, Pricing, Purpose, Side, StrategyId, Tif};
 use tf_strategy::lifecycle::{Decision, OrderId, OrderState, OrderUpdate};
 use tf_strategy::sim::{Borrow, SimBroker, SimConfig};
-use tf_strategy::{Market, Members, Trace};
+use tf_strategy::{BudgetSource, Market, Members, Trace};
 use tf_universe::{RefInfo, Selection, Selector, Snapshot, StaticFeature, Tier0View, select};
 
 use crate::def::{Certificate, Route, StrategyDef};
@@ -585,6 +585,7 @@ impl<S: LedgerStore> Host<S> {
         let tier_before = self.tier_tape.len();
         self.promoter.on_event(&self.tier0, ev, &mut self.tier_tape);
         self.log_tiers(tier_before);
+        let budget: &dyn BudgetSource = self.journal.gateway();
         for slot in self.slots.iter_mut() {
             if slot.state != SlotState::Running {
                 continue;
@@ -593,7 +594,16 @@ impl<S: LedgerStore> Host<S> {
             let promoter = &mut self.promoter;
             let bars = self.bars.as_mut();
             if guarded(slot, |r| {
-                r.on_event(Market { tier0, refs }, Some(promoter), bars, ev)
+                r.on_event(
+                    Market {
+                        tier0,
+                        refs,
+                        budget: Some(budget),
+                    },
+                    Some(promoter),
+                    bars,
+                    ev,
+                )
             }) {
                 self.broke.push(slot.id);
                 continue;
@@ -671,12 +681,22 @@ impl<S: LedgerStore> Host<S> {
                 continue;
             };
             let (tier0, refs) = (&self.tier0, &self.refs[..]);
+            let budget: &dyn BudgetSource = self.journal.gateway();
             let promoter = &mut self.promoter;
             let bars = self.bars.as_mut();
             let slot = &mut self.slots[k];
             if slot.state == SlotState::Running
                 && guarded(slot, |r| {
-                    r.on_tier1_revoked(Market { tier0, refs }, Some(promoter), bars, id)
+                    r.on_tier1_revoked(
+                        Market {
+                            tier0,
+                            refs,
+                            budget: Some(budget),
+                        },
+                        Some(promoter),
+                        bars,
+                        id,
+                    )
                 })
             {
                 self.broke.push(owner);

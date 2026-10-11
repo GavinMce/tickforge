@@ -20,6 +20,7 @@ use tf_core::{Event, InstrumentId, Nanos, SymbolTable};
 use tf_engine::{Promoter, SharedBars, SymbolState, Tier0};
 use tf_universe::{Change, LiveFeature, LiveView, RefInfo, Selection, Tier0View};
 
+use crate::budget::BudgetSource;
 use crate::intent::{Intent, StrategyId};
 use crate::lifecycle::OrderUpdate;
 use crate::strategy::{Ctx, CtxState, MAX_TIMER_FIRES_PER_STEP, TimerId};
@@ -132,6 +133,8 @@ impl Members {
 pub struct Market<'a> {
     pub tier0: &'a Tier0,
     pub refs: &'a [RefInfo],
+    /// Where a strategy reads its budget (E19-S51); none where budgets are not in force.
+    pub budget: Option<&'a dyn BudgetSource>,
 }
 
 /// The members of one strategy and their state, read-only.
@@ -345,6 +348,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
             &mut self.state,
             promoter,
             bars,
+            None,
         );
         f(&mut self.strategy, &mut ctx)
     }
@@ -377,6 +381,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
                 &mut self.state,
                 promoter.as_deref_mut(),
                 bars.as_deref_mut(),
+                m.budget,
             );
             self.strategy.on_timer(&mut ctx, &view, id);
         }
@@ -405,6 +410,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
                     &mut self.state,
                     promoter,
                     bars,
+                    m.budget,
                 );
                 self.strategy.on_review(&mut ctx, &view);
             }
@@ -460,6 +466,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
                 &mut self.state,
                 promoter.as_deref_mut(),
                 bars.as_deref_mut(),
+                market.budget,
             );
             self.strategy.on_member_event(&mut ctx, &view, ev);
         }
@@ -521,6 +528,7 @@ impl<S: CrossStrategy> CrossRunner<S> {
             &mut self.state,
             promoter,
             bars,
+            market.budget,
         );
         self.strategy.on_tier1_revoked(&mut ctx, &view, id);
         self.rewake();

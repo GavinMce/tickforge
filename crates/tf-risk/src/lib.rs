@@ -372,6 +372,18 @@ impl Budgets {
     }
 }
 
+impl tf_strategy::BudgetSource for Gateway {
+    /// A strategy's budget and what it uses of it, as the gateway charges it (E19-S51); `None` where budgets are not in force or the strategy is
+    /// not in the tree.
+    fn budget(&self, strategy: tf_strategy::StrategyId) -> Option<tf_strategy::BudgetView> {
+        let total = self.budgets.as_ref()?.strategy_budget(strategy.0)?;
+        Some(tf_strategy::BudgetView {
+            total,
+            used: self.strategy_charge(strategy.0),
+        })
+    }
+}
+
 /// The tree's fingerprint, the balance it divides, and which strategy number is which strategy.
 pub type BudgetsInForce = (u64, u128, Vec<(u16, String)>);
 

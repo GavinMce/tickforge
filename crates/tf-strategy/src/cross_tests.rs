@@ -105,6 +105,7 @@ impl World {
         Market {
             tier0: &self.tier0,
             refs: &self.refs,
+            budget: None,
         }
     }
 }
@@ -201,6 +202,7 @@ fn the_view_gives_a_members_session_state_and_nothing_for_others_and_nothing_is_
             Market {
                 tier0: &tier0,
                 refs: &refs,
+                budget: None,
             },
             &members,
         );
@@ -222,6 +224,7 @@ fn the_view_gives_a_members_session_state_and_nothing_for_others_and_nothing_is_
         Market {
             tier0: &tier0,
             refs: &refs,
+            budget: None,
         },
         &members,
     );
@@ -954,6 +957,7 @@ mod shared_bars {
             let m = Market {
                 tier0: &w.tier0,
                 refs: &w.refs,
+                budget: None,
             };
             r.on_event(m, None, Some(&mut w.bars), e);
         }
@@ -1002,6 +1006,7 @@ mod shared_bars {
             let m = Market {
                 tier0: &w.tier0,
                 refs: &w.refs,
+                budget: None,
             };
             a.on_event(m, None, Some(&mut w.bars), e);
             b.on_event(m, None, Some(&mut w.bars), e);
@@ -1039,6 +1044,7 @@ mod shared_bars {
             let m = Market {
                 tier0: &w.tier0,
                 refs: &w.refs,
+                budget: None,
             };
             a.on_event(m, None, Some(&mut w.bars), &e);
             b.on_event(m, None, Some(&mut w.bars), &e);
@@ -1080,6 +1086,7 @@ mod shared_bars {
         let m = Market {
             tier0: &w.tier0,
             refs: &w.refs,
+            budget: None,
         };
         r.on_event(m, None, Some(&mut w.bars), &e);
         assert_eq!(
@@ -1102,6 +1109,7 @@ mod shared_bars {
         let m = Market {
             tier0: &w.tier0,
             refs: &w.refs,
+            budget: None,
         };
         r.on_event(m, None, None, &e);
         assert_eq!(r.strategy().results, [(0, Err(BarsError::NotConfigured))]);

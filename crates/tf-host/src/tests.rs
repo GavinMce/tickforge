@@ -37,6 +37,13 @@ pub(crate) enum Plan {
     Chase { qty: u32, n: u32 },
     /// Rest a buy far below the market at each of the first `n` reviews, and never trade.
     Rest { qty: u32, n: u32 },
+    /// At each of the first `n` reviews buy the busiest member in the size its budget allows (E19-S51): `risk_ppm` millionths of the budget
+    /// lost over a stop `stop_permille` below the last price, and no more than the budget left holds. Nothing without a budget.
+    Sized {
+        risk_ppm: u32,
+        stop_permille: u32,
+        n: u32,
+    },
 }
 
 pub(crate) struct Trader {
@@ -52,6 +59,42 @@ pub(crate) struct Trader {
 impl Trader {
     fn buy(&self, ctx: &mut Ctx<'_>, view: &MemberView<'_>, qty: u32) {
         self.buy_rank(ctx, view, qty, 0, 50_000_000);
+    }
+
+    fn buy_sized(
+        &self,
+        ctx: &mut Ctx<'_>,
+        view: &MemberView<'_>,
+        risk_ppm: u32,
+        stop_permille: u32,
+    ) {
+        let Some((_, id)) = view.top_by(LiveFeature::Trades, 1, true).first().copied() else {
+            return;
+        };
+        let (Some(last), Some(budget)) = (view.state(id).and_then(|s| s.last_px), ctx.budget())
+        else {
+            return;
+        };
+        let limit = Px::from_raw(last.raw() + 50_000_000);
+        let dist = last.raw() * i64::from(stop_permille) / 1000;
+        let qty = budget.shares_for_risk(risk_ppm, dist, limit);
+        if qty == 0 {
+            return;
+        }
+        let req = Request {
+            side: Side::Buy,
+            qty,
+            purpose: Purpose::Open,
+            pricing: Pricing::Limit(limit),
+            protect: Some(Protective {
+                stop_trigger: Px::from_raw(last.raw() - dist),
+                stop_limit: None,
+                take_profit: None,
+            }),
+            tif: Tif::Day,
+            reason: 3,
+        };
+        let _ = ctx.submit(id, req);
     }
 
     /// Buy the member ranked `rank` by trades, at the last price plus `over` (raw).
@@ -117,6 +160,11 @@ impl CrossStrategy for Trader {
             Plan::Rest { qty, n } if self.reviews <= n => {
                 self.buy_rank(ctx, view, qty, 0, -5_000_000_000)
             }
+            Plan::Sized {
+                risk_ppm,
+                stop_permille,
+                n,
+            } if self.reviews <= n => self.buy_sized(ctx, view, risk_ppm, stop_permille),
             Plan::Chase { qty, n } if self.reviews <= n => self.buy(ctx, view, qty),
             Plan::Chase { qty, n } if self.reviews <= n + 2 => {
                 self.buy_rank(ctx, view, qty, 0, -5_000_000_000)
@@ -1307,4 +1355,70 @@ fn start_day_switches_on_the_session_state_the_strategies_read() {
     let s = h.tier0().session(first).unwrap();
     assert!(s.regular.volume > 0 && s.open.is_some());
     assert_eq!(s.regular.volume, h.tier0().symbol(first).unwrap().volume);
+}
+
+#[test]
+fn a_strategy_sized_by_risk_takes_fewer_shares_as_its_budget_is_used_and_none_when_nothing_is_left()
+{
+    // Two strategies share 100,000 dollars: 50,000 each. S02 trades at 20.00. Risk 3% of 50,000 (1,500 dollars) over a stop 5% (1 dollar) below is
+    // 1,500 shares; the budget holds 50,000 / 20.05 = 2,493 at the limit.
+    let cfg = config(2);
+    let d = def(
+        1,
+        LOW,
+        Plan::Sized {
+            risk_ppm: 30_000,
+            stop_permille: 50,
+            n: 8,
+        },
+        Route::Sim,
+    );
+    let tape = market(12, flat);
+    let mut h = host(&cfg);
+    certify_all(&mut h, &cfg, std::slice::from_ref(&d), &tape);
+    let mut positions: Vec<i64> = vec![0];
+    for e in &tape {
+        h.on_event(e).unwrap();
+        let p = h.journal().gateway().strategy_position(1, 2);
+        if positions.last() != Some(&p) {
+            positions.push(p);
+        }
+    }
+    // The first review risks the full 1,500 shares; the second finds the budget used (1,500 at about 20.01, 30,015 dollars) and can hold
+    // only what is left: fewer; the third finds almost nothing, and later reviews buy nothing.
+    // 1,500, then 996 (the 2,493 the budget holds at the limit less the 1,500 held, at the price it filled), then 2, then nothing.
+    assert_eq!(positions, [0, 1500, 2496, 2498]);
+    // What the strategy holds is within its budget, at the price it paid.
+    let held = *positions.last().unwrap() as u128;
+    assert!(held * 20 * D <= 50_000 * D, "{positions:?}");
+    // Once the budget is used the position does not grow: the last reviews bought none.
+    let g = h.journal().gateway();
+    let used = tf_strategy::BudgetSource::budget(g, StrategyId(1)).unwrap();
+    assert_eq!(used.total, 50_000 * D);
+    assert!(used.used > 49_000 * D, "{used:?}");
+    assert!(used.left() < 1_000 * D);
+}
+
+#[test]
+fn a_strategy_without_a_budget_in_force_reads_none_and_the_size_is_none() {
+    let mut cfg = config(2);
+    cfg.budgets = None;
+    let d = def(
+        1,
+        LOW,
+        Plan::Sized {
+            risk_ppm: 30_000,
+            stop_permille: 50,
+            n: 8,
+        },
+        Route::Sim,
+    );
+    let tape = market(12, flat);
+    let mut h = host(&cfg);
+    certify_all(&mut h, &cfg, std::slice::from_ref(&d), &tape);
+    for e in &tape {
+        h.on_event(e).unwrap();
+    }
+    assert_eq!(h.journal().gateway().strategy_position(1, 2), 0);
+    assert!(tf_strategy::BudgetSource::budget(h.journal().gateway(), StrategyId(1)).is_none());
 }

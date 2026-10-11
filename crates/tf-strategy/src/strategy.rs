@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::budget::{BudgetSource, BudgetView};
 use tf_core::{Event, InstrumentId, Nanos};
 use tf_engine::{
     BarClose, BarsGrant, BarsRefused, MtfBars, Promoter, RollingBars, SharedBars, SymbolBars,
@@ -110,6 +111,7 @@ pub struct Ctx<'a> {
     params: &'a Option<ParamStore>,
     promoter: Option<&'a mut Promoter>,
     tier_out: &'a mut Vec<tf_core::TierChange>,
+    budget: Option<&'a dyn BudgetSource>,
 }
 
 /// Where a context gets its multi-timeframe bars: a host's own aggregator (one strategy, its own symbols), or
@@ -140,6 +142,7 @@ impl<'a> Ctx<'a> {
         state: &'a mut CtxState,
         promoter: Option<&'a mut Promoter>,
         bars: Option<&'a mut SharedBars>,
+        budget: Option<&'a dyn BudgetSource>,
     ) -> Ctx<'a> {
         Ctx {
             now,
@@ -156,6 +159,7 @@ impl<'a> Ctx<'a> {
             params: &state.params,
             promoter,
             tier_out: &mut state.tier_out,
+            budget,
         }
     }
 }
@@ -176,6 +180,13 @@ impl Ctx<'_> {
     /// The current event time. Never the wall clock.
     pub fn now(&self) -> Nanos {
         self.now
+    }
+
+    /// The strategy's budget and what it uses of it, as the gateway accounts it now (E19-S51); `None` where budgets are not in force, the
+    /// strategy is not in the tree, or the callback has no market (an order update). Asking costs a pass over the strategy's positions
+    /// and working orders; a strategy that does not ask pays nothing.
+    pub fn budget(&self) -> Option<BudgetView> {
+        self.budget?.budget(self.strategy)
     }
 
     /// Tier 0 state for an instrument, including the event being handled.
@@ -484,6 +495,7 @@ impl<S: Strategy> Host<S> {
             params: &self.params,
             promoter: self.promoter.as_mut(),
             tier_out: &mut self.tier_events,
+            budget: None,
         };
         f(&mut self.strategy, &mut ctx)
     }

@@ -2568,6 +2568,10 @@ epics:
         jira: TIC-205
         title: "Engine-held entry triggers: buy or sell when a trade goes through a level, as the exit book holds exits"
         status: todo
+        progress: >-
+          ADR 0081. Done: `EntryBook`/`EntryTrigger` in tf-strategy::entries (buy at a trade at or above the level, short sale at or below, once, a collar around that trade, the trigger's reason
+          and protective stop, `not_before`, `lapse_at` with a timer, replace, disarm, the strategy's own check before sending); 15 tests from scripted events and a mutation run (23 mutants,
+          12 killed, 10 compile errors, 1 equivalent survivor: the lapse check in `on_trade` is also done by the timer). Not done: T01 or T09 using it.
         deps: [E19-S05]
         ac:
           - "An EntryBook per strategy holds triggers (instrument, side, level, size, a time after which it lapses, a collar) and sends a marketable limit at the first trade at or through the level, once, with the reason of the trigger"
@@ -2577,6 +2581,9 @@ epics:
         jira: TIC-206
         title: "A strategy sees its own budget and the risk it may take, to size a trade by the risk to its stop"
         status: todo
+        progress: >-
+          ADR 0081. Done: `Ctx::budget()` (total and used from the gateway's charge, lazily; none without budgets), `BudgetView::shares_for_risk`; a test through the host in which a strategy
+          sized by risk buys 1,500, then 996, then 2 shares and then none as its 50,000 dollars are used; golden hashes unchanged; a mutation run (7 mutants, all killed). Not done: T01 or T06 using it.
         deps: [E09-S03]
         ac:
           - "A strategy reads, through its context, its budget, what is in use and what is left (from the gateway's account of it), and a helper turns a risk fraction and a stop distance into shares"

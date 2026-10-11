@@ -14,6 +14,7 @@
 //! - [`session_rules`]: what the broker accepts in the extended hours.
 //! - [`sim`]: a simulated broker (fills against recorded quotes, latency, slippage, borrow cost).
 //! - [`broker`]: what a broker looks like to the system (placement outcomes, events), implemented by [`sim`] and the Alpaca adapter.
+//! - [`entries`]: triggers a strategy holds itself, a buy or a short sale at the first trade through a level (E19-S50).
 //! - [`exits`]: stops, targets and time exits a strategy holds itself, for the extended hours and for simulation.
 //! - [`cross`]: strategies over many symbols (periodic review of a member view).
 //! - [`trace`]: why a cross strategy acted: the evidence of a decision, as text that reads back exactly (E19-S32).
@@ -22,8 +23,10 @@
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
 pub mod broker;
+pub mod budget;
 pub mod closing_reversal;
 pub mod cross;
+pub mod entries;
 pub mod exits;
 pub mod intent;
 pub mod lifecycle;
@@ -42,8 +45,10 @@ pub mod trace;
 pub mod trend;
 pub mod vwap_reclaim;
 
+pub use budget::{BudgetSource, BudgetView};
 pub use closing_reversal::{ClosingReversal, ClosingReversalParams, ClosingReversalStats};
 pub use cross::{CrossRunner, CrossStrategy, Market, MemberView, Members};
+pub use entries::{ArmError, EntryBook, EntryStats, EntryTrigger, Fired};
 pub use exits::{ExitBook, ExitPlan, ExitReason, ExitStats, flat_by};
 pub use intent::{
     Intent, IntentError, IntentId, Pricing, Protective, Purpose, Side, StrategyId, Tif,
@@ -73,9 +78,13 @@ pub use vwap_reclaim::{VwapReclaim, VwapReclaimParams, VwapReclaimStats};
 #[cfg(test)]
 mod broker_tests;
 #[cfg(test)]
+mod budget_tests;
+#[cfg(test)]
 mod closing_tests;
 #[cfg(test)]
 mod cross_tests;
+#[cfg(test)]
+mod entries_tests;
 #[cfg(test)]
 mod exits_tests;
 #[cfg(test)]

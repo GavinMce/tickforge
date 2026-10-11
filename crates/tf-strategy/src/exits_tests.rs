@@ -222,6 +222,7 @@ impl Rig {
         let m = Market {
             tier0: &self.tier0,
             refs: &self.refs,
+            budget: None,
         };
         self.runner.on_event(m, None, None, ev);
         self.drain();

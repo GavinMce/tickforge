@@ -114,6 +114,7 @@ fn main() {
         let m = Market {
             tier0: &tier0,
             refs: &refs,
+            budget: None,
         };
         for r in &mut runners {
             r.on_event(m, None, None, ev);
@@ -125,6 +126,7 @@ fn main() {
     let m = Market {
         tier0: &tier0,
         refs: &refs,
+        budget: None,
     };
     let all = Members::from_ids(0..n);
     let view = MemberView::new(m, &all);

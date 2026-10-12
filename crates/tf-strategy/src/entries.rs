@@ -167,6 +167,16 @@ impl EntryBook {
             + u32::from(self.disarm(ctx, id, Side::SellShort))
     }
 
+    /// Drop every trigger (a new day: yesterday's levels mean nothing). How many there were.
+    pub fn clear(&mut self, ctx: &mut Ctx<'_>) -> u32 {
+        let keys: Vec<(InstrumentId, bool)> = self.pending.keys().copied().collect();
+        let n = keys.len() as u32;
+        for (id, long) in keys {
+            self.forget(ctx, id, long);
+        }
+        n
+    }
+
     pub fn is_armed(&self, id: InstrumentId, side: Side) -> bool {
         self.pending.contains_key(&(id, side.is_buy()))
     }

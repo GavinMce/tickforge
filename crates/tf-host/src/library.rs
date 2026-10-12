@@ -5,11 +5,14 @@
 //! definitions in a registry and runs them over stored days is E19-S31; until then a strategy is added here.
 
 use tf_strategy::closing_reversal::{ClosingReversalParams, ParamError};
+use tf_strategy::opening_range::OpeningRangeParams;
 use tf_strategy::premarket_null::PremarketNullParams;
 use tf_strategy::premarket_pullback::PremarketPullbackParams;
 use tf_strategy::random_entries::RandomEntriesParams;
 use tf_strategy::vwap_reclaim::VwapReclaimParams;
-use tf_strategy::{ClosingReversal, PremarketNull, PremarketPullback, RandomEntries, VwapReclaim};
+use tf_strategy::{
+    ClosingReversal, OpeningRange, PremarketNull, PremarketPullback, RandomEntries, VwapReclaim,
+};
 use tf_universe::Spec;
 
 use crate::def::{Route, StrategyDef};
@@ -101,6 +104,29 @@ pub fn premarket_null(
         route: Route::Sim,
         build: Box::new(move || {
             runner(PremarketNull::new(id, params).expect("the parameters were validated"))
+        }),
+    })
+}
+
+/// T01, the opening range breakout ([`OpeningRange`], ADR 0082): the direction of the first candle of the session on the names whose volume in it is large against
+/// their own normal, entered at a break of its high or low and stopped at a part of the ATR, over `universe`, on the simulated broker. It reads the shared bars,
+/// so the set that runs it needs a `bars` line, and its universe must carry the columns it reads (`atr14`, `vol_first5` or the quarter-hour profile).
+pub fn opening_range(
+    id: u16,
+    name: &str,
+    universe: Spec,
+    params: OpeningRangeParams,
+) -> Result<StrategyDef, ParamError> {
+    params.validate()?;
+    Ok(StrategyDef {
+        id,
+        name: name.to_owned(),
+        params: params.render(),
+        universe,
+        priority: 1,
+        route: Route::Sim,
+        build: Box::new(move || {
+            runner(OpeningRange::new(id, params).expect("the parameters were validated"))
         }),
     })
 }

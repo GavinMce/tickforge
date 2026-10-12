@@ -319,3 +319,13 @@ fn a_broken_name_has_no_bias_whatever_the_previous_close() {
     b.advance(OPEN + HOUR_S * SEC, 0, |_, _| Close::Missing);
     assert_eq!(b.bias(7), None);
 }
+
+#[test]
+fn the_smallest_price_is_a_previous_close() {
+    let mut b = HourlyBias::new().carrying_prior(true);
+    b.start_day(OPEN);
+    let mut r = snapshot(50, 100);
+    r.hist.prev_close = Some(1);
+    assert!(b.add(7, &r));
+    assert_eq!(b.bias(7), Some(Bias::Down));
+}

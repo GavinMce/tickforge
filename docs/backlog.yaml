@@ -1970,7 +1970,7 @@ epics:
           15 minute bars as their buckets end (a bar not closed yet is waited for, a name with no bar is broken for the day), up when the last close is over the average and down when under,
           none before 10:30; 13 tests from scripted closes, among them the carried state equal to one pass over the same closes, and a mutation run (28 mutants, 20 killed, 3 of them by a hang, 8 compile errors, 0 survivors). T01 takes it as `bias=1`: a trigger is sent only if its
           side goes with the bias (a break before 10:30 is spent), the armed names keep their bars to 15:30; 12 tests from scripted events, a mutation run on the added lines (26 mutants, 20 killed, 4 compile errors, 2 survivors that are equivalent: the bias is read only at a trade of the name, which has opened a bar, and a trigger always has its armed entry), a host run over a scripted tape (the break at 09:40 is
-          no trade, a break after 10:30 trades with the bias up and not down) and four more lines in `orb.set`. `bias=2` (the previous close against the carried average until 10:30) and four more lines in `orb.set` (twelve in all).
+          no trade, a break after 10:30 trades with the bias up and not down) and four more lines in `orb.set`. `bias=2` (the previous close against the carried average until 10:30; 5 more tests, a mutation run on its lines with no survivor) and four more lines in `orb.set` (twelve in all).
           Not done: the standalone pullback entry with its four variants, the filter on T03, and the run over stored days.
         deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S49, E19-S52, E19-S54, E19-S51]
         ac:

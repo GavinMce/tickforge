@@ -1955,7 +1955,7 @@ epics:
           a short only in a name the asset list says is easy to borrow, none on a doji; an `EntryBook` trigger at the candle's high or low; size by the risk to the stop
           (`Ctx::budget`), capped by the room and a share of the budget; the stop at a part of the ATR held by the engine, the time exit at 15:58. 29 tests from scripted events, a mutation run
           (132 mutants, 86 killed, 43 compile errors, 3 survivors that are unreachable: a price of nothing), two host runs over a scripted tape, and `orb.set` with four variants (candle 5 or 15, stop 10 or 20
-          percent of the ATR). Not done: the bias filter of T02 (so four variants of the eight), the run over stored days (needs the minute history on the cluster) and the live exit question (E19-S58).
+          percent of the ATR); the bias filter is `bias=1` (E19-S16, ADR 0083), four more variants in `orb.set`. Not done: the run over stored days (needs the minute history on the cluster) and the live exit question (E19-S58).
         deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S16, E19-S48, E19-S49, E19-S50, E19-S51, E19-S52, E19-S54]
         ac:
           - The rule of docs/research/01-trend.md (5- or 15-minute opening range, opening relative volume at least 100% of its 14-day average and the top 20 by it, price above $5, average volume above a million shares, ATR above $0.50; stop order at the range, stop loss at 10% or 20% of ATR, exit at 15:58, 1% risk of the strategy's budget) is a cross strategy whose eight variants are parameters
@@ -1965,6 +1965,13 @@ epics:
         jira: TIC-170
         title: T02 hourly EMA(100) bias and the pullback entry (docs/research 1a)
         status: todo
+        progress: >-
+          ADR 0083. Done: the bias as a filter (`tf-strategy::hourly_bias`): the EMA(100) resumed from the snapshot state, the six closes of the day (10:30 to 15:30) folded from the shared
+          15 minute bars as their buckets end (a bar not closed yet is waited for, a name with no bar is broken for the day), up when the last close is over the average and down when under,
+          none before 10:30; 13 tests from scripted closes, among them the carried state equal to one pass over the same closes, and a mutation run (28 mutants, 20 killed, 3 of them by a hang, 8 compile errors, 0 survivors). T01 takes it as `bias=1`: a trigger is sent only if its
+          side goes with the bias (a break before 10:30 is spent), the armed names keep their bars to 15:30; 12 tests from scripted events, a mutation run on the added lines (26 mutants, 20 killed, 4 compile errors, 2 survivors that are equivalent: the bias is read only at a trade of the name, which has opened a bar, and a trigger always has its armed entry), a host run over a scripted tape (the break at 09:40 is
+          no trade, a break after 10:30 trades with the bias up and not down) and four more lines in `orb.set`. `bias=2` (the previous close against the carried average until 10:30; 5 more tests, a mutation run on its lines with no survivor) and four more lines in `orb.set` (twelve in all).
+          Not done: the standalone pullback entry with its four variants, the filter on T03, and the run over stored days.
         deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S49, E19-S52, E19-S54, E19-S51]
         ac:
           - The bias (last completed regular-session hourly close above or below EMA(100), none before 10:30) is available to other strategies as a filter, and the standalone pullback entry of docs/research/01-trend.md has its four variants as parameters

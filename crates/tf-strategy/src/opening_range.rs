@@ -19,7 +19,10 @@
 //!   opening order also carries the same stop for the broker, as the framework requires of an opening order in the regular session; the simulator does not
 //!   model it and the live path has an open question (a standing leg and an engine exit on the same shares: ADR 0082).
 //!
-//! Not in this strategy: the paper's bias filter (the hourly trend of T02, E19-S16): the variants here are the range and the stop.
+//! - **The bias filter** (`bias=1`, the hourly trend of T02, E19-S16, [`crate::hourly_bias`]): a trigger that fires is sent only if the name's last completed
+//!   hourly close is on the side of the trade (over the EMA(100) for a long, under it for a short). Before the first hourly bucket ends (10:30) there is no
+//!   bias, so a break before it is no trade (the trigger is spent, as for a refused spread); the armed names keep their bars to 15:30 for the closes. With
+//!   `bias=2` the morning's bias is the previous close against the carried average, so the first hour can trade.
 //!
 //! Integers throughout; nothing reads a clock.
 
@@ -33,6 +36,7 @@ use crate::budget::BudgetView;
 use crate::cross::{CrossStrategy, MemberView};
 use crate::entries::{EntryBook, EntryStats, EntryTrigger};
 use crate::exits::{ExitBook, ExitPlan, ExitStats, flat_by};
+use crate::hourly_bias::{Close, HourlyBias};
 use crate::intent::{IntentId, Protective, Side, StrategyId, Tif};
 use crate::lifecycle::OrderUpdate;
 use crate::strategy::{Ctx, TimerId};
@@ -77,6 +81,10 @@ pub struct OpeningRangeParams {
     pub spread_cap_bp: u32,
     /// The most names whose bars are claimed.
     pub max_tracked: u32,
+    /// 1 to trade only with the hourly bias of T02 ([`crate::hourly_bias`]): a long when the last completed hourly close is over the EMA(100), a short
+    /// when under; 0 for no filter. With 1 the bias does not exist before the first hourly bucket ends (10:30), so a break before it is no trade; with 2 it
+    /// is, until then, the previous close against the average.
+    pub bias: u32,
 }
 
 impl Default for OpeningRangeParams {
@@ -95,11 +103,12 @@ impl Default for OpeningRangeParams {
             collar_permille: 10,
             spread_cap_bp: 0,
             max_tracked: 2_000,
+            bias: 0,
         }
     }
 }
 
-const KEYS: [&str; 13] = [
+const KEYS: [&str; 14] = [
     "names",
     "range_minutes",
     "min_relvol_pct",
@@ -113,10 +122,11 @@ const KEYS: [&str; 13] = [
     "collar_permille",
     "spread_cap_bp",
     "max_tracked",
+    "bias",
 ];
 
 impl OpeningRangeParams {
-    fn values(&self) -> [u32; 13] {
+    fn values(&self) -> [u32; 14] {
         [
             self.names,
             self.range_minutes,
@@ -131,10 +141,11 @@ impl OpeningRangeParams {
             self.collar_permille,
             self.spread_cap_bp,
             self.max_tracked,
+            self.bias,
         ]
     }
 
-    fn from_values(v: [u32; 13]) -> OpeningRangeParams {
+    fn from_values(v: [u32; 14]) -> OpeningRangeParams {
         OpeningRangeParams {
             names: v[0],
             range_minutes: v[1],
@@ -149,6 +160,7 @@ impl OpeningRangeParams {
             collar_permille: v[10],
             spread_cap_bp: v[11],
             max_tracked: v[12],
+            bias: v[13],
         }
     }
 
@@ -200,6 +212,11 @@ impl OpeningRangeParams {
         if self.max_tracked == 0 || self.max_tracked > 10_000 {
             return bad("max_tracked must be from 1 to 10000");
         }
+        if self.bias > 2 {
+            return bad(
+                "bias must be 0 (no filter), 1 (the hourly bias, none before 10:30) or 2 (as 1, with the previous close against the average before 10:30)",
+            );
+        }
         Ok(())
     }
 
@@ -231,7 +248,7 @@ impl OpeningRangeParams {
                 return Err(ParamError(format!("{k} is given twice")));
             }
         }
-        let mut vals = [0u32; 13];
+        let mut vals = [0u32; 14];
         for (i, k) in KEYS.iter().enumerate() {
             vals[i] = *got
                 .get(k)
@@ -268,6 +285,8 @@ pub struct OpeningRangeStats {
     /// Triggers that fired and sent an order.
     pub entries: u64,
     pub entries_refused: u64,
+    /// Triggers that fired against the hourly bias, or before there was one, and sent nothing.
+    pub biased_out: u64,
     pub triggers: EntryStats,
     pub exits: ExitStats,
 }
@@ -309,6 +328,8 @@ pub struct OpeningRange {
     /// The triggers armed, by name, for the plan of the exit when the entry fills.
     armed: BTreeMap<InstrumentId, Armed>,
     entries: BTreeMap<IntentId, Entry>,
+    /// The hourly bias of the claimed names, followed when the parameters ask for it.
+    bias: HourlyBias,
     stats: OpeningRangeStats,
     tracing: bool,
     traces: Vec<Trace>,
@@ -329,6 +350,7 @@ impl OpeningRange {
             decided: false,
             armed: BTreeMap::new(),
             entries: BTreeMap::new(),
+            bias: HourlyBias::new().carrying_prior(p.bias == 2),
             stats: OpeningRangeStats::default(),
             tracing: false,
             traces: Vec::new(),
@@ -352,6 +374,7 @@ impl OpeningRange {
             ctx.untrack_bars(id);
         }
         self.open = Some(open);
+        self.bias.start_day(open);
         self.claimed.clear();
         self.claimed_done = false;
         self.decided = false;
@@ -394,7 +417,13 @@ impl OpeningRange {
                 self.stats.no_reference += 1;
                 continue;
             }
+            // The filter needs the EMA's state: a name without it could never be traded.
+            if self.p.bias != 0 && !self.bias.add(id, r) {
+                self.stats.no_reference += 1;
+                continue;
+            }
             if self.claimed.len() >= self.p.max_tracked as usize || ctx.track_bars(id).is_err() {
+                self.bias.forget(id);
                 self.stats.refused_bars += 1;
                 continue;
             }
@@ -464,9 +493,44 @@ impl OpeningRange {
                 armed += 1;
             }
         }
+        // With the filter the armed names keep their bars: the hourly closes come from them until the last bucket of the day.
+        let keep = |me: &Self, id: InstrumentId| me.p.bias != 0 && me.armed.contains_key(&id);
         for id in std::mem::take(&mut self.claimed) {
-            ctx.untrack_bars(id);
+            if keep(self, id) {
+                self.claimed.insert(id);
+            } else {
+                self.bias.forget(id);
+                ctx.untrack_bars(id);
+            }
         }
+    }
+
+    /// Fold the hourly buckets that have ended into the biases of the followed names. Before a trade is checked as well as at a review: a
+    /// quiet name's bar of the last quarter hour is filled in by the trade that follows it, which may be the one that fires.
+    fn fold_bias(&mut self, ctx: &Ctx<'_>, now: Nanos) {
+        if self.bias.is_empty() {
+            return;
+        }
+        let settle = u64::from(self.p.settle_seconds) * NANOS_PER_SEC;
+        self.bias
+            .advance(now, settle, |id, s| Self::quarter_close(ctx, id, s));
+    }
+
+    /// What the 15 minute bars of `id` say of the close at the end of the quarter hour that starts at `start_sec`: the close of its bar, or of the last
+    /// before it when the name did not trade in it; not yet while a bar that ends by then is still forming (bar time has not reached it).
+    fn quarter_close(ctx: &Ctx<'_>, id: InstrumentId, start_sec: u64) -> Close {
+        let Some(b) = ctx.bars(id) else {
+            return Close::Missing;
+        };
+        if b.forming(Timeframe::M15)
+            .is_some_and(|f| f.start_sec <= start_sec)
+        {
+            return Close::NotYet;
+        }
+        (0..b.closed_len(Timeframe::M15))
+            .filter_map(|i| b.closed(Timeframe::M15, i))
+            .find(|bar| bar.start_sec <= start_sec)
+            .map_or(Close::Missing, |bar| Close::Is(bar.close))
     }
 
     /// Arm the trigger of one judged name. True if it is armed.
@@ -593,6 +657,7 @@ impl CrossStrategy for OpeningRange {
                 self.claim(ctx, view);
             }
         }
+        self.fold_bias(ctx, now);
         let judge_at = day.open
             + u64::from(self.p.range_minutes) * MINUTE
             + u64::from(self.p.settle_seconds) * NANOS_PER_SEC;
@@ -610,6 +675,7 @@ impl CrossStrategy for OpeningRange {
             return;
         }
         let id = t.hdr.instrument;
+        self.fold_bias(ctx, ctx.now());
         self.book.on_trade(ctx, id, t.px);
         if self.triggers.is_empty() {
             return;
@@ -617,10 +683,20 @@ impl CrossStrategy for OpeningRange {
         // Each name has one trigger a day and at most `names` are armed, so the names limit and "not held already" hold by construction; the
         // check at the fire is the quote.
         let (state, cap) = (view.state(id), self.p.spread_cap_bp);
+        let armed = self.armed.get(&id).copied();
+        // A trigger that fires is spent: the bias is asked at the fire, and a break before there is a bias is no trade.
+        let with_bias = self.p.bias == 0
+            || armed.is_some_and(|a| {
+                self.bias
+                    .allows(id, if a.long { Side::Buy } else { Side::SellShort })
+            });
+        let refused_before = self.triggers.stats().refused;
         let sent = self
             .triggers
-            .on_trade_checked(ctx, id, t.px, |_| spread_ok(state, cap));
-        let armed = self.armed.get(&id).copied();
+            .on_trade_checked(ctx, id, t.px, |_| with_bias && spread_ok(state, cap));
+        if !with_bias {
+            self.stats.biased_out += self.triggers.stats().refused - refused_before;
+        }
         for f in sent {
             self.stats.entries += 1;
             if let Some(a) = armed {

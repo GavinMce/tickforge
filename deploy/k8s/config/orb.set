@@ -1,5 +1,5 @@
 strategy set v1
-# The opening range breakout (T01, ADR 0082) in four variants, for the backtest job (scripts/backtest-dev.sh --set orb.set).
+# The opening range breakout (T01, ADR 0082) in twelve variants, for the backtest job (scripts/backtest-dev.sh --set orb.set).
 # It is not the live set: the live day and the prepare job read month.set. Trade the direction of the first candle of the session
 # (5 or 15 minutes) on the twenty names whose volume in it is largest against their own normal, entered at a break of its high or low,
 # stopped at a tenth or a fifth of the 14-day ATR, flat at 15:58. Risk 1 percent of the strategy's budget a trade; a position holds at
@@ -15,3 +15,14 @@ strategy 2 orb-5-20 t01 universe=universe-orb.spec stop_atr_pct=20
 # The fifteen minute candle, which the paper found much weaker.
 strategy 3 orb-15-10 t01 universe=universe-orb.spec range_minutes=15
 strategy 4 orb-15-20 t01 universe=universe-orb.spec range_minutes=15 stop_atr_pct=20
+# The same four with the hourly bias (T02, ADR 0083): a long only when the last completed hourly close is over the EMA(100) of hourly closes, a short
+# only when under it. There is no bias before 10:30, so a break before then is no trade: compare each with its unfiltered twin above.
+strategy 5 orb-5-10-bias t01 universe=universe-orb.spec bias=1
+strategy 6 orb-5-20-bias t01 universe=universe-orb.spec stop_atr_pct=20 bias=1
+strategy 7 orb-15-10-bias t01 universe=universe-orb.spec range_minutes=15 bias=1
+strategy 8 orb-15-20-bias t01 universe=universe-orb.spec range_minutes=15 stop_atr_pct=20 bias=1
+# The same four again with the previous close against the average standing in for the bias until 10:30 (bias=2), so the first hour's breaks can trade.
+strategy 9 orb-5-10-prior t01 universe=universe-orb.spec bias=2
+strategy 10 orb-5-20-prior t01 universe=universe-orb.spec stop_atr_pct=20 bias=2
+strategy 11 orb-15-10-prior t01 universe=universe-orb.spec range_minutes=15 bias=2
+strategy 12 orb-15-20-prior t01 universe=universe-orb.spec range_minutes=15 stop_atr_pct=20 bias=2

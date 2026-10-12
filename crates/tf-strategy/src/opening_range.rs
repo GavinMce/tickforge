@@ -21,7 +21,8 @@
 //!
 //! - **The bias filter** (`bias=1`, the hourly trend of T02, E19-S16, [`crate::hourly_bias`]): a trigger that fires is sent only if the name's last completed
 //!   hourly close is on the side of the trade (over the EMA(100) for a long, under it for a short). Before the first hourly bucket ends (10:30) there is no
-//!   bias, so a break before it is no trade (the trigger is spent, as for a refused spread); the armed names keep their bars to 15:30 for the closes.
+//!   bias, so a break before it is no trade (the trigger is spent, as for a refused spread); the armed names keep their bars to 15:30 for the closes. With
+//!   `bias=2` the morning's bias is the previous close against the carried average, so the first hour can trade.
 //!
 //! Integers throughout; nothing reads a clock.
 
@@ -81,7 +82,8 @@ pub struct OpeningRangeParams {
     /// The most names whose bars are claimed.
     pub max_tracked: u32,
     /// 1 to trade only with the hourly bias of T02 ([`crate::hourly_bias`]): a long when the last completed hourly close is over the EMA(100), a short
-    /// when under; 0 for no filter. The bias does not exist before the first hourly bucket ends (10:30), so a break before it is no trade.
+    /// when under; 0 for no filter. With 1 the bias does not exist before the first hourly bucket ends (10:30), so a break before it is no trade; with 2 it
+    /// is, until then, the previous close against the average.
     pub bias: u32,
 }
 
@@ -210,8 +212,10 @@ impl OpeningRangeParams {
         if self.max_tracked == 0 || self.max_tracked > 10_000 {
             return bad("max_tracked must be from 1 to 10000");
         }
-        if self.bias > 1 {
-            return bad("bias must be 0 (no filter) or 1 (the hourly bias)");
+        if self.bias > 2 {
+            return bad(
+                "bias must be 0 (no filter), 1 (the hourly bias, none before 10:30) or 2 (as 1, with the previous close against the average before 10:30)",
+            );
         }
         Ok(())
     }
@@ -346,7 +350,7 @@ impl OpeningRange {
             decided: false,
             armed: BTreeMap::new(),
             entries: BTreeMap::new(),
-            bias: HourlyBias::new(),
+            bias: HourlyBias::new().carrying_prior(p.bias == 2),
             stats: OpeningRangeStats::default(),
             tracing: false,
             traces: Vec::new(),
@@ -414,7 +418,7 @@ impl OpeningRange {
                 continue;
             }
             // The filter needs the EMA's state: a name without it could never be traded.
-            if self.p.bias == 1 && !self.bias.add(id, r) {
+            if self.p.bias != 0 && !self.bias.add(id, r) {
                 self.stats.no_reference += 1;
                 continue;
             }
@@ -490,7 +494,7 @@ impl OpeningRange {
             }
         }
         // With the filter the armed names keep their bars: the hourly closes come from them until the last bucket of the day.
-        let keep = |me: &Self, id: InstrumentId| me.p.bias == 1 && me.armed.contains_key(&id);
+        let keep = |me: &Self, id: InstrumentId| me.p.bias != 0 && me.armed.contains_key(&id);
         for id in std::mem::take(&mut self.claimed) {
             if keep(self, id) {
                 self.claimed.insert(id);

@@ -4,6 +4,8 @@
 //!   trade price in it (a quiet name's is its last price before). The snapshot carries the EMA's state at the previous close (`ema100h_state`, `ema100h_count`,
 //!   the simple-average seed over the first 100 closes), and this day's closes are folded in as their buckets end, so the live value is the one an offline
 //!   pass over the same closes gives ([`Ema::resume`] is exact).
+//! - **Before the first bucket ends** a follower built with [`HourlyBias::carrying_prior`] takes the previous session's close (`prev_close`, the last price of the
+//!   last hourly bucket the carried EMA already contains) as the last close; otherwise there is none.
 //! - **The bias** is up when the last completed close of the day is over the EMA, down when under it, and none before the first bucket ends (10:30), on a
 //!   tie, for a name the snapshot has no state for, and for a name any of whose closes today was missing (it would be a different series).
 //! - **The closes** come from the shared 15 minute bars: the close of the bar that ends at the bucket's end, which the caller finds (`close_at`): the
@@ -48,6 +50,8 @@ pub enum Close {
 struct Track {
     ema: Ema,
     last: Option<Px>,
+    /// The previous session's close, where the follower carries it into the morning.
+    prior: Option<Px>,
     /// Buckets folded today (0 to [`BOUNDARIES`]).
     folded: u32,
     broken: bool,
@@ -56,12 +60,19 @@ struct Track {
 #[derive(Clone, Debug, Default)]
 pub struct HourlyBias {
     open: Nanos,
+    carry_prior: bool,
     names: BTreeMap<InstrumentId, Track>,
 }
 
 impl HourlyBias {
     pub fn new() -> HourlyBias {
         HourlyBias::default()
+    }
+
+    /// Whether the morning's bias, before the first bucket ends, is the previous close against the carried average (default: no bias until 10:30).
+    pub fn carrying_prior(mut self, on: bool) -> HourlyBias {
+        self.carry_prior = on;
+        self
     }
 
     /// A new day: no name is followed until [`HourlyBias::add`].
@@ -86,6 +97,11 @@ impl HourlyBias {
             Track {
                 ema,
                 last: None,
+                prior: r
+                    .hist
+                    .prev_close
+                    .filter(|&c| self.carry_prior && c > 0)
+                    .map(Px::from_raw),
                 folded: 0,
                 broken: false,
             },
@@ -134,7 +150,7 @@ impl HourlyBias {
     /// The bias of a name now.
     pub fn bias(&self, id: InstrumentId) -> Option<Bias> {
         let t = self.names.get(&id).filter(|t| !t.broken)?;
-        let (last, avg) = (t.last?.raw(), t.ema.value()?);
+        let (last, avg) = (t.last.or(t.prior)?.raw(), t.ema.value()?);
         match last.cmp(&avg) {
             std::cmp::Ordering::Greater => Some(Bias::Up),
             std::cmp::Ordering::Less => Some(Bias::Down),

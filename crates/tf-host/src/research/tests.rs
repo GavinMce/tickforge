@@ -1500,13 +1500,13 @@ const ORB_UNIVERSE: &str =
 
 fn orb_snapshot() -> tf_universe::Snapshot {
     let mut text = String::from(
-        "# as_of 2026-04-30\nsymbol,price,adv_shares,easy_to_borrow,atr14,vol_first5,ema100h_state,ema100h_count\n",
+        "# as_of 2026-04-30\nsymbol,price,adv_shares,easy_to_borrow,atr14,vol_first5,ema100h_state,ema100h_count,prev_close\n",
     );
     // The hourly average is $20.00 over a hundred closes: the state is the price in raw units shifted left sixteen bits.
     let ema_state = 20_000_000_000i64 << 16;
     for i in 0..SYMBOLS {
         text.push_str(&format!(
-            "S{i:02},20.00,{},yes,1.00,1000,{ema_state},100\n",
+            "S{i:02},20.00,{},yes,1.00,1000,{ema_state},100,21.00\n",
             (i + 1) * 100
         ));
     }
@@ -1712,6 +1712,12 @@ fn the_opening_range_breakout_with_the_hourly_bias_trades_only_the_break_that_go
         "{}",
         t.entry_ts
     );
+    // With the previous close carried ($21.00, over the average) the break at 09:40 goes too, with no first hour to wait for.
+    let carried = OpeningRangeParams {
+        bias: 2,
+        ..OpeningRangeParams::default()
+    };
+    assert_eq!(orb_run(false, carried, true).trips.len(), 1);
     let down = orb_run_late(false, Some(1960), on, true);
     assert!(down.trips.is_empty(), "{:?}", down.anomalies);
     // The unfiltered strategy takes the same late break whichever way the hour closed.

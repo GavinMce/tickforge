@@ -270,3 +270,52 @@ fn a_bar_that_has_not_closed_waits_for_the_next_call_and_the_others_go_on() {
     b.advance(OPEN + HOUR_S * SEC, 0, close);
     assert_eq!(b.bias(1), Some(Bias::Up));
 }
+
+/// A day of one name, id 7, from a snapshot of an average at $50 and a previous close of `prev` dollars, carrying it into the morning.
+fn carrying_day(prev: Option<i64>) -> HourlyBias {
+    let mut b = HourlyBias::new().carrying_prior(true);
+    b.start_day(OPEN);
+    let mut r = snapshot(50, 100);
+    r.hist.prev_close = prev.map(|p| p * D);
+    assert!(b.add(7, &r));
+    b
+}
+
+#[test]
+fn carrying_the_previous_close_gives_a_bias_before_the_first_bucket_ends() {
+    assert_eq!(carrying_day(Some(60)).bias(7), Some(Bias::Up));
+    assert_eq!(carrying_day(Some(40)).bias(7), Some(Bias::Down));
+    assert_eq!(carrying_day(Some(50)).bias(7), None, "a tie");
+    assert_eq!(carrying_day(None).bias(7), None, "no previous close");
+    assert_eq!(carrying_day(Some(0)).bias(7), None, "not a price");
+    assert!(carrying_day(Some(60)).allows(7, Side::Buy));
+    assert!(carrying_day(Some(40)).allows(7, Side::SellShort));
+}
+
+#[test]
+fn without_carrying_the_previous_close_is_not_read() {
+    let mut b = HourlyBias::new();
+    b.start_day(OPEN);
+    let mut r = snapshot(50, 100);
+    r.hist.prev_close = Some(60 * D);
+    assert!(b.add(7, &r));
+    assert_eq!(b.bias(7), None);
+}
+
+#[test]
+fn the_first_close_of_the_day_replaces_the_previous_close() {
+    let mut b = carrying_day(Some(60));
+    b.advance(OPEN + HOUR_S * SEC, 0, closes(&[(1, 40)]));
+    assert_eq!(b.bias(7), Some(Bias::Down));
+    // A bucket that is waited for leaves the previous close standing.
+    let mut b = carrying_day(Some(60));
+    b.advance(OPEN + HOUR_S * SEC, 0, |_, _| Close::NotYet);
+    assert_eq!(b.bias(7), Some(Bias::Up));
+}
+
+#[test]
+fn a_broken_name_has_no_bias_whatever_the_previous_close() {
+    let mut b = carrying_day(Some(60));
+    b.advance(OPEN + HOUR_S * SEC, 0, |_, _| Close::Missing);
+    assert_eq!(b.bias(7), None);
+}

@@ -1158,13 +1158,15 @@ fn the_armed_names_keep_their_bars_with_the_filter_and_the_others_let_go() {
 }
 
 #[test]
-fn the_filter_is_a_parameter_of_two_values() {
+fn the_filter_is_a_parameter_of_three_values() {
     let p = with(|p| p.bias = 1);
     assert!(p.render().ends_with("bias=1"));
     assert_eq!(OpeningRangeParams::parse(&p.render()).unwrap(), p);
     assert!(OpeningRangeParams::default().render().ends_with("bias=0"));
     let mut bad = p;
     bad.bias = 2;
+    assert!(bad.validate().is_ok(), "2 carries the previous close");
+    bad.bias = 3;
     assert!(bad.validate().is_err());
 }
 
@@ -1203,4 +1205,73 @@ fn every_trigger_the_bias_refuses_is_counted_once() {
     rig.trade(1, 3_670, 5100, 10);
     assert_eq!(rig.stats().biased_out, 2);
     assert!(rig.out().is_empty());
+}
+
+/// As [`bias_rig`] with the filter at 2 and a previous close of `prev` cents for every name.
+fn carry_rig(prev: i64) -> Rig {
+    let p = with(|p| {
+        p.bias = 2;
+        p.entry_minutes = 200;
+    });
+    Rig::custom(p, 1, 2, day(1), |refs| {
+        refs.iter_mut().for_each(|r| {
+            put_ema(r);
+            r.hist.prev_close = Some(cents(prev));
+        });
+    })
+}
+
+#[test]
+fn with_the_previous_close_carried_a_break_in_the_first_hour_goes_with_it() {
+    // The previous close $51.00 is over the $50.00 average: a long in the first hour goes.
+    let mut rig = carry_rig(5100);
+    rig.candle(0, 5000, 5100, 4980, 5080, 15_000);
+    rig.judge(5);
+    rig.trade(0, 1_200, 5100, 10);
+    assert_eq!(rig.out().len(), 1);
+    assert_eq!(rig.stats().biased_out, 0);
+    // At $49.00 it is under: the long is against the bias and is spent.
+    let mut rig = carry_rig(4900);
+    rig.candle(0, 5000, 5100, 4980, 5080, 15_000);
+    rig.judge(5);
+    rig.trade(0, 1_200, 5100, 10);
+    assert!(rig.out().is_empty());
+    assert_eq!(rig.stats().biased_out, 1);
+}
+
+#[test]
+fn a_short_in_the_first_hour_goes_with_a_previous_close_under_the_average() {
+    let mut rig = carry_rig(4900);
+    rig.candle(0, 5000, 5030, 4900, 4920, 15_000);
+    rig.judge(5);
+    rig.trade(0, 1_200, 4900, 10);
+    let out = rig.out();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].side, Side::SellShort);
+}
+
+#[test]
+fn after_the_first_hour_the_days_close_decides_not_the_previous_one() {
+    // Over yesterday, but the first hour closed under the average: a long after 10:30 is against the bias.
+    let mut rig = carry_rig(5100);
+    rig.candle(0, 5000, 5100, 4980, 5080, 15_000);
+    rig.judge(5);
+    rig.trade(0, 3_000, 4950, 10);
+    rig.trade(0, 3_660, 5100, 10);
+    assert!(rig.out().is_empty());
+    assert_eq!(rig.stats().biased_out, 1);
+}
+
+#[test]
+fn a_name_with_no_previous_close_has_no_bias_in_the_first_hour_even_with_the_carry() {
+    let p = with(|p| {
+        p.bias = 2;
+        p.entry_minutes = 200;
+    });
+    let mut rig = Rig::custom(p, 1, 2, day(1), |refs| refs.iter_mut().for_each(put_ema));
+    rig.candle(0, 5000, 5100, 4980, 5080, 15_000);
+    rig.judge(5);
+    rig.trade(0, 1_200, 5100, 10);
+    assert!(rig.out().is_empty());
+    assert_eq!(rig.stats().biased_out, 1);
 }

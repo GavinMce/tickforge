@@ -98,3 +98,4 @@ How:
 | [0079](0079-minute-history-is-kept-as-one-small-file-of-sessions-a-day-and-each-snapshot-is-built-from-them-as-of-the-session-before-it.md) | Minute history is kept as one small file of sessions a day, and each snapshot is built from them as of the session before it | Accepted |
 | [0080](0080-the-time-of-day-profile-is-quarter-hours-of-volume-and-a-sixty-minute-move-kept-with-each-days-sessions.md) | The time-of-day profile is quarter hours of volume and a sixty-minute move, kept with each day's sessions | Accepted |
 | [0081](0081-entry-triggers-the-strategy-holds-and-the-budget-a-strategy-can-read.md) | Entry triggers the strategy holds, and the budget a strategy can read | Accepted |
+| [0082](0082-the-opening-range-breakout-trades-the-first-candle-of-names-in-play-with-entries-and-exits-the-strategy-holds.md) | The opening range breakout trades the first candle of names in play, with entries and exits the strategy holds | Accepted |

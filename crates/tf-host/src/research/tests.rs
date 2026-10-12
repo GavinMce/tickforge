@@ -1494,6 +1494,184 @@ fn the_vwap_reclaim_runs_through_the_host_with_shared_bars_buys_the_reclaim_and_
     let _ = fs::remove_dir_all(&root);
 }
 
+/// The universe of T01 in the tests: the names of `LOW`, and a snapshot that carries what the rule reads.
+const ORB_UNIVERSE: &str =
+    "universe v1\nrequires atr14 vol_first5 easy_to_borrow\nstatic adv_shares <= 600\n";
+
+fn orb_snapshot() -> tf_universe::Snapshot {
+    let mut text = String::from(
+        "# as_of 2026-04-30\nsymbol,price,adv_shares,easy_to_borrow,atr14,vol_first5\n",
+    );
+    for i in 0..SYMBOLS {
+        text.push_str(&format!("S{i:02},20.00,{},yes,1.00,1000\n", (i + 1) * 100));
+    }
+    tf_universe::Snapshot::parse(&text).unwrap()
+}
+
+/// S00 is quiet in the premarket, then trades the first five minutes of the session: opens at $20.00, reaches $20.50 and $19.90, closes at $20.30 on 1,500
+/// shares (150% of the 1,000 normal), and a share at 09:35:02 closes the candle's bar. At 09:40 it trades through the high at $20.50. After that
+/// it either falls through the stop ($20.40, a tenth of the $1.00 ATR under the high) at 09:45, or holds above it to the close.
+fn orb_tape(open: u64, stops_out: bool) -> Vec<u8> {
+    use crate::replay_tests::{dbn_script, quote_rec, trade_rec};
+    const ID: u32 = 20_000;
+    let px = |c: i64| c * 10_000_000;
+    let mut recs: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut seq = 0u32;
+    let mut at =
+        |recs: &mut Vec<(u64, Vec<u8>)>, ts: u64, bid: i64, ask: i64, trade: Option<(i64, u32)>| {
+            recs.push((ts, dbn_bytes(&quote_rec(ID, ts, px(bid), px(ask)))));
+            if let Some((c, size)) = trade {
+                seq += 1;
+                recs.push((
+                    ts + 1_000_000,
+                    dbn_bytes(&trade_rec(ID, ts + 1_000_000, px(c), size, seq)),
+                ));
+            }
+        };
+    let pre = open - 330 * 60 * SEC;
+    // The premarket: a quote every ten minutes and a first review before the open, which claims the bars.
+    for k in 0..30u64 {
+        at(
+            &mut recs,
+            pre + k * 600 * SEC,
+            1999,
+            2001,
+            if k == 2 { Some((2000, 10)) } else { None },
+        );
+    }
+    at(&mut recs, open - 10 * SEC, 1999, 2001, None);
+    at(&mut recs, open - 4 * SEC, 1999, 2001, None);
+    // The candle.
+    at(&mut recs, open + 10 * SEC, 1999, 2001, Some((2000, 600)));
+    at(&mut recs, open + 60 * SEC, 2049, 2051, Some((2050, 300)));
+    at(&mut recs, open + 120 * SEC, 1989, 1991, Some((1990, 100)));
+    at(&mut recs, open + 290 * SEC, 2029, 2031, Some((2030, 500)));
+    // It ends; the next trade closes the bar; the review five seconds after the end judges it.
+    at(&mut recs, open + 302 * SEC, 2029, 2031, Some((2030, 1)));
+    at(&mut recs, open + 310 * SEC, 2029, 2031, None);
+    at(&mut recs, open + 600 * SEC, 2049, 2051, None);
+    // 09:40: the break. The order goes out at the print and rests until the quote after it.
+    at(
+        &mut recs,
+        open + 600 * SEC + 1_000_000,
+        2049,
+        2051,
+        Some((2050, 10)),
+    );
+    at(&mut recs, open + 603 * SEC, 2049, 2051, None);
+    at(&mut recs, open + 660 * SEC, 2055, 2057, Some((2056, 10)));
+    if stops_out {
+        at(&mut recs, open + 900 * SEC, 2038, 2040, Some((2039, 10)));
+        at(&mut recs, open + 903 * SEC, 2037, 2039, None);
+        at(&mut recs, open + 960 * SEC, 2037, 2039, None);
+    } else {
+        // Holds above the stop to the close: a quote and a print every ten minutes.
+        for k in 1..39u64 {
+            let ts = open + 660 * SEC + k * 600 * SEC;
+            at(&mut recs, ts, 2055, 2057, Some((2056, 10)));
+        }
+        // 15:58 is 388 minutes after the open: a print after it sends the exit, a quote after that fills it.
+        at(
+            &mut recs,
+            open + 389 * 60 * SEC,
+            2055,
+            2057,
+            Some((2056, 10)),
+        );
+        at(&mut recs, open + 389 * 60 * SEC + 3 * SEC, 2054, 2056, None);
+    }
+    dbn_script(pre, &[(ID, "S00")], recs)
+}
+
+fn orb_run(
+    stops_out: bool,
+    p: tf_strategy::opening_range::OpeningRangeParams,
+    bars: bool,
+) -> crate::research::DayOutcome {
+    use crate::host::BarsConfig;
+    use crate::library::opening_range;
+    let open = OPENS[0].1 * SEC;
+    let root = scratch(if stops_out {
+        "orb-tape-stop"
+    } else {
+        "orb-tape-hold"
+    });
+    write_capture(&root, &orb_tape(open, stops_out));
+    let files: Vec<PathBuf> = tf_capture::list(&root)
+        .unwrap()
+        .iter()
+        .map(|e| root.join(&e.file))
+        .collect();
+    let defs =
+        [opening_range(1, "orb", tf_universe::Spec::parse(ORB_UNIVERSE).unwrap(), p).unwrap()];
+    let host = HostConfig {
+        bars: bars.then(|| BarsConfig {
+            mtf: tf_engine::MtfConfig::session(),
+            max_tracked: 8,
+        }),
+        ..host_cfg()
+    };
+    let input = DayInput {
+        files,
+        snapshot: orb_snapshot(),
+    };
+    let out = run_day(
+        "2026-05-01",
+        &input,
+        &setup(&host, &CostModel::published(), &defs),
+    )
+    .unwrap();
+    let _ = fs::remove_dir_all(&root);
+    out
+}
+
+#[test]
+fn the_opening_range_breakout_runs_through_the_host_buys_the_break_of_the_candles_high_and_is_stopped()
+ {
+    use tf_strategy::opening_range::OpeningRangeParams;
+    let p = OpeningRangeParams::default();
+    // Without the shared bars it has no candle to read: no trade.
+    let none = orb_run(true, p, false);
+    assert!(none.trips.is_empty(), "{:?}", none.anomalies);
+    let out = orb_run(true, p, true);
+    assert_eq!(out.trips.len(), 1, "{:?}", out.anomalies);
+    let t = &out.trips[0];
+    assert_eq!((t.symbol.as_str(), t.strategy, t.long), ("S00", 1, true));
+    // 1% of the 50,000 dollar budget is 500 over a stop of 0.10 (a tenth of the ATR): 5,000 shares, but a position holds 5% of the budget: 2,500 dollars, 121
+    // shares at the 20.50 level. It went out at the print of 09:40 and filled at the ask of the quote after it.
+    assert_eq!((t.qty, t.entry_reason), (121, 1));
+    assert_eq!(t.entry_px, 20_510_000_000);
+    let open = OPENS[0].1 * SEC;
+    assert!(
+        t.entry_ts >= open + 600 * SEC && t.entry_ts < open + 660 * SEC,
+        "{}",
+        t.entry_ts
+    );
+    // The print at 20.39 is through the stop at 20.40: the engine's stop sold at the bid of the quote standing when the order arrived (20.38).
+    assert_eq!(t.exit_reason, 0xE501);
+    assert_eq!(t.exit_px, 20_380_000_000);
+    assert!(!t.open_at_end);
+    assert_eq!(out.rejected + out.refused, 0);
+}
+
+#[test]
+fn the_opening_range_breakout_holds_a_winner_to_two_minutes_before_the_close() {
+    use tf_strategy::opening_range::OpeningRangeParams;
+    let out = orb_run(false, OpeningRangeParams::default(), true);
+    assert_eq!(out.trips.len(), 1, "{:?}", out.anomalies);
+    let t = &out.trips[0];
+    assert_eq!((t.qty, t.entry_px), (121, 20_510_000_000));
+    assert_eq!(t.exit_reason, 0xE503);
+    let close = (OPENS[0].1 + 390 * 60) * SEC;
+    assert!(
+        t.exit_ts >= close - 2 * 60 * SEC && t.exit_ts < close,
+        "{}",
+        t.exit_ts
+    );
+    assert!(!t.open_at_end);
+    assert!(t.exit_px > t.entry_px, "{} {}", t.entry_px, t.exit_px);
+}
+
 #[test]
 fn data_that_cannot_be_read_is_an_error_not_a_shorter_day() {
     let (host, cost, defs) = (host_cfg(), CostModel::published(), defs());

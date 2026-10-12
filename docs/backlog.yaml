@@ -1949,6 +1949,13 @@ epics:
         jira: TIC-169
         title: T01 opening range breakout on stocks in play (docs/research 1c)
         status: todo
+        progress: >-
+          ADR 0082. Done: `OpeningRange`, template `t01` (`tf-strategy::opening_range`, 13 parameters): the shared M5 or M15 bar that starts at the open is the candle, judged once
+          five seconds after it ends; relative volume against `vol_first5` (or the profile's first quarter hour for 15 minutes); the top `names` by ratio; a long on a green candle,
+          a short only in a name the asset list says is easy to borrow, none on a doji; an `EntryBook` trigger at the candle's high or low; size by the risk to the stop
+          (`Ctx::budget`), capped by the room and a share of the budget; the stop at a part of the ATR held by the engine, the time exit at 15:58. 29 tests from scripted events, a mutation run
+          (132 mutants, 86 killed, 43 compile errors, 3 survivors that are unreachable: a price of nothing), two host runs over a scripted tape, and `orb.set` with four variants (candle 5 or 15, stop 10 or 20
+          percent of the ATR). Not done: the bias filter of T02 (so four variants of the eight), the run over stored days (needs the minute history on the cluster) and the live exit question (E19-S58).
         deps: [E19-S02, E19-S03, E19-S04, E19-S05, E19-S16, E19-S48, E19-S49, E19-S50, E19-S51, E19-S52, E19-S54]
         ac:
           - The rule of docs/research/01-trend.md (5- or 15-minute opening range, opening relative volume at least 100% of its 14-day average and the top 20 by it, price above $5, average volume above a million shares, ATR above $0.50; stop order at the range, stop loss at 10% or 20% of ATR, exit at 15:58, 1% risk of the strategy's budget) is a cross strategy whose eight variants are parameters
@@ -2658,3 +2665,12 @@ epics:
         ac:
           - "scripts/pull_history.sh takes a start and end time of day (New York) for each day, the cost and size are asked of the metadata service for that window first, and the file says its window so a replay, the history manifest and verify do not take a half day for a whole one"
           - "A day pulled for a window and replayed runs the premarket strategies as a whole day would over that window, and names are stored as for a whole day"
+      - id: E19-S58
+        jira: TIC-213
+        title: "Regular-session exits: a broker-side stop leg and an exit the engine holds must not both stand on the same shares"
+        status: todo
+        deps: [E19-S05]
+        ac:
+          - "The decision is recorded (ADR): either the engine cancels the standing leg(s) before it sends its own closing order and waits for the cancel, or the leg is the stop and the engine holds only the time exit by cancelling the leg first, or the leg is placed far (a disaster stop) and the engine's stop is the rule's"
+          - "The simulator models the legs in the host when the strategy sends them, so a backtest of a regular-session strategy shows what the live path would do, and a test shows an engine exit refused while a leg stands and accepted after the cancel"
+          - "T01 and T04 use it and the reports say which stop closed each trade"

@@ -65,6 +65,9 @@ struct Breaker {
     disarm_results: Vec<bool>,
     disarm_all: Vec<InstrumentId>,
     disarm_all_results: Vec<u32>,
+    /// Clear the book at the review after the one that armed.
+    clear_at_second_review: bool,
+    cleared: Vec<u32>,
 }
 
 impl Breaker {
@@ -84,6 +87,8 @@ impl Breaker {
             disarm_results: Vec::new(),
             disarm_all: Vec::new(),
             disarm_all_results: Vec::new(),
+            clear_at_second_review: false,
+            cleared: Vec::new(),
         }
     }
 }
@@ -104,6 +109,9 @@ impl CrossStrategy for Breaker {
             }
             for id in self.disarm_all.clone() {
                 self.disarm_all_results.push(self.book.disarm_all(ctx, id));
+            }
+            if self.clear_at_second_review {
+                self.cleared.push(self.book.clear(ctx));
             }
         }
         if !self.armed && self.review_seconds > self.arm_at {
@@ -679,4 +687,30 @@ fn disarming_all_counts_both_sides() {
     r.quote(3);
     assert_eq!(r.b().disarm_all_results, [2, 0, 1]);
     assert!(r.b().book.is_empty());
+}
+
+#[test]
+fn clearing_drops_every_trigger_and_its_lapse() {
+    let t = EntryTrigger {
+        lapse_at: Some(PRE + 20 * SEC),
+        ..buy(1000)
+    };
+    let mut b = Breaker::new(vec![(0, t), (0, short(500)), (1, t)]);
+    b.clear_at_second_review = true;
+    let mut r = Rig::new(b, PRE);
+    r.quote(1);
+    r.quote(2);
+    r.quote(3);
+    assert_eq!(r.b().cleared, [3]);
+    assert!(r.b().book.is_empty());
+    r.trade(4, 0, 1200);
+    r.trade(4, 0, 400);
+    assert!(r.intents.is_empty());
+    r.quote(21);
+    r.quote(22);
+    assert!(
+        r.b().lapsed.is_empty(),
+        "the lapse timers went with the triggers"
+    );
+    assert_eq!(r.b().book.stats().disarmed, 0, "clearing is not disarming");
 }

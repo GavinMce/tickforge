@@ -18,6 +18,9 @@ pub struct RefInfo {
     /// Prior close, raw.
     pub price: Option<i64>,
     pub adv_shares: Option<i64>,
+    /// Whether the name is easy to borrow, from the asset list (E19-S54); unknown where the snapshot has no such column or value. A strategy
+    /// that sells short asks it.
+    pub easy_to_borrow: Option<bool>,
     /// What one-minute history says (E19-S04); unknown where the snapshot has no value.
     pub hist: HistInfo,
 }
@@ -58,6 +61,7 @@ impl RefInfo {
         RefInfo {
             price: row.price,
             adv_shares: row.adv_shares,
+            easy_to_borrow: row.easy_to_borrow,
             hist: HistInfo {
                 prev_high: row.prev_high,
                 prev_low: row.prev_low,

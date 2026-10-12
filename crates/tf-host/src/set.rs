@@ -25,6 +25,7 @@ use tf_core::Nanos;
 use tf_engine::{MtfConfig, PromoterConfig, ScannerConfig};
 use tf_risk::{Budgets, Limits};
 use tf_strategy::closing_reversal::ClosingReversalParams;
+use tf_strategy::opening_range::OpeningRangeParams;
 use tf_strategy::premarket_null::PremarketNullParams;
 use tf_strategy::premarket_pullback::PremarketPullbackParams;
 use tf_strategy::random_entries::RandomEntriesParams;
@@ -34,7 +35,8 @@ use tf_universe::Spec;
 use crate::def::{Route, StrategyDef};
 use crate::host::{BarsConfig, HostConfig};
 use crate::library::{
-    closing_reversal, premarket_null, premarket_pullback, random_entries, vwap_reclaim,
+    closing_reversal, opening_range, premarket_null, premarket_pullback, random_entries,
+    vwap_reclaim,
 };
 
 const HEADER: &str = "strategy set v1";
@@ -68,6 +70,7 @@ pub fn templates() -> Vec<(&'static str, String)> {
         ("t25", PremarketPullbackParams::default().render()),
         ("t26", PremarketNullParams::default().render()),
         ("t03", VwapReclaimParams::default().render()),
+        ("t01", OpeningRangeParams::default().render()),
     ]
 }
 
@@ -385,6 +388,13 @@ impl StrategySet {
                         VwapReclaimParams::parse(&s.params).map_err(|e| SetError(e.0))?,
                     )
                     .map_err(|e| SetError(e.0))?,
+                    "t01" => opening_range(
+                        s.id,
+                        &s.name,
+                        universe,
+                        OpeningRangeParams::parse(&s.params).map_err(|e| SetError(e.0))?,
+                    )
+                    .map_err(|e| SetError(e.0))?,
                     other => return Err(SetError(format!("`{other}` is not a template"))),
                 };
                 def.priority = s.priority;
@@ -520,6 +530,7 @@ fn parse_strategy(n: usize, w: &[&str]) -> Result<SetStrategy, SetError> {
         "t25" => PremarketPullbackParams::parse(&params).map(|_| ()),
         "t26" => PremarketNullParams::parse(&params).map(|_| ()),
         "t03" => VwapReclaimParams::parse(&params).map(|_| ()),
+        "t01" => OpeningRangeParams::parse(&params).map(|_| ()),
         _ => RandomEntriesParams::parse(&params).map(|_| ()),
     };
     check.map_err(|e| SetError(format!("line {n}: {}", e.0)))?;

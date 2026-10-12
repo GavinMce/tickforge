@@ -99,3 +99,4 @@ How:
 | [0080](0080-the-time-of-day-profile-is-quarter-hours-of-volume-and-a-sixty-minute-move-kept-with-each-days-sessions.md) | The time-of-day profile is quarter hours of volume and a sixty-minute move, kept with each day's sessions | Accepted |
 | [0081](0081-entry-triggers-the-strategy-holds-and-the-budget-a-strategy-can-read.md) | Entry triggers the strategy holds, and the budget a strategy can read | Accepted |
 | [0082](0082-the-opening-range-breakout-trades-the-first-candle-of-names-in-play-with-entries-and-exits-the-strategy-holds.md) | The opening range breakout trades the first candle of names in play, with entries and exits the strategy holds | Accepted |
+| [0083](0083-the-hourly-bias-is-the-last-hourly-close-against-an-ema-carried-from-the-snapshot-and-a-filter-asked-when-a-trigger-fires.md) | The hourly bias is the last hourly close against an EMA carried from the snapshot, and a filter asked when a trigger fires | Accepted |

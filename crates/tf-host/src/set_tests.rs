@@ -423,7 +423,7 @@ fn the_premarket_template_is_a_template_with_its_parameters_checked_when_the_set
 fn the_sets_the_cluster_is_deployed_with_read_and_build() {
     // The files of deploy/k8s/config, as the jobs read them: a typo in one is found here and not on the cluster.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/k8s/config");
-    for (file, strategies) in [("month.set", 4), ("premarket.set", 12), ("orb.set", 4)] {
+    for (file, strategies) in [("month.set", 4), ("premarket.set", 12), ("orb.set", 8)] {
         let (_, defs) =
             StrategySet::load(&dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert_eq!(defs.len(), strategies, "{file}");
@@ -438,22 +438,32 @@ fn the_sets_the_cluster_is_deployed_with_read_and_build() {
         defs.iter()
             .all(|d| d.name.starts_with("pm-") || d.name.starts_with("vwap-"))
     );
-    // The opening range breakout: four variants (the candle and the stop), and the set asks for the shared bars its strategies read.
+    // The opening range breakout: eight variants (the candle, the stop, and the hourly bias), and the set asks for the shared bars its strategies read.
     let (set, defs) = StrategySet::load(&dir.join("orb.set")).unwrap();
     assert!(set.bars.is_some_and(|n| n >= 1_000), "{:?}", set.bars);
     let mut params: Vec<&str> = defs.iter().map(|d| d.params.as_str()).collect();
     params.sort_unstable();
     params.dedup();
-    assert_eq!(params.len(), 4);
+    assert_eq!(params.len(), 8);
     assert!(defs.iter().all(|d| d.name.starts_with("orb-")));
     assert_eq!(
         defs.iter()
             .map(|d| (
                 d.params.contains("range_minutes=15"),
-                d.params.contains("stop_atr_pct=20")
+                d.params.contains("stop_atr_pct=20"),
+                d.params.contains("bias=1")
             ))
             .collect::<Vec<_>>(),
-        [(false, false), (false, true), (true, false), (true, true)]
+        [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (true, true, true)
+        ]
     );
 }
 

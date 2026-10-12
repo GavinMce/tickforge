@@ -28,6 +28,7 @@ pub mod closing_reversal;
 pub mod cross;
 pub mod entries;
 pub mod exits;
+pub mod hourly_bias;
 pub mod intent;
 pub mod lifecycle;
 pub mod momentum;
@@ -89,6 +90,8 @@ mod cross_tests;
 mod entries_tests;
 #[cfg(test)]
 mod exits_tests;
+#[cfg(test)]
+mod hourly_bias_tests;
 #[cfg(test)]
 mod momentum_tests;
 #[cfg(test)]

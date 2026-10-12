@@ -1500,10 +1500,15 @@ const ORB_UNIVERSE: &str =
 
 fn orb_snapshot() -> tf_universe::Snapshot {
     let mut text = String::from(
-        "# as_of 2026-04-30\nsymbol,price,adv_shares,easy_to_borrow,atr14,vol_first5\n",
+        "# as_of 2026-04-30\nsymbol,price,adv_shares,easy_to_borrow,atr14,vol_first5,ema100h_state,ema100h_count\n",
     );
+    // The hourly average is $20.00 over a hundred closes: the state is the price in raw units shifted left sixteen bits.
+    let ema_state = 20_000_000_000i64 << 16;
     for i in 0..SYMBOLS {
-        text.push_str(&format!("S{i:02},20.00,{},yes,1.00,1000\n", (i + 1) * 100));
+        text.push_str(&format!(
+            "S{i:02},20.00,{},yes,1.00,1000,{ema_state},100\n",
+            (i + 1) * 100
+        ));
     }
     tf_universe::Snapshot::parse(&text).unwrap()
 }
@@ -1511,7 +1516,7 @@ fn orb_snapshot() -> tf_universe::Snapshot {
 /// S00 is quiet in the premarket, then trades the first five minutes of the session: opens at $20.00, reaches $20.50 and $19.90, closes at $20.30 on 1,500
 /// shares (150% of the 1,000 normal), and a share at 09:35:02 closes the candle's bar. At 09:40 it trades through the high at $20.50. After that
 /// it either falls through the stop ($20.40, a tenth of the $1.00 ATR under the high) at 09:45, or holds above it to the close.
-fn orb_tape(open: u64, stops_out: bool) -> Vec<u8> {
+fn orb_tape(open: u64, stops_out: bool, late: Option<i64>) -> Vec<u8> {
     use crate::replay_tests::{dbn_script, quote_rec, trade_rec};
     const ID: u32 = 20_000;
     let px = |c: i64| c * 10_000_000;
@@ -1550,16 +1555,34 @@ fn orb_tape(open: u64, stops_out: bool) -> Vec<u8> {
     at(&mut recs, open + 302 * SEC, 2029, 2031, Some((2030, 1)));
     at(&mut recs, open + 310 * SEC, 2029, 2031, None);
     at(&mut recs, open + 600 * SEC, 2049, 2051, None);
-    // 09:40: the break. The order goes out at the print and rests until the quote after it.
+    // The break is at 09:40, or (`late`) after the first hourly close, which is the print `late` cents at 10:20.
+    let break_at = if late.is_some() { 3_900 } else { 600 };
+    if let Some(close) = late {
+        at(&mut recs, open + 1_200 * SEC, 2029, 2031, Some((2030, 10)));
+        at(
+            &mut recs,
+            open + 3_000 * SEC,
+            close - 1,
+            close + 1,
+            Some((close, 10)),
+        );
+    }
+    // The break. The order goes out at the print and rests until the quote after it.
     at(
         &mut recs,
-        open + 600 * SEC + 1_000_000,
+        open + break_at * SEC + 1_000_000,
         2049,
         2051,
         Some((2050, 10)),
     );
-    at(&mut recs, open + 603 * SEC, 2049, 2051, None);
-    at(&mut recs, open + 660 * SEC, 2055, 2057, Some((2056, 10)));
+    at(&mut recs, open + (break_at + 3) * SEC, 2049, 2051, None);
+    at(
+        &mut recs,
+        open + (break_at + 60) * SEC,
+        2055,
+        2057,
+        Some((2056, 10)),
+    );
     if stops_out {
         at(&mut recs, open + 900 * SEC, 2038, 2040, Some((2039, 10)));
         at(&mut recs, open + 903 * SEC, 2037, 2039, None);
@@ -1567,7 +1590,7 @@ fn orb_tape(open: u64, stops_out: bool) -> Vec<u8> {
     } else {
         // Holds above the stop to the close: a quote and a print every ten minutes.
         for k in 1..39u64 {
-            let ts = open + 660 * SEC + k * 600 * SEC;
+            let ts = open + (break_at + 60) * SEC + k * 600 * SEC;
             at(&mut recs, ts, 2055, 2057, Some((2056, 10)));
         }
         // 15:58 is 388 minutes after the open: a print after it sends the exit, a quote after that fills it.
@@ -1588,15 +1611,23 @@ fn orb_run(
     p: tf_strategy::opening_range::OpeningRangeParams,
     bars: bool,
 ) -> crate::research::DayOutcome {
+    orb_run_late(stops_out, None, p, bars)
+}
+
+fn orb_run_late(
+    stops_out: bool,
+    late: Option<i64>,
+    p: tf_strategy::opening_range::OpeningRangeParams,
+    bars: bool,
+) -> crate::research::DayOutcome {
     use crate::host::BarsConfig;
     use crate::library::opening_range;
     let open = OPENS[0].1 * SEC;
-    let root = scratch(if stops_out {
-        "orb-tape-stop"
-    } else {
-        "orb-tape-hold"
-    });
-    write_capture(&root, &orb_tape(open, stops_out));
+    // One directory a run: tests run side by side in one process, and a name shared would be one capture written by two.
+    static RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = scratch(&format!("orb-tape-{run}"));
+    write_capture(&root, &orb_tape(open, stops_out, late));
     let files: Vec<PathBuf> = tf_capture::list(&root)
         .unwrap()
         .iter()
@@ -1652,6 +1683,40 @@ fn the_opening_range_breakout_runs_through_the_host_buys_the_break_of_the_candle
     assert_eq!(t.exit_px, 20_380_000_000);
     assert!(!t.open_at_end);
     assert_eq!(out.rejected + out.refused, 0);
+}
+
+#[test]
+fn the_opening_range_breakout_with_the_hourly_bias_trades_only_the_break_that_goes_with_it() {
+    use tf_strategy::opening_range::OpeningRangeParams;
+    let on = OpeningRangeParams {
+        bias: 1,
+        ..OpeningRangeParams::default()
+    };
+    // The break at 09:40 comes before the first hourly close: no bias, no trade. The same tape without the filter trades.
+    let early = orb_run(false, on, true);
+    assert!(early.trips.is_empty(), "{:?}", early.anomalies);
+    assert_eq!(
+        orb_run(false, OpeningRangeParams::default(), true)
+            .trips
+            .len(),
+        1
+    );
+    // The break at 10:35, after the first hourly close: the hour closed at $20.40, over the $20.00 average, so the long goes; at $19.60 it does not.
+    let up = orb_run_late(false, Some(2040), on, true);
+    assert_eq!(up.trips.len(), 1, "{:?}", up.anomalies);
+    let t = &up.trips[0];
+    assert_eq!((t.symbol.as_str(), t.strategy, t.long), ("S00", 1, true));
+    let open = OPENS[0].1 * SEC;
+    assert!(
+        t.entry_ts >= open + 3_900 * SEC && t.entry_ts < open + 3_960 * SEC,
+        "{}",
+        t.entry_ts
+    );
+    let down = orb_run_late(false, Some(1960), on, true);
+    assert!(down.trips.is_empty(), "{:?}", down.anomalies);
+    // The unfiltered strategy takes the same late break whichever way the hour closed.
+    let off = OpeningRangeParams::default();
+    assert_eq!(orb_run_late(false, Some(1960), off, true).trips.len(), 1);
 }
 
 #[test]
